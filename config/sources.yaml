@@ -1,10 +1,20 @@
 # Every feed Watchfloor reads. Adding a source is a config edit, never a code change.
+# Validated by src/sources/load.ts at startup; a bad entry stops the process.
 #
-#   id            unique, stable, kebab-case
+# Required — every one of these, on every source:
+#
+#   id            unique, stable, kebab-case ([a-z0-9] then [a-z0-9-])
+#   name          human-readable label, shown in the UI and source-health page
 #   type          rss | atom | json | github_search | api | market_data
+#   url           absolute feed URL
 #   beats         one or more of: ai, cyber, aisec, repos, markets, usnews
 #   weight        0.1–2.0 trust multiplier
 #   poll_interval e.g. 15m, 6h, 1d
+#   enabled       true | false — false keeps the entry but stops polling it
+#
+# Optional:
+#
+#   filters       free-form map, interpreted per source type
 #   tier          markets sources only: event | analysis
 sources:
   - id: cisa-kev
