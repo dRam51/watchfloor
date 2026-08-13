@@ -37,7 +37,13 @@ export class InvalidTimestampError extends Error {
   }
 }
 
-function assertCanonicalTimestamp(field: string, value: string): void {
+/**
+ * Exported because every writer of a lexicographically-compared timestamp must
+ * validate through this one predicate, not a private copy of it. In particular
+ * the M6 retention job, which writes `retention_horizon.oldest_intact_fetched_at`,
+ * must call this before storing — see the read-side guard in `getItemAsOf`.
+ */
+export function assertCanonicalTimestamp(field: string, value: string): void {
   if (!CANONICAL_TIMESTAMP.test(value)) {
     throw new InvalidTimestampError(field, value);
   }
@@ -72,6 +78,18 @@ export function deriveItemKey(canonicalUrl: string): string {
   return createHash('sha256').update(canonicalUrl).digest('hex');
 }
 
+/**
+ * Appends a new version of an item.
+ *
+ * **Contract for feed adapters (M1 onward).** `publishedAt` and `fetchedAt`
+ * must already be normalized to `YYYY-MM-DDTHH:mm:ss.sssZ` before this is
+ * called; anything else throws {@link InvalidTimestampError}. This rejects
+ * rather than coerces, deliberately: silently rewriting a caller's timestamp
+ * would mask a genuinely broken feed, and because `items` is append-only
+ * (trigger-enforced), a malformed value written once is permanently
+ * uncorrectable. Normalize at the adapter boundary, where the source's own
+ * format is still known — not here, where it is guesswork.
+ */
 export function insertItem(db: Db, item: NewItem): Item {
   assertCanonicalTimestamp('fetchedAt', item.fetchedAt);
   if (item.publishedAt !== null) assertCanonicalTimestamp('publishedAt', item.publishedAt);
@@ -207,8 +225,24 @@ export function getItemAsOf(db: Db, itemKey: string, asOf: string): Item | null 
   const horizon = db.prepare('select oldest_intact_fetched_at from retention_horizon where id = 1').get() as
     | { oldest_intact_fetched_at: string }
     | undefined;
-  if (horizon && asOf < horizon.oldest_intact_fetched_at) {
-    throw new RetentionHorizonError(asOf, horizon.oldest_intact_fetched_at);
+  if (horizon) {
+    // The horizon is compared lexicographically against an already-validated
+    // asOf, so it has to share the exact same fixed-width shape or the
+    // comparison means nothing. Both failure modes are silent and wrong:
+    // a second-precision horizon ('2026-08-11T00:00:00Z', which is what
+    // strftime or .slice(0,19)+'Z' produces) makes an asOf exactly *at* the
+    // horizon throw, because '.' sorts before 'Z'; and a horizon carrying a
+    // non-UTC offset compares as later than it truly is, quietly returning
+    // thinned history. The M6 retention job is required to validate before
+    // writing (see assertCanonicalTimestamp); this is the read-side backstop
+    // for a value that got in some other way. Fail loudly either way.
+    assertCanonicalTimestamp(
+      'retention_horizon.oldest_intact_fetched_at',
+      horizon.oldest_intact_fetched_at,
+    );
+    if (asOf < horizon.oldest_intact_fetched_at) {
+      throw new RetentionHorizonError(asOf, horizon.oldest_intact_fetched_at);
+    }
   }
 
   const row = db

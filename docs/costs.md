@@ -19,6 +19,23 @@ introductory price, and is disqualified from the default path.
 | `ollama-local` | Ollama local inference | free-forever | — | local hardware | queues locally; no charge possible |
 | `anthropic-api` | Anthropic API (enrichment) | paid | `WF_ALLOW_PAID_ANTHROPIC` | per account | hard-disabled without the flag |
 
+## Before the first paid integration
+
+The zero-flag test in `tests/cost/gate.test.ts` proves only that
+`isPaidAllowed()` returns **false when it is called**. It does **not** prove
+that no code path can reach a paid service — a client that simply never
+consults the gate would sail past it. Today the gap is inert: there are no
+paid clients in `src/` at all. It stops being inert the moment one lands.
+
+Before or alongside the first real paid client, ship **one** of:
+
+- **(a)** a check that every module importing a paid-classified client also
+  calls the gate before any request; or
+- **(b)** an integration test that stubs the network layer and asserts **zero
+  requests fire** with the flag unset.
+
+This must not ship without one of the two.
+
 ## The complete set of ways this system can spend money
 
 ```bash

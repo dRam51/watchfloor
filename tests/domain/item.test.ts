@@ -182,6 +182,45 @@ describe('timestamp validation', () => {
     );
   });
 
+  it('rejects a second-precision retention horizon rather than mis-comparing against it', () => {
+    const db = migratedDb();
+    const v1 = insertItem(db, draft({ fetchedAt: '2026-08-11T00:00:00.000Z' }));
+    // What strftime or `.slice(0, 19) + 'Z'` produces. Unvalidated, an asOf
+    // exactly at the horizon compares as *before* it ('.' < 'Z'), so the one
+    // instant the horizon promises is answerable throws instead.
+    db.prepare(
+      `insert into retention_horizon (id, oldest_intact_fetched_at, updated_at)
+       values (1, '2026-08-11T00:00:00Z', '2026-08-12T00:00:00.000Z')`,
+    ).run();
+
+    expect(() => getItemAsOf(db, v1.item_key, '2026-08-11T00:00:00.000Z')).toThrow(
+      InvalidTimestampError,
+    );
+  });
+
+  it('rejects a non-UTC-offset retention horizon rather than silently thinning history', () => {
+    const db = migratedDb();
+    const v1 = insertItem(db, draft({ fetchedAt: '2026-08-11T00:00:00.000Z' }));
+    // The worse half: '2026-08-11T00:00:00.000-05:00' is really 05:00Z, but
+    // sorts *below* every 'T0...Z' value, so the horizon check passes and the
+    // read returns data the horizon says is no longer intact — no error, no
+    // signal, just quietly thinned history.
+    db.prepare(
+      `insert into retention_horizon (id, oldest_intact_fetched_at, updated_at)
+       values (1, '2026-08-11T00:00:00.000-05:00', '2026-08-12T00:00:00.000Z')`,
+    ).run();
+
+    let threw: unknown;
+    try {
+      getItemAsOf(db, v1.item_key, '2026-08-11T00:00:00.000Z');
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw, 'a malformed horizon must fail loudly, not return a row').toBeInstanceOf(
+      InvalidTimestampError,
+    );
+  });
+
   it('rejects a non-canonical asOf, closing the lookahead leak at the read path', () => {
     const db = migratedDb();
     const v1 = insertItem(db, draft({ fetchedAt: '2026-08-12T00:00:00.500Z' }));
