@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import {
   isAllowed,
   fetchRobots,
+  stripLeadingBom,
   RobotsUnavailableError,
+  RobotsHostMismatchError,
   PRODUCT_TOKEN,
 } from '../../src/fetch/robots.ts';
 // Fix round 1, Finding 4: import the real USER_AGENT directly from http.ts
@@ -29,6 +31,15 @@ function loadFixture(name: string): string {
 const AP_ROBOTS_TXT = loadFixture('apnews.robots.txt');
 const REUTERS_ROBOTS_TXT = loadFixture('reuters.robots.txt');
 
+// Fix round 2: isAllowed now requires the origin whose robots.txt is being
+// evaluated, so it can refuse to check a path against the wrong file (see
+// RobotsHostMismatchError). These match the real hosts each fixture was
+// fetched from; EXAMPLE_ORIGIN is an arbitrary placeholder used only by the
+// synthetic-fixture tests below, none of which test cross-origin behaviour.
+const AP_ORIGIN = 'https://apnews.com';
+const REUTERS_ORIGIN = 'https://www.reuters.com';
+const EXAMPLE_ORIGIN = 'https://example.com';
+
 describe('isAllowed', () => {
   describe('AP (apnews.com) -- permissive-with-exceptions shape', () => {
     // Real shape (verified 2026-08-13): `User-Agent: *` opens with a bare,
@@ -38,27 +49,27 @@ describe('isAllowed', () => {
     // crawlers (CCBot, GPTBot, anthropic-ai, ClaudeBot, and others).
 
     it('allows the declared news sitemap', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/news-sitemap-content.xml')).toBe(true);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/news-sitemap-content.xml', AP_ORIGIN)).toBe(true);
     });
 
     it('denies an .rss path via the /*.rss wildcard', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/some-article.rss')).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/some-article.rss', AP_ORIGIN)).toBe(false);
     });
 
     it('denies the JSON feed API prefix', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/api/v2/feed/anything')).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/api/v2/feed/anything', AP_ORIGIN)).toBe(false);
     });
 
     it('allows an ordinary article path', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/whatever')).toBe(true);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/whatever', AP_ORIGIN)).toBe(true);
     });
 
     it.each(['ClaudeBot', 'GPTBot', 'CCBot', 'anthropic-ai'])(
       'denies %s everything, via its own named group',
       (namedAgent) => {
-        expect(isAllowed(AP_ROBOTS_TXT, namedAgent, '/')).toBe(false);
-        expect(isAllowed(AP_ROBOTS_TXT, namedAgent, '/article/whatever')).toBe(false);
-        expect(isAllowed(AP_ROBOTS_TXT, namedAgent, '/news-sitemap-content.xml')).toBe(false);
+        expect(isAllowed(AP_ROBOTS_TXT, namedAgent, '/', AP_ORIGIN)).toBe(false);
+        expect(isAllowed(AP_ROBOTS_TXT, namedAgent, '/article/whatever', AP_ORIGIN)).toBe(false);
+        expect(isAllowed(AP_ROBOTS_TXT, namedAgent, '/news-sitemap-content.xml', AP_ORIGIN)).toBe(false);
       },
     );
 
@@ -66,8 +77,8 @@ describe('isAllowed', () => {
       // These two files encode genuinely different rules for different
       // agents -- proving this on the SAME path is what would catch the
       // rules being conflated.
-      expect(isAllowed(AP_ROBOTS_TXT, 'ClaudeBot', '/article/whatever')).toBe(false);
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/whatever')).toBe(true);
+      expect(isAllowed(AP_ROBOTS_TXT, 'ClaudeBot', '/article/whatever', AP_ORIGIN)).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/whatever', AP_ORIGIN)).toBe(true);
     });
 
     // Fix round 1, bundled minor: the previous test here ("a Sitemap:
@@ -91,17 +102,17 @@ describe('isAllowed', () => {
     // is the catch-all every unnamed agent (including watchfloor) falls to.
 
     it('denies the root path', () => {
-      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/')).toBe(false);
+      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/', REUTERS_ORIGIN)).toBe(false);
     });
 
     it('denies an arbitrary article path', () => {
-      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/world/uk/example-story-2026-08-13/')).toBe(
-        false,
-      );
+      expect(
+        isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/world/uk/example-story-2026-08-13/', REUTERS_ORIGIN),
+      ).toBe(false);
     });
 
     it('allows /plus/ paths -- the more specific Allow beats the broader Disallow', () => {
-      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/plus/something')).toBe(true);
+      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/plus/something', REUTERS_ORIGIN)).toBe(true);
     });
 
     it('a Sitemap: directive does not rescue a path the matching group denies', () => {
@@ -110,22 +121,91 @@ describe('isAllowed', () => {
       // still applies to watchfloor despite the operator listing it as a
       // sitemap for OTHER (allowlisted) crawlers to read.
       expect(
-        isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/arc/outboundfeeds/sitemap-index/'),
+        isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/arc/outboundfeeds/sitemap-index/', REUTERS_ORIGIN),
       ).toBe(false);
     });
 
     it('allows an allowlisted agent (Googlebot) where watchfloor is denied the identical path', () => {
       const path = '/world/uk/example-story-2026-08-13/';
-      expect(isAllowed(REUTERS_ROBOTS_TXT, 'Googlebot', path)).toBe(true);
-      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, path)).toBe(false);
+      expect(isAllowed(REUTERS_ROBOTS_TXT, 'Googlebot', path, REUTERS_ORIGIN)).toBe(true);
+      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, path, REUTERS_ORIGIN)).toBe(false);
+    });
+  });
+
+  describe('origin validation -- path must never be checked against the wrong host (fix round 2, Finding 1a/1b/1c)', () => {
+    // Round 1 added support for a full URL and a bare relative path in
+    // `path`, but validated neither against which host the `robotsTxt`
+    // being checked actually belongs to, and stripped the fragment only on
+    // the full-URL branch. All three gaps landed wrongly-ALLOWED -- the one
+    // direction this module exists to prevent -- and are closed together by
+    // resolving `path` against the required `origin` argument and
+    // validating the resolved host against it (see normalizePath's doc
+    // comment for the full mechanism).
+
+    it('Finding 1a: throws rather than silently checking a path against the WRONG host\'s robots.txt', () => {
+      // Ground truth, for contrast (also proven independently above):
+      // Reuters denies this path under its OWN robots.txt.
+      expect(
+        isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/world/uk/example-story-2026-08-13/', REUTERS_ORIGIN),
+      ).toBe(false);
+
+      // The bug: the IDENTICAL Reuters URL, checked against AP's robots.txt
+      // (the wrong file for this URL), used to come back allowed -- AP's
+      // rules simply never mention a Reuters path, so "no rule matched"
+      // silently defaulted to allow, overriding what Reuters itself says.
+      // Checking the wrong file must never produce ANY answer -- right or
+      // wrong -- it must fail loudly instead of guessing.
+      expect(() =>
+        isAllowed(
+          AP_ROBOTS_TXT,
+          PRODUCT_TOKEN,
+          'https://www.reuters.com/world/uk/example-story-2026-08-13/',
+          AP_ORIGIN,
+        ),
+      ).toThrow(RobotsHostMismatchError);
+    });
+
+    it('Finding 1b: a protocol-relative reference to the SAME host resolves and is correctly denied', () => {
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '//apnews.com/api/v2/feed/x', AP_ORIGIN)).toBe(false);
+    });
+
+    it('the trap named in fix round 2: a protocol-relative reference to a DIFFERENT host still throws, not just a full URL', () => {
+      // Resolving //evil.test/x against a THROWAWAY/placeholder base would
+      // silently produce a real, wrong-host URL with no check at all --
+      // reintroducing Finding 1a through the back door. Resolving against
+      // the REAL expected origin, then validating the resolved origin
+      // against it, closes both 1a and 1b together.
+      expect(() => isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '//evil.test/x', AP_ORIGIN)).toThrow(
+        RobotsHostMismatchError,
+      );
+    });
+
+    it('Finding 1c: the fragment is stripped uniformly, including on the plain-path branch', () => {
+      const txt = ['User-agent: *', 'Disallow: /a$'].join('\n');
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/a', EXAMPLE_ORIGIN)).toBe(false);
+      // Previously true (wrongly allowed): the $-anchor correctly denies
+      // exactly "/a", but the plain-path branch used to pass "/a#frag"
+      // through unmodified, and "/a#frag" does not match ^/a$.
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/a#frag', EXAMPLE_ORIGIN)).toBe(false);
+    });
+
+    it('the thrown error names both the expected and the actual (mismatched) origin', () => {
+      try {
+        isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://www.reuters.com/x', AP_ORIGIN);
+        expect.unreachable('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(RobotsHostMismatchError);
+        expect((e as RobotsHostMismatchError).expectedOrigin).toBe('https://apnews.com');
+        expect((e as RobotsHostMismatchError).actualOrigin).toBe('https://www.reuters.com');
+      }
     });
   });
 
   describe('group selection and matching mechanics (synthetic fixtures)', () => {
     it('the longest matching pattern wins regardless of file order', () => {
       const txt = ['User-agent: *', 'Disallow: /downloads', 'Allow: /downloads/free'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/free/report.pdf')).toBe(true);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/paid/report.pdf')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/free/report.pdf', EXAMPLE_ORIGIN)).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/paid/report.pdf', EXAMPLE_ORIGIN)).toBe(false);
     });
 
     it('the longest matching pattern still wins when the shorter, denying rule comes LAST in the file', () => {
@@ -137,70 +217,70 @@ describe('isAllowed', () => {
       // longer pattern isolates "file order" from "pattern length": only an
       // implementation that genuinely compares lengths gets this right.
       const txt = ['User-agent: *', 'Allow: /downloads/free', 'Disallow: /downloads'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/free/report.pdf')).toBe(true);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/paid/report.pdf')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/free/report.pdf', EXAMPLE_ORIGIN)).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/paid/report.pdf', EXAMPLE_ORIGIN)).toBe(false);
     });
 
     it('a tie in match length resolves to Allow', () => {
       const txt = ['User-agent: *', 'Disallow: /docs', 'Allow: /docs'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/docs')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/docs', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('* matches any run of characters within a path', () => {
       const txt = ['User-agent: *', 'Disallow: /files/*/private'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/2026/private')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/anything-at-all/private')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/2026/public')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/2026/private', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/anything-at-all/private', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/2026/public', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('$ anchors a pattern to the end of the path', () => {
       const txt = ['User-agent: *', 'Disallow: /file$'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/file')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/filename')).toBe(true);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/file/nested')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/file', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/filename', EXAMPLE_ORIGIN)).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/file/nested', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('directive field names are matched case-insensitively', () => {
       const txt = ['USER-AGENT: *', 'DISALLOW: /private'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/private/data')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/public')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private/data', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/public', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('user-agent values are matched case-insensitively', () => {
       const txt = ['User-agent: GPTBot', 'Disallow: /'].join('\n');
-      expect(isAllowed(txt, 'gptbot', '/anything')).toBe(false);
-      expect(isAllowed(txt, 'GPTBOT', '/anything')).toBe(false);
-      expect(isAllowed(txt, 'GptBot', '/anything')).toBe(false);
+      expect(isAllowed(txt, 'gptbot', '/anything', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, 'GPTBOT', '/anything', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, 'GptBot', '/anything', EXAMPLE_ORIGIN)).toBe(false);
     });
 
     it('paths remain case-sensitive, unlike user-agents and directive names', () => {
       const txt = ['User-agent: *', 'Disallow: /Private'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/Private/data')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/private/data')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/Private/data', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private/data', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('an unknown agent falls back to the * group', () => {
       const txt = ['User-agent: SomeOtherBot', 'Disallow: /x', '', 'User-agent: *', 'Disallow: /y'].join(
         '\n',
       );
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/y/anything')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/x/anything')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/y/anything', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/x/anything', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('no matching group at all (named agent only, no *) resolves to allow', () => {
       const txt = ['User-agent: Googlebot', 'Disallow: /'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/anything')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/anything', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('an empty robots.txt resolves to allow', () => {
-      expect(isAllowed('', PRODUCT_TOKEN, '/anything')).toBe(true);
+      expect(isAllowed('', PRODUCT_TOKEN, '/anything', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('consecutive User-agent lines share one group and its rules', () => {
       const txt = ['User-agent: AgentA', 'User-agent: AgentB', 'Disallow: /shared'].join('\n');
-      expect(isAllowed(txt, 'AgentA', '/shared/x')).toBe(false);
-      expect(isAllowed(txt, 'AgentB', '/shared/x')).toBe(false);
-      expect(isAllowed(txt, 'AgentA', '/other')).toBe(true);
+      expect(isAllowed(txt, 'AgentA', '/shared/x', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, 'AgentB', '/shared/x', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, 'AgentA', '/other', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('a Sitemap line between two groups does not merge them', () => {
@@ -211,23 +291,23 @@ describe('isAllowed', () => {
         'User-agent: AgentB',
         'Disallow: /b',
       ].join('\n');
-      expect(isAllowed(txt, 'AgentA', '/a')).toBe(false);
-      expect(isAllowed(txt, 'AgentA', '/b')).toBe(true);
-      expect(isAllowed(txt, 'AgentB', '/b')).toBe(false);
-      expect(isAllowed(txt, 'AgentB', '/a')).toBe(true);
+      expect(isAllowed(txt, 'AgentA', '/a', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, 'AgentA', '/b', EXAMPLE_ORIGIN)).toBe(true);
+      expect(isAllowed(txt, 'AgentB', '/b', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, 'AgentB', '/a', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('a malformed line (no colon) is skipped rather than throwing', () => {
       const txt = ['User-agent: *', 'this is not a directive', 'Disallow: /private'].join('\n');
-      expect(() => isAllowed(txt, PRODUCT_TOKEN, '/private')).not.toThrow();
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/private')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/public')).toBe(true);
+      expect(() => isAllowed(txt, PRODUCT_TOKEN, '/private', EXAMPLE_ORIGIN)).not.toThrow();
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/public', EXAMPLE_ORIGIN)).toBe(true);
     });
 
     it('a rule line before any User-agent line is ignored', () => {
       const txt = ['Disallow: /orphan', 'User-agent: *', 'Disallow: /private'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/orphan')).toBe(true);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/private')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/orphan', EXAMPLE_ORIGIN)).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private', EXAMPLE_ORIGIN)).toBe(false);
     });
 
     it('combines rules from multiple separate * groups rather than using only the first', () => {
@@ -239,26 +319,27 @@ describe('isAllowed', () => {
       // rules), and the failure direction is exactly the wrong one for a
       // safety gate: a real Disallow present in the file was being ignored.
       const txt = ['User-agent: *', 'Disallow: /a', '', 'User-agent: *', 'Disallow: /b'].join('\n');
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/a')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/b')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/a', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/b', EXAMPLE_ORIGIN)).toBe(false);
     });
 
-    it('a leading BOM does not corrupt the first field and silently drop every rule', () => {
+    it('a leading BOM does not corrupt the first field and silently drop every rule (integration-level check)', () => {
       // Fix round 1, bundled minor: a leading U+FEFF (byte-order mark),
       // occasionally emitted by the tools that generate or hand-edit a
       // robots.txt, would otherwise corrupt the FIRST field name on the
-      // first line -- a raw "\uFEFFUser-agent" is not the same string as
-      // plain "user-agent" -- so no group ever gets started, so every
-      // following rule has nothing to attach to: parseGroups silently
-      // returns zero groups and isAllowed allows everything, a whole-file
-      // fail-open. This previously worked only as a side effect of
-      // String.prototype.trim() treating U+FEFF as whitespace, which was
-      // never stated or pinned -- parseGroups now strips it explicitly
-      // (see its doc comment) so the behavior survives a future change to
-      // how lines are split or trimmed.
+      // first line, so no group ever gets started, so every following rule
+      // has nothing to attach to: parseGroups silently returns zero groups
+      // and isAllowed allows everything, a whole-file fail-open.
+      //
+      // This is an INTEGRATION-level regression guard, not a pin on the
+      // explicit-strip mechanism itself -- fix round 2 established that no
+      // isAllowed-level input can distinguish "the explicit strip ran" from
+      // "it didn't, and .trim() covered for it anyway", since per-line
+      // trim() already produces the identical result. The direct,
+      // mechanism-level test is stripLeadingBom's own describe block below.
       const txt = '\uFEFF' + 'User-agent: *\nDisallow: /private\n';
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/private')).toBe(false);
-      expect(isAllowed(txt, PRODUCT_TOKEN, '/public')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private', EXAMPLE_ORIGIN)).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/public', EXAMPLE_ORIGIN)).toBe(true);
     });
   });
 
@@ -273,7 +354,7 @@ describe('isAllowed', () => {
     // query string being present.
 
     it('matches against the query string when the caller includes it', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/search?q=ukraine')).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/search?q=ukraine', AP_ORIGIN)).toBe(false);
     });
 
     it('a bare pathname with no query is correctly allowed -- not a bug: isAllowed cannot recover a query the caller never gave it', () => {
@@ -285,30 +366,72 @@ describe('isAllowed', () => {
       // is a caller-side information loss no gate can recover from, which
       // is exactly why the contract has to be stated, not just patched
       // around.
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/search')).toBe(true);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/search', AP_ORIGIN)).toBe(true);
     });
 
     it('still matches a wildcard-prefixed query pattern', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/x?prx_t=a')).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/x?prx_t=a', AP_ORIGIN)).toBe(false);
     });
 
     it('accepts a full absolute URL, normalizing to pathname + search', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/some-article.rss')).toBe(false);
+      expect(
+        isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/some-article.rss', AP_ORIGIN),
+      ).toBe(false);
     });
 
     it('accepts a path missing its leading slash', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'some-article.rss')).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'some-article.rss', AP_ORIGIN)).toBe(false);
     });
 
     it('a full URL carries its query string through normalization too', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/search?q=ukraine')).toBe(false);
+      expect(
+        isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/search?q=ukraine', AP_ORIGIN),
+      ).toBe(false);
     });
 
     it('a full URL drops its fragment, which robots.txt patterns never see', () => {
       expect(
-        isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/article/whatever#section'),
+        isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/article/whatever#section', AP_ORIGIN),
       ).toBe(true);
     });
+  });
+});
+
+describe('stripLeadingBom (exported so this can be pinned directly -- see its doc comment for why isAllowed alone cannot)', () => {
+  it('removes a single leading BOM', () => {
+    expect(stripLeadingBom('\uFEFFUser-agent: *')).toBe('User-agent: *');
+  });
+
+  it('leaves a string with no leading BOM unchanged', () => {
+    expect(stripLeadingBom('User-agent: *')).toBe('User-agent: *');
+  });
+
+  it('removes only ONE leading BOM, not a repeated one', () => {
+    expect(stripLeadingBom('\uFEFF\uFEFFUser-agent: *')).toBe('\uFEFFUser-agent: *');
+  });
+
+  it('does nothing to a BOM that is not at the very start of the string', () => {
+    expect(stripLeadingBom('User-agent: *\uFEFF')).toBe('User-agent: *\uFEFF');
+  });
+});
+
+describe('PRODUCT_TOKEN', () => {
+  // Fix round 2, bundled minor: PRODUCT_TOKEN was used dozens of times
+  // across this file and asserted on zero of them -- correct today only
+  // because nobody had checked. If USER_AGENT's `product/version (...)`
+  // shape ever changed such that the product name moved off the leading
+  // position, this would degrade PERMISSIVELY, not loudly: a corrupted
+  // token stops matching a named block aimed at us and falls through to
+  // the more open `*` group, rather than throwing or visibly failing. It
+  // needs its own pin, independent of every test that merely uses it.
+
+  it('is exactly "watchfloor"', () => {
+    expect(PRODUCT_TOKEN).toBe('watchfloor');
+  });
+
+  it('contains no whitespace or parentheses -- i.e. is actually the bare token, not a slice of the descriptive comment', () => {
+    expect(PRODUCT_TOKEN).toMatch(/^\S+$/);
+    expect(PRODUCT_TOKEN).not.toMatch(/[()]/);
   });
 });
 
@@ -456,7 +579,7 @@ describe('fetchRobots', () => {
 
     const body = await fetchRobots(baseUrl);
     expect(body).toBe('');
-    expect(isAllowed(body, PRODUCT_TOKEN, '/anything')).toBe(true);
+    expect(isAllowed(body, PRODUCT_TOKEN, '/anything', baseUrl)).toBe(true);
 
     await fetchRobots(baseUrl);
     expect(hitCount).toBe(1);

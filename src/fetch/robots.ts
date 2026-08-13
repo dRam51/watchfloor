@@ -82,6 +82,38 @@ function compilePattern(pattern: string): RegExp {
 }
 
 /**
+ * Removes a single leading UTF-8 BOM (U+FEFF), occasionally emitted by the
+ * tools that generate or hand-edit a robots.txt file. Left in place it
+ * would corrupt the FIRST field name on the first line (the raw text would
+ * start with U+FEFF followed by "user-agent", which is not the same string
+ * as plain "user-agent"), so no group ever starts, so every rule that
+ * follows has nothing to attach to -- a whole-file fail-open, the worst
+ * direction this module can fail in.
+ *
+ * Exported, and unit-tested directly against its own input/output, rather
+ * than only indirectly through an `isAllowed` outcome (fix round 2, bundled
+ * minor). That distinction is load-bearing here, not a style preference:
+ * per-line `.trim()` inside `parseGroups` already strips a leading U+FEFF
+ * as an incidental side effect of stripping whitespace generally (it's
+ * part of the ECMAScript `WhiteSpace` grammar), and since BOM only ever
+ * realistically appears at the very start of a file -- which always becomes
+ * the start of the first split line -- that incidental coverage exactly
+ * overlaps what this function targets. Concretely: no `isAllowed` input
+ * exists for which calling this function differs from skipping it, because
+ * `.trim()` on the first line always produces the identical result either
+ * way (verified). A black-box test through `isAllowed` therefore CANNOT
+ * distinguish "this function ran" from "it didn't, and `.trim()` covered
+ * for it" -- it would only ever pin an outcome, not this specific
+ * mechanism, which is exactly the gap fix round 2 flagged. Testing this
+ * function directly is the only way to pin that the explicit strip itself
+ * is present and correct, independent of whether `.trim()`'s incidental
+ * coverage continues to overlap it.
+ */
+export function stripLeadingBom(text: string): string {
+  return text.startsWith('\uFEFF') ? text.slice(1) : text;
+}
+
+/**
  * Splits a robots.txt body into User-agent groups.
  *
  * Group boundaries follow the same state machine every widely-deployed
@@ -110,23 +142,13 @@ function compilePattern(pattern: string): RegExp {
  * with no special case needed at match time.
  *
  * A leading UTF-8 BOM (U+FEFF), occasionally emitted by the tools that
- * generate or hand-edit a robots.txt file, is stripped explicitly before
- * anything else (fix round 1, bundled minor). Left in place it would
- * corrupt the FIRST field name on the first line (the raw text would start
- * with U+FEFF followed by "user-agent", which is not the same string as
- * plain "user-agent"), so no group ever starts, so every rule that follows
- * has nothing to attach to -- a whole-file fail-open, the worst direction
- * this module can fail in. This previously worked only as an accident of
- * `String.prototype.trim()` treating U+FEFF as whitespace per the
- * ECMAScript WhiteSpace grammar -- true, but incidental and undocumented,
- * and one refactor of the line-splitting below away from silently breaking
- * again with nothing to catch it. Stripped here explicitly instead (via an
- * escape, not a literal invisible character, so this file stays legible in
- * a plain-text diff) so it's a stated contract, not spec trivia this file
- * happens to depend on.
+ * generate or hand-edit a robots.txt file, is stripped explicitly via
+ * `stripLeadingBom` before anything else -- see that function's own doc
+ * comment for why this has to be a separately, directly testable unit
+ * rather than only an outcome asserted through `isAllowed`.
  */
 function parseGroups(robotsTxt: string): Group[] {
-  const text = robotsTxt.startsWith('\uFEFF') ? robotsTxt.slice(1) : robotsTxt;
+  const text = stripLeadingBom(robotsTxt);
 
   const groups: Group[] = [];
   let current: Group | null = null;
@@ -195,61 +217,133 @@ function resolveGroup(groups: Group[], userAgent: string): Group | null {
 }
 
 /**
- * Normalizes `isAllowed`'s `path` argument to what robots.txt patterns are
- * actually written against: an absolute-path reference starting with `/`,
- * query string included, fragment excluded. Fix round 1, Finding 1
- * (CRITICAL): `isAllowed` previously matched `path` completely as given,
- * with no stated contract and no defensive handling, so every shape below
- * that wasn't already exactly right failed OPEN (silently allowed) because
- * "no rule matched" is this module's own documented default -- verified
- * against AP's real fixture, whose `/*_ptid=*`, `/*?prx_t=*`,
- * `/search?q=*`, `/*?jw_start` and `/*&jw_start` rules all require a query
- * string that a caller could easily have dropped, and whose `/*.rss` and
- * `/api/v2/feed/` rules require a leading `/` that a full URL or a bare
- * relative reference doesn't have:
+ * Thrown by `isAllowed` when `path` names a host other than `origin` -- the
+ * origin whose robots.txt is being evaluated -- whether directly (a full
+ * URL for a different site) or indirectly (a protocol-relative reference
+ * that resolves to a different host).
  *
- *  - a full absolute URL (`https://apnews.com/some-article.rss`) --
- *    coerced to `pathname + search` via the platform `URL` parser, which
- *    also discards the fragment (never sent to a server, so never
- *    meaningful to a robots.txt pattern) and normalizes percent-encoding
- *    the same way for every caller;
- *  - a path missing its leading `/` (`some-article.rss`) -- one is
- *    prepended;
- *  - a path already shaped correctly (`/search?q=ukraine`) -- used as-is,
- *    unchanged.
- *
- * **What this cannot do, and why that's a documentation problem, not a
- * parsing one:** if a caller already stripped the query string before
- * calling -- `new URL(u).pathname` is the single most natural way to do
- * this, and produces exactly this shape -- no normalization on this side
- * can recover the missing information; `/search` and `/search?q=ukraine`
- * are different strings and only one of them matches AP's
- * `/search?q=*` rule. Callers MUST pass the full path *and* query string
- * (or the full URL, which carries both), never `.pathname` alone.
+ * Fix round 2, Finding 1a/1b: round 1's `normalizePath` accepted any
+ * absolute URL and any protocol-relative reference with no check that
+ * either named the SAME host as the `robotsTxt` being evaluated. A Reuters
+ * article URL checked against AP's rules was silently evaluated against
+ * AP's Disallow list -- the wrong file entirely -- and came back allowed,
+ * because AP's rules simply never mention a Reuters path; Reuters' own
+ * robots.txt explicitly denies it. Checking the wrong file is worse than
+ * refusing to answer: a `path` that disagrees with `origin` about which
+ * host it belongs to is a caller bug (the caller has mismatched a URL with
+ * the wrong robots.txt), and this module cannot safely guess through it,
+ * so it throws rather than silently returning either boolean.
  */
-function normalizePath(path: string): string {
-  try {
-    const url = new URL(path);
-    return url.pathname + url.search;
-  } catch {
-    // Not parseable as an absolute URL on its own -- treat it as a path.
-    return path.startsWith('/') ? path : `/${path}`;
+export class RobotsHostMismatchError extends Error {
+  readonly expectedOrigin: string;
+  readonly actualOrigin: string;
+
+  constructor(expectedOrigin: string, path: string, actualOrigin: string) {
+    super(
+      `path "${path}" names origin ${actualOrigin}, not the expected ${expectedOrigin}; ` +
+        `refusing to evaluate it against a robots.txt that may not govern it`,
+    );
+    this.name = 'RobotsHostMismatchError';
+    this.expectedOrigin = expectedOrigin;
+    this.actualOrigin = actualOrigin;
   }
 }
 
 /**
+ * Normalizes `isAllowed`'s `path` argument to what robots.txt patterns are
+ * actually written against: an absolute-path reference starting with `/`,
+ * query string included, fragment excluded -- resolved against `origin`,
+ * the origin whose robots.txt is being evaluated, and validated against it.
+ *
+ * Fix round 1, Finding 1 (CRITICAL) established that `path` must accept
+ * more than an already-correct bare path: a full absolute URL, or a path
+ * missing its leading `/`, both previously failed OPEN (silently allowed)
+ * because "no rule matched" is this module's own documented default.
+ * Fix round 2 found the round-1 fix itself incomplete in three ways, all
+ * landing wrongly-allowed -- the one direction this module exists to
+ * prevent -- and closes all three with ONE mechanism:
+ *
+ *  - **Finding 1a** -- a full URL naming a DIFFERENT host than `origin`
+ *    (e.g. a Reuters article URL checked against AP's robots.txt) was
+ *    silently accepted and evaluated against the wrong file's rules.
+ *  - **Finding 1b** -- a protocol-relative reference (`//host/path`) isn't
+ *    a valid absolute URL on its own (`new URL` throws for want of a
+ *    scheme), so it fell to the "already a path" branch UNRESOLVED, and an
+ *    `^/api/v2/feed/`-style pattern never matched a string that actually
+ *    starts `//host/...`.
+ *  - **Finding 1c** -- fragment-stripping only happened on the full-URL
+ *    branch (via `url.hash` being separate from `pathname`/`search`), so a
+ *    bare `/a#frag` kept its `#frag`, which could dodge a `$`-anchored rule
+ *    that correctly denies plain `/a`.
+ *
+ * All three are artifacts of round 1's two-branch design (try an absolute
+ * `new URL(path)`, otherwise treat `path` as already-a-path) never
+ * resolving a protocol-relative reference at all, and never checking a
+ * host either branch DID produce. The fix: resolve `path` against
+ * `origin` -- normalized to its bare scheme+host+port, discarding any path
+ * `origin` itself might carry, so relative references always resolve
+ * against the root -- via the platform URL resolver (`new URL(path,
+ * expectedOrigin)`), which handles a full URL, a protocol-relative
+ * reference, and a plain path uniformly in one call and always strips the
+ * fragment as a side effect of separating `.hash` from `.pathname`/
+ * `.search`. Then require the resolved result's origin to equal the
+ * expected one, throwing `RobotsHostMismatchError` otherwise.
+ *
+ * This also closes the trap a narrower fix for 1b alone would reopen:
+ * resolving a protocol-relative reference against a THROWAWAY/placeholder
+ * base (rather than the real expected origin) would make `//evil.test/x`
+ * resolve to a real host and then get evaluated with no host check at all
+ * -- reintroducing 1a through the back door. Resolving against the REAL
+ * `origin`, and then validating the resolved origin against it, closes
+ * both together: `//evil.test/x` resolves to `https://evil.test/x`, whose
+ * origin visibly disagrees with the expected one, and throws exactly like
+ * a full cross-host URL would.
+ *
+ * **What this still cannot do, unchanged from round 1:** if a caller
+ * already stripped the query string before calling -- `new URL(u)
+ * .pathname` is the single most natural way to do this -- no normalization
+ * on this side can recover the missing information; `/search` and
+ * `/search?q=ukraine` are different strings and only one of them matches
+ * AP's `/search?q=*` rule. Callers MUST pass the full path *and* query
+ * string (or a URL that carries both), never `.pathname` alone.
+ */
+function normalizePath(path: string, origin: string): string {
+  const expectedOrigin = new URL(origin).origin;
+  const resolved = new URL(path, expectedOrigin);
+  if (resolved.origin !== expectedOrigin) {
+    throw new RobotsHostMismatchError(expectedOrigin, path, resolved.origin);
+  }
+  return resolved.pathname + resolved.search;
+}
+
+/**
  * Pure decision function: does `robotsTxt` permit `userAgent` to fetch
- * `path`? No I/O -- callers resolve the origin's robots.txt (see
- * `fetchRobots`) and pass its body in directly, which is what keeps this
- * exhaustively testable against real, checked-in fixtures.
+ * `path` at `origin`? No I/O -- callers resolve the origin's robots.txt
+ * (see `fetchRobots`) and pass its body in directly, which is what keeps
+ * this exhaustively testable against real, checked-in fixtures.
  *
  * `path` accepts an absolute-path reference (`/api/v2/feed/x`, query string
- * included if there is one) or a full absolute URL it was derived from --
- * see `normalizePath` for exactly what is and is not recoverable from each
- * shape, most importantly that a caller must include the query string
- * somewhere in what it passes, because a robots.txt rule may depend on it
- * (AP's `/search?q=*` is a real example) and there is no way to recover a
- * query the caller already discarded.
+ * included if there is one), a full absolute URL, or a protocol-relative
+ * reference (`//host/path`) -- see `normalizePath` for exactly how each is
+ * resolved, and most importantly that a caller must include the query
+ * string somewhere in what it passes (AP's `/search?q=*` is a real
+ * example): there is no way to recover a query the caller already
+ * discarded, e.g. by passing `new URL(u).pathname` alone.
+ *
+ * `origin` is the origin whose robots.txt this call is evaluating (e.g.
+ * `https://apnews.com`) -- **required, not optional.** If `path` names a
+ * DIFFERENT host, directly as a full URL or indirectly as a
+ * protocol-relative reference, this throws `RobotsHostMismatchError`
+ * rather than silently answering for the wrong file (fix round 2, Finding
+ * 1a/1b -- see `normalizePath`'s doc comment for the full reasoning and the
+ * cross-host bug this closes). Required rather than defaulted: a caller
+ * always knows which origin's robots.txt it fetched (`fetchRobots(origin)`
+ * is origin-keyed) and which URL it's about to request, so stating both
+ * here is not a new burden -- and making the check optional would have
+ * reopened exactly the cross-host confusion this parameter exists to close,
+ * the same "documented-only contract is precisely the kind a future caller
+ * violates without failing loudly" trap that motivated normalizing `path`
+ * defensively in the first place.
  *
  * **Group selection, and why "no group matches" resolves to ALLOW rather
  * than this module's usual deny-under-uncertainty default:** RFC 9309 and
@@ -278,8 +372,8 @@ function normalizePath(path: string): string {
  * all -- see parseGroups) its documented "allow everything but the
  * following exceptions" meaning, with no extra special-casing needed here.
  */
-export function isAllowed(robotsTxt: string, userAgent: string, path: string): boolean {
-  const normalizedPath = normalizePath(path);
+export function isAllowed(robotsTxt: string, userAgent: string, path: string, origin: string): boolean {
+  const normalizedPath = normalizePath(path, origin);
   const group = resolveGroup(parseGroups(robotsTxt), userAgent);
   if (!group) return true;
 
@@ -303,12 +397,18 @@ export function isAllowed(robotsTxt: string, userAgent: string, path: string): b
  * callers that need to evaluate `isAllowed`'s `userAgent` parameter as
  * "would OUR real identity be let through here?". Derived from `USER_AGENT`
  * rather than a separately hand-maintained literal so it cannot drift from
- * what actually gets sent (fix round 1, Finding 4). `?? USER_AGENT` is an
- * unreachable-in-practice fallback for the type checker, not a real branch:
- * `USER_AGENT` is a non-empty literal template that always contains at
- * least one `/`.
+ * what actually gets sent (fix round 1, Finding 4). Currently `"watchfloor"`
+ * -- pinned by a test, since a silently-corrupted token would degrade
+ * PERMISSIVELY (it would stop matching a named block aimed at us and fall
+ * through to the more open `*` group) rather than failing loudly.
+ *
+ * The non-null assertion on `[0]` (not a `?? USER_AGENT` fallback, which
+ * fix round 2 correctly identified as dead code implying a guard that
+ * could never run) states, rather than pretends to handle, the fact that
+ * `String.prototype.split` always returns at least one element, so index 0
+ * is never `undefined`.
  */
-export const PRODUCT_TOKEN = USER_AGENT.split('/')[0] ?? USER_AGENT;
+export const PRODUCT_TOKEN = USER_AGENT.split('/')[0]!;
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24h, per the brief
 const DEFAULT_TIMEOUT_MS = 10_000; // matches src/fetch/http.ts's own default (duplicated, not imported)
