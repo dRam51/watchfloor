@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(npm run *)", "Bash(npm test*)", "Bash(npm install *)", "Bash(npm ci)",
+      "Bash(npx *)", "Bash(node *)", "Bash(tsc *)",
+      "Bash(git add *)", "Bash(git commit *)", "Bash(git status*)",
+      "Bash(git diff *)", "Bash(git log *)", "Bash(git mv *)", "Bash(git tag *)",
+      "Bash(mkdir *)", "Bash(cat *)", "Bash(ls *)", "Bash(grep *)",
+      "Bash(sqlite3 *)", "Bash(curl -s *)"
+    ],
+    "deny": [
+      "Bash(rm *)", "Bash(rmdir *)", "Bash(unlink *)",
+      "Bash(shred *)", "Bash(truncate *)", "Bash(dd *)",
+      "Bash(git clean*)", "Bash(git reset --hard*)", "Bash(git checkout -- *)",
+      "Bash(git restore *)", "Bash(git rebase*)", "Bash(git filter-branch*)",
+      "Bash(git branch -D *)", "Bash(git push*)",
+      "Bash(find * -delete*)",
+      "Bash(git checkout *)", "Bash(git worktree remove*)", "Bash(git branch -d *)"
+    ]
+  }
+}
