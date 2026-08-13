@@ -176,6 +176,67 @@ describe('0001_init append-only triggers', () => {
       db.prepare("select item_key from item_clusters where membership_id = 'm1'").get(),
     ).toEqual({ item_key: 'k1' });
   });
+
+  // INSERT OR REPLACE resolves a primary-key conflict with an implicit
+  // DELETE-then-INSERT. With SQLite's recursive_triggers pragma at its default
+  // (OFF), that implicit DELETE does not fire BEFORE DELETE triggers, so
+  // these three statements bypassed items_no_delete / item_scores_no_delete /
+  // item_clusters_no_delete entirely: no error, no signal, prior version
+  // gone. openDb (src/db/connection.ts) sets recursive_triggers = ON to close
+  // this. Each case asserts the row survives unchanged, not just that the
+  // statement throws -- a trigger naming the wrong table would still let some
+  // *other* table's throw make this pass.
+  it('blocks INSERT OR REPLACE on items, leaving the row intact', () => {
+    const db = seededDb();
+
+    expect(() =>
+      db
+        .prepare(
+          `insert or replace into items (item_id, item_key, url, canonical_url, title, source_id,
+                                         item_type, fetched_at, raw_json, created_at)
+           values ('i1', 'k1', 'https://e.test/a', 'https://e.test/a', 'REPLACED', 's1',
+                   'event', '2026-08-12T00:00:00.000Z', '{}', '2026-08-12T00:00:00.000Z')`,
+        )
+        .run(),
+    ).toThrow(/items is append-only/);
+
+    expect(db.prepare("select title from items where item_id = 'i1'").get()).toEqual({ title: 'T' });
+  });
+
+  it('blocks INSERT OR REPLACE on item_scores, leaving the row intact', () => {
+    const db = seededDb();
+
+    expect(() =>
+      db
+        .prepare(
+          `insert or replace into item_scores (score_id, item_id, beat, signal_score, read_score,
+                                               scorer_version, computed_at)
+           values ('sc1', 'i1', 'ai', 0.9, 0.9, 'v2', '2026-08-12T00:00:00.000Z')`,
+        )
+        .run(),
+    ).toThrow(/item_scores is append-only/);
+
+    expect(db.prepare("select read_score from item_scores where score_id = 'sc1'").get()).toEqual({
+      read_score: 0.75,
+    });
+  });
+
+  it('blocks INSERT OR REPLACE on item_clusters, leaving the row intact', () => {
+    const db = seededDb();
+
+    expect(() =>
+      db
+        .prepare(
+          `insert or replace into item_clusters (membership_id, cluster_id, item_key, fetched_at)
+           values ('m1', 'c1', 'k9', '2026-08-12T00:00:00.000Z')`,
+        )
+        .run(),
+    ).toThrow(/item_clusters is append-only/);
+
+    expect(
+      db.prepare("select item_key from item_clusters where membership_id = 'm1'").get(),
+    ).toEqual({ item_key: 'k1' });
+  });
 });
 
 describe('0002_constraints', () => {

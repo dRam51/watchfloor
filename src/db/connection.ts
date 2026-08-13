@@ -18,6 +18,17 @@ export function openDb(path: string, opts: OpenOptions = {}): Db {
   }
   db.exec('pragma busy_timeout = 5000');
   db.exec('pragma foreign_keys = ON');
+  // Unlike journal_mode, this is a connection-level flag, not a file write --
+  // it resets to SQLite's default (OFF) on every new connection, so it goes
+  // here with the other per-connection pragmas rather than inside the
+  // readOnly guard above. Without it, the implicit DELETE that SQLite runs to
+  // resolve an INSERT OR REPLACE primary-key conflict does not fire BEFORE
+  // DELETE triggers, so items_no_delete / item_scores_no_delete /
+  // item_clusters_no_delete (db/migrations/0001_init.sql) never see it: a
+  // REPLACE naming an existing id silently destroys the prior append-only
+  // version with no error and a clean foreign_key_check. See
+  // tests/db/migrate.test.ts, "0001_init append-only triggers".
+  db.exec('pragma recursive_triggers = ON');
 
   return db;
 }
