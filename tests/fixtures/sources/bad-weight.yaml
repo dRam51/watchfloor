@@ -1,0 +1,9 @@
+sources:
+  - id: bad
+    name: Out of range weight
+    type: rss
+    url: https://example.test/feed
+    beats: [ai]
+    weight: 9.0
+    poll_interval: 1h
+    enabled: true

@@ -1,0 +1,19 @@
+sources:
+  - id: cisa-kev
+    name: CISA Known Exploited Vulnerabilities
+    type: json
+    url: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+    beats: [cyber]
+    weight: 2.0
+    poll_interval: 30m
+    enabled: true
+
+  - id: semianalysis
+    name: SemiAnalysis
+    type: rss
+    url: https://www.semianalysis.com/feed
+    beats: [markets, ai]
+    weight: 1.5
+    poll_interval: 6h
+    enabled: true
+    tier: analysis

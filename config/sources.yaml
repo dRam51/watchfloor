@@ -1,0 +1,17 @@
+# Every feed Watchfloor reads. Adding a source is a config edit, never a code change.
+#
+#   id            unique, stable, kebab-case
+#   type          rss | atom | json | github_search | api | market_data
+#   beats         one or more of: ai, cyber, aisec, repos, markets, usnews
+#   weight        0.1–2.0 trust multiplier
+#   poll_interval e.g. 15m, 6h, 1d
+#   tier          markets sources only: event | analysis
+sources:
+  - id: cisa-kev
+    name: CISA Known Exploited Vulnerabilities
+    type: json
+    url: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+    beats: [cyber]
+    weight: 2.0
+    poll_interval: 30m
+    enabled: true
