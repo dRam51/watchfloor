@@ -4,6 +4,29 @@ import { join } from 'node:path';
 import { isPaidAllowed, assertPaidAllowed, gateStatus, CostPolicyError } from '../../src/cost/gate.ts';
 import { SERVICES } from '../../src/cost/registry.ts';
 
+/**
+ * Locate a service's row in the docs/costs.md table and split it into cells.
+ * Throws (rather than returning undefined) when a service has no row at all,
+ * so a missing row fails loudly instead of comparing `undefined` to a string.
+ */
+function findDocRow(doc: string, id: string): string[] {
+  const line = doc
+    .split('\n')
+    .find((l) => l.trim().startsWith('|') && l.includes(`\`${id}\``));
+  if (line === undefined) {
+    throw new Error(`docs/costs.md has no table row for '${id}'`);
+  }
+  return line
+    .split('|')
+    .slice(1, -1)
+    .map((cell) => cell.trim());
+}
+
+/** Strip markdown code-span backticks so cell content compares as plain text. */
+function normalizeCell(cell: string | undefined): string {
+  return (cell ?? '').replace(/`/g, '').trim();
+}
+
 describe('cost gate', () => {
   it('denies every paid category when no flags are set', () => {
     const paid = SERVICES.filter((s) => s.costClass === 'paid');
@@ -42,6 +65,32 @@ describe('cost gate', () => {
     const doc = readFileSync(join(process.cwd(), 'docs', 'costs.md'), 'utf8');
     for (const service of SERVICES) {
       expect(doc, `docs/costs.md is missing ${service.id}`).toContain(service.id);
+    }
+  });
+
+  it("docs/costs.md's Class and Flag columns agree with registry.ts, not just the id", () => {
+    // Presence alone (the test above) would stay green even if the doc's
+    // stated classification or flag silently drifted from the registry —
+    // e.g. anthropic-api relabeled 'free-forever' in the doc while
+    // registry.ts still says 'paid'. Parse each service's actual row and
+    // compare the real Class/Flag tokens, not a substring.
+    const doc = readFileSync(join(process.cwd(), 'docs', 'costs.md'), 'utf8');
+    for (const service of SERVICES) {
+      const cells = findDocRow(doc, service.id);
+      const docClass = normalizeCell(cells[2]);
+      const docFlag = normalizeCell(cells[3]);
+      const expectedFlag = service.category
+        ? `WF_ALLOW_PAID_${service.category.toUpperCase()}`
+        : '—';
+
+      expect(
+        docClass,
+        `${service.id}: docs/costs.md Class column says '${docClass}' but registry.ts costClass is '${service.costClass}'`,
+      ).toBe(service.costClass);
+      expect(
+        docFlag,
+        `${service.id}: docs/costs.md Flag column says '${docFlag}' but registry.ts derives '${expectedFlag}'`,
+      ).toBe(expectedFlag);
     }
   });
 
