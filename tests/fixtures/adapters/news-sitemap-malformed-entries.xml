@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SYNTHETIC FIXTURE -- hand-authored for tests/adapters/newsSitemap.test.ts,
+  NOT captured from a live source. Do not mistake this for real AP data; see
+  apnews-news-sitemap.xml (labelled as REAL DATA, CAPTURED LIVE) for that.
+
+  Deliberately mixes well-formed <url> entries with individually-defective
+  ones, all inside an otherwise well-formed Google-News-schema sitemap
+  document, to prove one bad entry never discards its neighbours -- same
+  discipline as tests/fixtures/adapters/rss-malformed-entries.xml, adapted to
+  this format's much smaller field set (loc/title/publication_date only; this
+  schema has no description/summary/author fields to test fallback precedence
+  for at all).
+
+  Four defects below, each isolated to its own entry so a test can attribute
+  a specific skip to a specific cause:
+    - "Missing Loc"          -- no <loc> element at all
+    - "Blank Loc"             -- <loc> present but whitespace-only after trim
+    - "Missing News Title"    -- <news:news>/<news:publication> present, but
+                                 no <news:title> child
+    - "Missing News Block"    -- <loc> present, but no <news:news> at all
+                                 (e.g. a plain sitemap URL that leaked into
+                                 the news sitemap) -- no title is obtainable
+                                 either way, same drop reason as the other
+                                 title-less cases, but a structurally
+                                 different path through the parser worth its
+                                 own coverage.
+  Every one of these four must be SKIPPED (dropped, counted in `skipped`,
+  never thrown). A fifth entry, "Malformed Date Survives", has a
+  <news:publication_date> that is not a real date at all -- per the shared
+  contract (src/adapters/types.ts's EntryParser doc, and rss.ts's identical
+  treatment of an unparseable <pubDate>/<published>), interpreting a date is
+  normalizeItem's job, never this adapter's, so this entry must NOT be
+  dropped: it survives with publishedAt passed through byte-for-byte as the
+  raw string.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+
+  <url>
+    <loc>https://example.test/article/good-one</loc>
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <news:publication_date>2026-08-12T06:52:39-04:00</news:publication_date>
+      <news:title>Good Item One</news:title>
+    </news:news>
+  </url>
+
+  <url>
+    <!-- no <loc> at all: must be dropped -->
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <news:publication_date>2026-08-12T07:00:00-04:00</news:publication_date>
+      <news:title>Missing Loc</news:title>
+    </news:news>
+  </url>
+
+  <url>
+    <loc>https://example.test/article/good-two</loc>
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <news:publication_date>2026-08-12T08:00:00-04:00</news:publication_date>
+      <news:title>Good Item Two</news:title>
+    </news:news>
+  </url>
+
+  <url>
+    <!-- <loc> present but blank after the XML layer trims it: same as missing -->
+    <loc>   </loc>
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <news:publication_date>2026-08-12T09:00:00-04:00</news:publication_date>
+      <news:title>Blank Loc</news:title>
+    </news:news>
+  </url>
+
+  <url>
+    <loc>https://example.test/article/missing-news-title</loc>
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <news:publication_date>2026-08-12T10:00:00-04:00</news:publication_date>
+      <!-- no <news:title> at all: must be dropped -->
+    </news:news>
+  </url>
+
+  <url>
+    <loc>https://example.test/article/good-three</loc>
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <news:publication_date>2026-08-12T11:00:00-04:00</news:publication_date>
+      <news:title>Good Item Three</news:title>
+    </news:news>
+  </url>
+
+  <url>
+    <loc>https://example.test/article/malformed-date</loc>
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <!--
+        Not a real date at all. RawItem.publishedAt is optional and
+        interpreting it is normalizeItem's job, not this adapter's -- this
+        entry must survive with publishedAt equal to this exact string,
+        verbatim, not dropped and not null'd out by the adapter itself.
+      -->
+      <news:publication_date>not a real date at all</news:publication_date>
+      <news:title>Malformed Date Survives</news:title>
+    </news:news>
+  </url>
+
+  <url>
+    <!-- <loc> present, but no <news:news> block at all: no title is
+         obtainable, so this must be dropped the same as the other
+         title-less cases above -- but via a structurally different path
+         (isXmlNode(news) is false here, not merely news:title absent from
+         an otherwise-present news:news). -->
+    <loc>https://example.test/article/missing-news-block</loc>
+  </url>
+
+  <url>
+    <loc>https://example.test/article/good-four</loc>
+    <news:news>
+      <news:publication>
+        <news:name>Associated Press</news:name>
+        <news:language>eng</news:language>
+      </news:publication>
+      <news:publication_date>2026-08-12T12:00:00-04:00</news:publication_date>
+      <news:title>Good Item Four</news:title>
+    </news:news>
+  </url>
+
+</urlset>
