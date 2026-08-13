@@ -6,8 +6,13 @@ import {
   isAllowed,
   fetchRobots,
   RobotsUnavailableError,
-  ROBOTS_USER_AGENT,
+  PRODUCT_TOKEN,
 } from '../../src/fetch/robots.ts';
+// Fix round 1, Finding 4: import the real USER_AGENT directly from http.ts
+// (now stable, so the earlier "don't couple to an in-flight file" constraint
+// no longer applies) rather than a robots.ts-local literal, so this test
+// pins fetchRobots against the identity actually sent, not a copy of it.
+import { USER_AGENT } from '../../src/fetch/http.ts';
 
 // ---------------------------------------------------------------------------
 // Real, checked-in fixtures. Fetched live on 2026-08-13 (see task-5-report.md
@@ -33,19 +38,19 @@ describe('isAllowed', () => {
     // crawlers (CCBot, GPTBot, anthropic-ai, ClaudeBot, and others).
 
     it('allows the declared news sitemap', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, 'watchfloor', '/news-sitemap-content.xml')).toBe(true);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/news-sitemap-content.xml')).toBe(true);
     });
 
     it('denies an .rss path via the /*.rss wildcard', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, 'watchfloor', '/some-article.rss')).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/some-article.rss')).toBe(false);
     });
 
     it('denies the JSON feed API prefix', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, 'watchfloor', '/api/v2/feed/anything')).toBe(false);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/api/v2/feed/anything')).toBe(false);
     });
 
     it('allows an ordinary article path', () => {
-      expect(isAllowed(AP_ROBOTS_TXT, 'watchfloor', '/article/whatever')).toBe(true);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/whatever')).toBe(true);
     });
 
     it.each(['ClaudeBot', 'GPTBot', 'CCBot', 'anthropic-ai'])(
@@ -62,17 +67,19 @@ describe('isAllowed', () => {
       // agents -- proving this on the SAME path is what would catch the
       // rules being conflated.
       expect(isAllowed(AP_ROBOTS_TXT, 'ClaudeBot', '/article/whatever')).toBe(false);
-      expect(isAllowed(AP_ROBOTS_TXT, 'watchfloor', '/article/whatever')).toBe(true);
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/whatever')).toBe(true);
     });
 
-    it('a Sitemap: directive does not grant any special access', () => {
-      // AP's own declared sitemaps happen to all be independently allowed
-      // already (none collide with its Disallow exceptions), so this checks
-      // the inverse and more telling direction: naming a URL in `Sitemap:`
-      // is not itself a grant -- an otherwise-disallowed path stays denied
-      // even though it shares a host with declared sitemaps.
-      expect(isAllowed(AP_ROBOTS_TXT, 'watchfloor', '/some-article.rss')).toBe(false);
-    });
+    // Fix round 1, bundled minor: the previous test here ("a Sitemap:
+    // directive does not grant any special access") was a byte-identical
+    // duplicate of "denies an .rss path via the /*.rss wildcard" above --
+    // same fixture, same agent, same path, same expectation -- and touched
+    // no Sitemap URL at all, so it could not have caught a Sitemap line
+    // being mis-parsed as a grant. Deleted rather than patched: the
+    // Reuters test below ("a Sitemap: directive does not rescue...") is the
+    // real version of this assertion, built from an actual Sitemap: URL in
+    // that fixture, and AP has no naturally-denied sitemap path to build an
+    // equivalent from (see that test's comment).
   });
 
   describe('Reuters (www.reuters.com) -- allowlist shape', () => {
@@ -84,17 +91,17 @@ describe('isAllowed', () => {
     // is the catch-all every unnamed agent (including watchfloor) falls to.
 
     it('denies the root path', () => {
-      expect(isAllowed(REUTERS_ROBOTS_TXT, 'watchfloor', '/')).toBe(false);
+      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/')).toBe(false);
     });
 
     it('denies an arbitrary article path', () => {
-      expect(isAllowed(REUTERS_ROBOTS_TXT, 'watchfloor', '/world/uk/example-story-2026-08-13/')).toBe(
+      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/world/uk/example-story-2026-08-13/')).toBe(
         false,
       );
     });
 
     it('allows /plus/ paths -- the more specific Allow beats the broader Disallow', () => {
-      expect(isAllowed(REUTERS_ROBOTS_TXT, 'watchfloor', '/plus/something')).toBe(true);
+      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/plus/something')).toBe(true);
     });
 
     it('a Sitemap: directive does not rescue a path the matching group denies', () => {
@@ -103,47 +110,60 @@ describe('isAllowed', () => {
       // still applies to watchfloor despite the operator listing it as a
       // sitemap for OTHER (allowlisted) crawlers to read.
       expect(
-        isAllowed(REUTERS_ROBOTS_TXT, 'watchfloor', '/arc/outboundfeeds/sitemap-index/'),
+        isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, '/arc/outboundfeeds/sitemap-index/'),
       ).toBe(false);
     });
 
     it('allows an allowlisted agent (Googlebot) where watchfloor is denied the identical path', () => {
       const path = '/world/uk/example-story-2026-08-13/';
       expect(isAllowed(REUTERS_ROBOTS_TXT, 'Googlebot', path)).toBe(true);
-      expect(isAllowed(REUTERS_ROBOTS_TXT, 'watchfloor', path)).toBe(false);
+      expect(isAllowed(REUTERS_ROBOTS_TXT, PRODUCT_TOKEN, path)).toBe(false);
     });
   });
 
   describe('group selection and matching mechanics (synthetic fixtures)', () => {
     it('the longest matching pattern wins regardless of file order', () => {
       const txt = ['User-agent: *', 'Disallow: /downloads', 'Allow: /downloads/free'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/downloads/free/report.pdf')).toBe(true);
-      expect(isAllowed(txt, 'watchfloor', '/downloads/paid/report.pdf')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/free/report.pdf')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/paid/report.pdf')).toBe(false);
+    });
+
+    it('the longest matching pattern still wins when the shorter, denying rule comes LAST in the file', () => {
+      // Fix round 1, bundled minor: the test above puts Disallow before
+      // Allow, and Allow also happens to be both the longer AND the last
+      // rule in the file -- so a buggy "last rule in the file wins"
+      // implementation would pass it too, for the wrong reason. Reversing
+      // the order here (Allow first, Disallow last) while keeping Allow the
+      // longer pattern isolates "file order" from "pattern length": only an
+      // implementation that genuinely compares lengths gets this right.
+      const txt = ['User-agent: *', 'Allow: /downloads/free', 'Disallow: /downloads'].join('\n');
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/free/report.pdf')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/downloads/paid/report.pdf')).toBe(false);
     });
 
     it('a tie in match length resolves to Allow', () => {
       const txt = ['User-agent: *', 'Disallow: /docs', 'Allow: /docs'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/docs')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/docs')).toBe(true);
     });
 
     it('* matches any run of characters within a path', () => {
       const txt = ['User-agent: *', 'Disallow: /files/*/private'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/files/2026/private')).toBe(false);
-      expect(isAllowed(txt, 'watchfloor', '/files/anything-at-all/private')).toBe(false);
-      expect(isAllowed(txt, 'watchfloor', '/files/2026/public')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/2026/private')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/anything-at-all/private')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/files/2026/public')).toBe(true);
     });
 
     it('$ anchors a pattern to the end of the path', () => {
       const txt = ['User-agent: *', 'Disallow: /file$'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/file')).toBe(false);
-      expect(isAllowed(txt, 'watchfloor', '/filename')).toBe(true);
-      expect(isAllowed(txt, 'watchfloor', '/file/nested')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/file')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/filename')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/file/nested')).toBe(true);
     });
 
     it('directive field names are matched case-insensitively', () => {
       const txt = ['USER-AGENT: *', 'DISALLOW: /private'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/private/data')).toBe(false);
-      expect(isAllowed(txt, 'watchfloor', '/public')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private/data')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/public')).toBe(true);
     });
 
     it('user-agent values are matched case-insensitively', () => {
@@ -155,25 +175,25 @@ describe('isAllowed', () => {
 
     it('paths remain case-sensitive, unlike user-agents and directive names', () => {
       const txt = ['User-agent: *', 'Disallow: /Private'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/Private/data')).toBe(false);
-      expect(isAllowed(txt, 'watchfloor', '/private/data')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/Private/data')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private/data')).toBe(true);
     });
 
     it('an unknown agent falls back to the * group', () => {
       const txt = ['User-agent: SomeOtherBot', 'Disallow: /x', '', 'User-agent: *', 'Disallow: /y'].join(
         '\n',
       );
-      expect(isAllowed(txt, 'watchfloor', '/y/anything')).toBe(false);
-      expect(isAllowed(txt, 'watchfloor', '/x/anything')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/y/anything')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/x/anything')).toBe(true);
     });
 
     it('no matching group at all (named agent only, no *) resolves to allow', () => {
       const txt = ['User-agent: Googlebot', 'Disallow: /'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/anything')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/anything')).toBe(true);
     });
 
     it('an empty robots.txt resolves to allow', () => {
-      expect(isAllowed('', 'watchfloor', '/anything')).toBe(true);
+      expect(isAllowed('', PRODUCT_TOKEN, '/anything')).toBe(true);
     });
 
     it('consecutive User-agent lines share one group and its rules', () => {
@@ -199,15 +219,95 @@ describe('isAllowed', () => {
 
     it('a malformed line (no colon) is skipped rather than throwing', () => {
       const txt = ['User-agent: *', 'this is not a directive', 'Disallow: /private'].join('\n');
-      expect(() => isAllowed(txt, 'watchfloor', '/private')).not.toThrow();
-      expect(isAllowed(txt, 'watchfloor', '/private')).toBe(false);
-      expect(isAllowed(txt, 'watchfloor', '/public')).toBe(true);
+      expect(() => isAllowed(txt, PRODUCT_TOKEN, '/private')).not.toThrow();
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/public')).toBe(true);
     });
 
     it('a rule line before any User-agent line is ignored', () => {
       const txt = ['Disallow: /orphan', 'User-agent: *', 'Disallow: /private'].join('\n');
-      expect(isAllowed(txt, 'watchfloor', '/orphan')).toBe(true);
-      expect(isAllowed(txt, 'watchfloor', '/private')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/orphan')).toBe(true);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private')).toBe(false);
+    });
+
+    it('combines rules from multiple separate * groups rather than using only the first', () => {
+      // Fix round 1, Finding 2 (Important): resolveGroup's named-agent
+      // branch unions every matching group's rules (flatMap), but the
+      // wildcard fallback used .find() -- first match only -- so a SECOND
+      // "User-agent: *" block's rules were silently dropped. Duplicate `*`
+      // blocks are a realistic shape (generated files, plugin-appended
+      // rules), and the failure direction is exactly the wrong one for a
+      // safety gate: a real Disallow present in the file was being ignored.
+      const txt = ['User-agent: *', 'Disallow: /a', '', 'User-agent: *', 'Disallow: /b'].join('\n');
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/a')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/b')).toBe(false);
+    });
+
+    it('a leading BOM does not corrupt the first field and silently drop every rule', () => {
+      // Fix round 1, bundled minor: a leading U+FEFF (byte-order mark),
+      // occasionally emitted by the tools that generate or hand-edit a
+      // robots.txt, would otherwise corrupt the FIRST field name on the
+      // first line -- a raw "\uFEFFUser-agent" is not the same string as
+      // plain "user-agent" -- so no group ever gets started, so every
+      // following rule has nothing to attach to: parseGroups silently
+      // returns zero groups and isAllowed allows everything, a whole-file
+      // fail-open. This previously worked only as a side effect of
+      // String.prototype.trim() treating U+FEFF as whitespace, which was
+      // never stated or pinned -- parseGroups now strips it explicitly
+      // (see its doc comment) so the behavior survives a future change to
+      // how lines are split or trimmed.
+      const txt = '\uFEFF' + 'User-agent: *\nDisallow: /private\n';
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/private')).toBe(false);
+      expect(isAllowed(txt, PRODUCT_TOKEN, '/public')).toBe(true);
+    });
+  });
+
+  describe("the path argument's contract (fix round 1, Finding 1, CRITICAL)", () => {
+    // isAllowed's doc comment previously explained group selection and
+    // longest-match at length but never said what `path` must contain.
+    // Because "no matching rule" defaults to ALLOW (per this module's own
+    // documented default), every one of these shapes failed OPEN: the
+    // gate silently approved paths AP's own file explicitly disallows.
+    // Verified against AP's real fixture, whose /*_ptid=*, /*?prx_t=*,
+    // /search?q=*, /*?jw_start and /*&jw_start rules all depend on the
+    // query string being present.
+
+    it('matches against the query string when the caller includes it', () => {
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/search?q=ukraine')).toBe(false);
+    });
+
+    it('a bare pathname with no query is correctly allowed -- not a bug: isAllowed cannot recover a query the caller never gave it', () => {
+      // Contrast with the case above: /search alone (no query at all) has
+      // no matching Disallow rule -- only /search?q=* does -- so `true`
+      // here is correct both before and after this fix. What the fix
+      // guarantees is that a caller who DOES pass the query gets the right
+      // answer; a caller who strips it first (e.g. `new URL(u).pathname`)
+      // is a caller-side information loss no gate can recover from, which
+      // is exactly why the contract has to be stated, not just patched
+      // around.
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/search')).toBe(true);
+    });
+
+    it('still matches a wildcard-prefixed query pattern', () => {
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, '/article/x?prx_t=a')).toBe(false);
+    });
+
+    it('accepts a full absolute URL, normalizing to pathname + search', () => {
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/some-article.rss')).toBe(false);
+    });
+
+    it('accepts a path missing its leading slash', () => {
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'some-article.rss')).toBe(false);
+    });
+
+    it('a full URL carries its query string through normalization too', () => {
+      expect(isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/search?q=ukraine')).toBe(false);
+    });
+
+    it('a full URL drops its fragment, which robots.txt patterns never see', () => {
+      expect(
+        isAllowed(AP_ROBOTS_TXT, PRODUCT_TOKEN, 'https://apnews.com/article/whatever#section'),
+      ).toBe(true);
     });
   });
 });
@@ -264,7 +364,7 @@ describe('fetchRobots', () => {
     expect(await fetchRobots(baseUrl)).toBe(body);
   });
 
-  it('sends an identifying User-Agent', async () => {
+  it('sends the same identity http.ts uses for real content fetches (fix round 1, Finding 4)', async () => {
     let received: string | undefined;
     const baseUrl = await serve((req, res) => {
       received = req.headers['user-agent'];
@@ -274,8 +374,10 @@ describe('fetchRobots', () => {
 
     await fetchRobots(baseUrl);
 
-    expect(received).toBe(ROBOTS_USER_AGENT);
-    expect(ROBOTS_USER_AGENT.toLowerCase()).toContain('watchfloor');
+    // Not just "some identifying string" -- the SAME constant politeFetch
+    // sends, so a robots.txt group written for our real identity governs
+    // the request that identity actually makes.
+    expect(received).toBe(USER_AGENT);
   });
 
   it('requests /robots.txt at the given origin', async () => {
@@ -354,7 +456,7 @@ describe('fetchRobots', () => {
 
     const body = await fetchRobots(baseUrl);
     expect(body).toBe('');
-    expect(isAllowed(body, 'watchfloor', '/anything')).toBe(true);
+    expect(isAllowed(body, PRODUCT_TOKEN, '/anything')).toBe(true);
 
     await fetchRobots(baseUrl);
     expect(hitCount).toBe(1);
@@ -409,7 +511,7 @@ describe('fetchRobots', () => {
     }
   });
 
-  it('rejects when the request times out', async () => {
+  it('rejects when the request times out before headers ever arrive', async () => {
     const baseUrl = await serve((req, res) => {
       res.on('error', () => {});
       // never respond
@@ -423,6 +525,33 @@ describe('fetchRobots', () => {
       expect(e).toBeInstanceOf(RobotsUnavailableError);
     }
     expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  it('rejects as RobotsUnavailableError when the body stalls AFTER headers arrive', async () => {
+    // Fix round 1, Finding 3 (Important): response.text() sat outside the
+    // try/catch around fetch(), so this phase -- headers already received
+    // (response.ok is true), then the body stream stalls or the socket
+    // resets -- escaped as a raw, unclassified DOMException/TypeError:
+    // not `instanceof RobotsUnavailableError`, no `.origin`, contradicting
+    // this module's own documented contract that callers can rely on
+    // exactly that type to know a robots.txt check failed. The test above
+    // (headers never sent at all) exercises only the fetch()-level catch
+    // and passed throughout -- it cannot detect this, which is exactly why
+    // it was uncaught: distinct code path, same shape as the two-timeout-
+    // sites pattern in src/fetch/http.ts's own test suite.
+    const baseUrl = await serve((req, res) => {
+      res.on('error', () => {});
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.write('User-agent: *\n'); // headers + partial body sent, then stall -- never res.end()
+    });
+
+    try {
+      await fetchRobots(baseUrl, { timeoutMs: 150 });
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(RobotsUnavailableError);
+      expect((e as RobotsUnavailableError).origin).toBe(baseUrl);
+    }
   });
 
   it('a rejected fetch carries the origin so a caller can log/record which source failed', async () => {

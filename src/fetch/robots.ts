@@ -15,6 +15,21 @@
  * successes for 24h.
  */
 
+// The identity this system presents on the wire, imported directly from
+// src/fetch/http.ts -- the module that actually sends it on every content
+// fetch. Fix round 1, Finding 4: this used to be an independent literal
+// (ROBOTS_USER_AGENT), justified at the time because http.ts was being
+// actively rewritten by a concurrently-running task and importing it would
+// have coupled this module to unsettled state. That file is now complete
+// and stable, so the constraint that justified the duplication is gone --
+// and the duplication itself was a live consent risk, not just untidiness:
+// evaluating robots.txt rules against one identity while presenting a
+// DIFFERENT one to the server means the gate's answer might not describe
+// the request that's actually sent. Importing the single real constant
+// (used below both as the fetch header and as PRODUCT_TOKEN's source)
+// makes that drift structurally impossible instead of policed by hand.
+import { USER_AGENT } from './http.ts';
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
@@ -93,13 +108,31 @@ function compilePattern(pattern: string): RegExp {
  * allowed". Dropping it instead and relying on isAllowed's own
  * nothing-matched-in-group default (allow) reproduces the correct meaning
  * with no special case needed at match time.
+ *
+ * A leading UTF-8 BOM (U+FEFF), occasionally emitted by the tools that
+ * generate or hand-edit a robots.txt file, is stripped explicitly before
+ * anything else (fix round 1, bundled minor). Left in place it would
+ * corrupt the FIRST field name on the first line (the raw text would start
+ * with U+FEFF followed by "user-agent", which is not the same string as
+ * plain "user-agent"), so no group ever starts, so every rule that follows
+ * has nothing to attach to -- a whole-file fail-open, the worst direction
+ * this module can fail in. This previously worked only as an accident of
+ * `String.prototype.trim()` treating U+FEFF as whitespace per the
+ * ECMAScript WhiteSpace grammar -- true, but incidental and undocumented,
+ * and one refactor of the line-splitting below away from silently breaking
+ * again with nothing to catch it. Stripped here explicitly instead (via an
+ * escape, not a literal invisible character, so this file stays legible in
+ * a plain-text diff) so it's a stated contract, not spec trivia this file
+ * happens to depend on.
  */
 function parseGroups(robotsTxt: string): Group[] {
+  const text = robotsTxt.startsWith('\uFEFF') ? robotsTxt.slice(1) : robotsTxt;
+
   const groups: Group[] = [];
   let current: Group | null = null;
   let inRules = false;
 
-  for (const raw of robotsTxt.split(/\r\n|\r|\n/)) {
+  for (const raw of text.split(/\r\n|\r|\n/)) {
     const line = (raw.split('#')[0] ?? '').trim();
     if (line === '') continue;
 
@@ -140,9 +173,14 @@ function parseGroups(robotsTxt: string): Group[] {
  * wins, matched by case-insensitive product-token PREFIX (so a group for
  * "GPTBot" also matches a caller passing the fuller "GPTBot/1.1" -- the
  * standard robots.txt product-token semantics). If more than one group
- * names the same agent, their rules are combined (RFC 9309; rare in
- * practice and absent from both real fixtures, but cheap to get right).
- * Falls back to the `*` group. Returns null if neither exists.
+ * names the same agent, their rules are combined (RFC 9309). Falls back to
+ * the `*` group -- likewise combined across every `*` group in the file,
+ * not just the first one found (fix round 1, Finding 2: a second, separate
+ * `User-agent: *` block -- a realistic shape for a generated or
+ * plugin-appended file -- was silently dropped by an earlier `.find()`,
+ * even though the named-agent branch right above already unions correctly.
+ * Rules present in the file being ignored is exactly the wrong failure
+ * direction for a safety gate). Returns null if no group matches at all.
  */
 function resolveGroup(groups: Group[], userAgent: string): Group | null {
   const needle = userAgent.toLowerCase();
@@ -152,7 +190,51 @@ function resolveGroup(groups: Group[], userAgent: string): Group | null {
   if (named.length > 0) {
     return { agents: [userAgent], rules: named.flatMap((g) => g.rules) };
   }
-  return groups.find((g) => g.agents.includes('*')) ?? null;
+  const wildcard = groups.filter((g) => g.agents.includes('*'));
+  return wildcard.length > 0 ? { agents: ['*'], rules: wildcard.flatMap((g) => g.rules) } : null;
+}
+
+/**
+ * Normalizes `isAllowed`'s `path` argument to what robots.txt patterns are
+ * actually written against: an absolute-path reference starting with `/`,
+ * query string included, fragment excluded. Fix round 1, Finding 1
+ * (CRITICAL): `isAllowed` previously matched `path` completely as given,
+ * with no stated contract and no defensive handling, so every shape below
+ * that wasn't already exactly right failed OPEN (silently allowed) because
+ * "no rule matched" is this module's own documented default -- verified
+ * against AP's real fixture, whose `/*_ptid=*`, `/*?prx_t=*`,
+ * `/search?q=*`, `/*?jw_start` and `/*&jw_start` rules all require a query
+ * string that a caller could easily have dropped, and whose `/*.rss` and
+ * `/api/v2/feed/` rules require a leading `/` that a full URL or a bare
+ * relative reference doesn't have:
+ *
+ *  - a full absolute URL (`https://apnews.com/some-article.rss`) --
+ *    coerced to `pathname + search` via the platform `URL` parser, which
+ *    also discards the fragment (never sent to a server, so never
+ *    meaningful to a robots.txt pattern) and normalizes percent-encoding
+ *    the same way for every caller;
+ *  - a path missing its leading `/` (`some-article.rss`) -- one is
+ *    prepended;
+ *  - a path already shaped correctly (`/search?q=ukraine`) -- used as-is,
+ *    unchanged.
+ *
+ * **What this cannot do, and why that's a documentation problem, not a
+ * parsing one:** if a caller already stripped the query string before
+ * calling -- `new URL(u).pathname` is the single most natural way to do
+ * this, and produces exactly this shape -- no normalization on this side
+ * can recover the missing information; `/search` and `/search?q=ukraine`
+ * are different strings and only one of them matches AP's
+ * `/search?q=*` rule. Callers MUST pass the full path *and* query string
+ * (or the full URL, which carries both), never `.pathname` alone.
+ */
+function normalizePath(path: string): string {
+  try {
+    const url = new URL(path);
+    return url.pathname + url.search;
+  } catch {
+    // Not parseable as an absolute URL on its own -- treat it as a path.
+    return path.startsWith('/') ? path : `/${path}`;
+  }
 }
 
 /**
@@ -160,6 +242,14 @@ function resolveGroup(groups: Group[], userAgent: string): Group | null {
  * `path`? No I/O -- callers resolve the origin's robots.txt (see
  * `fetchRobots`) and pass its body in directly, which is what keeps this
  * exhaustively testable against real, checked-in fixtures.
+ *
+ * `path` accepts an absolute-path reference (`/api/v2/feed/x`, query string
+ * included if there is one) or a full absolute URL it was derived from --
+ * see `normalizePath` for exactly what is and is not recoverable from each
+ * shape, most importantly that a caller must include the query string
+ * somewhere in what it passes, because a robots.txt rule may depend on it
+ * (AP's `/search?q=*` is a real example) and there is no way to recover a
+ * query the caller already discarded.
  *
  * **Group selection, and why "no group matches" resolves to ALLOW rather
  * than this module's usual deny-under-uncertainty default:** RFC 9309 and
@@ -189,13 +279,14 @@ function resolveGroup(groups: Group[], userAgent: string): Group | null {
  * following exceptions" meaning, with no extra special-casing needed here.
  */
 export function isAllowed(robotsTxt: string, userAgent: string, path: string): boolean {
+  const normalizedPath = normalizePath(path);
   const group = resolveGroup(parseGroups(robotsTxt), userAgent);
   if (!group) return true;
 
   let maxAllowLen = -1;
   let maxDisallowLen = -1;
   for (const rule of group.rules) {
-    if (!rule.regex.test(path)) continue;
+    if (!rule.regex.test(normalizedPath)) continue;
     if (rule.type === 'allow') maxAllowLen = Math.max(maxAllowLen, rule.pattern.length);
     else maxDisallowLen = Math.max(maxDisallowLen, rule.pattern.length);
   }
@@ -207,16 +298,17 @@ export function isAllowed(robotsTxt: string, userAgent: string, path: string): b
 // ---------------------------------------------------------------------------
 
 /**
- * Sent on every robots.txt request so an operator can identify what asked.
- * Deliberately NOT imported from `src/fetch/http.ts`: that file is being
- * actively rewritten by a concurrently-running task as this one lands, and
- * importing it now would couple this module (and its tests) to that file's
- * unsettled state. An independent, undramatic string is the safer choice
- * here; unifying the two once http.ts is stable is a natural follow-up and
- * not this task's to make.
+ * The bare product token -- the part of `USER_AGENT` before its first `/`,
+ * by HTTP User-Agent convention (`product/version (comment)`) -- for
+ * callers that need to evaluate `isAllowed`'s `userAgent` parameter as
+ * "would OUR real identity be let through here?". Derived from `USER_AGENT`
+ * rather than a separately hand-maintained literal so it cannot drift from
+ * what actually gets sent (fix round 1, Finding 4). `?? USER_AGENT` is an
+ * unreachable-in-practice fallback for the type checker, not a real branch:
+ * `USER_AGENT` is a non-empty literal template that always contains at
+ * least one `/`.
  */
-export const ROBOTS_USER_AGENT =
-  'watchfloor (robots.txt check; self-hosted personal feed reader, single user)';
+export const PRODUCT_TOKEN = USER_AGENT.split('/')[0] ?? USER_AGENT;
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24h, per the brief
 const DEFAULT_TIMEOUT_MS = 10_000; // matches src/fetch/http.ts's own default (duplicated, not imported)
@@ -320,11 +412,16 @@ export async function fetchRobots(origin: string, opts: FetchRobotsOptions = {})
     return cached.body;
   }
 
+  // Covers the whole operation, connect through final byte: if this fires
+  // while `response.text()` below is still awaiting the body, that read
+  // rejects too, and the catch around it (fix round 1, Finding 3) sees
+  // timeoutSignal.aborted -- same property src/fetch/http.ts's own
+  // timeoutSignal relies on for its two timeout call sites.
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   let response: Response;
   try {
     response = await fetch(target, {
-      headers: { 'User-Agent': ROBOTS_USER_AGENT },
+      headers: { 'User-Agent': USER_AGENT },
       signal: timeoutSignal,
       redirect: 'follow',
     });
@@ -337,7 +434,27 @@ export async function fetchRobots(origin: string, opts: FetchRobotsOptions = {})
   }
 
   if (response.ok) {
-    const body = await response.text();
+    // Fix round 1, Finding 3 (Important): this used to sit outside every
+    // try/catch, so a failure specifically in THIS phase -- headers already
+    // received (response.ok true), then the body stream stalls past
+    // timeoutMs, or the connection resets mid-body -- escaped as a raw
+    // DOMException/TypeError, not `RobotsUnavailableError`, contradicting
+    // this function's own documented contract that callers can rely on
+    // that type (and its `.origin`) for every unreachable-robots.txt case.
+    // Reuses the same timeoutSignal and describeTransportFailure as the
+    // fetch() catch above: the signal covers the whole operation (its doc
+    // comment on construction says so), so a timeout firing mid-body-read
+    // is `timeoutSignal.aborted` here exactly as it would be up there.
+    let body: string;
+    try {
+      body = await response.text();
+    } catch (err) {
+      throw new RobotsUnavailableError(
+        cacheKey,
+        describeTransportFailure(err, timeoutSignal.aborted, timeoutMs),
+        { cause: err },
+      );
+    }
     cache.set(cacheKey, { body, fetchedAt: Date.now() });
     return body;
   }
