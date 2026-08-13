@@ -43,16 +43,16 @@ interface FetchStateRow {
   updated_at: string;
 }
 
-// Base unit for exponential backoff. The brief's formula is
-// `poll_interval * 2^consecutiveFailures`, but `poll_interval` is per-source
-// config (config/sources.yaml, read by src/sources/load.ts) that this module
-// has no access to: fetchState.ts takes only a Db and plain identifiers, and
-// the brief's recordFailure signature has no room for a source's config to
-// pass through. A fixed base stands in for it -- every source backs off from
-// the same starting point. If per-source pacing turns out to matter, the
-// scheduler task (which holds both the loaded Source and this state) is the
-// place to add it, e.g. by widening recordFailure with an optional override.
-const BASE_BACKOFF_MS = 60_000; // 1 minute
+// Floor for recordFailure's backoff ceiling -- see recordFailure below.
+//
+// Fix round 1 (task-1-report.md): this used to be applied as a flat cap
+// (`min(x, MAX_BACKOFF_MS)`), which let a source whose own poll_interval
+// exceeds 6h have its backoff capped BELOW its healthy cadence -- a failing
+// instance of a once-a-day source was reachable every 6h, four times more
+// often than a healthy instance of the same source. recordFailure now uses
+// `max(MAX_BACKOFF_MS, pollIntervalMs)` as the actual ceiling, never
+// MAX_BACKOFF_MS alone, so the cap can only ever widen past 6h, never narrow
+// a source's own cadence.
 export const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000; // 6 hours, per the brief
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -174,20 +174,46 @@ export function recordSuccess(
 
 /**
  * Records a failed fetch and applies exponential backoff:
- * `nextEligibleAt = now + min(BASE_BACKOFF_MS * 2^consecutiveFailures, MAX_BACKOFF_MS)`,
- * using the just-incremented consecutiveFailures -- so the delay strictly
- * doubles on every consecutive failure (2x, 4x, 8x, ... base) until the
- * 6-hour cap. Conditional-request validators and the last success are left
- * untouched: a failed attempt doesn't invalidate the last known-good state.
+ * `nextEligibleAt = now + min(pollIntervalMs * 2^consecutiveFailures, ceilingMs)`,
+ * where `ceilingMs = max(MAX_BACKOFF_MS, pollIntervalMs)`, using the
+ * just-incremented consecutiveFailures -- so the delay strictly doubles on
+ * every consecutive failure (2x, 4x, 8x, ... pollIntervalMs) until the
+ * ceiling.
+ *
+ * INVARIANT: a source in backoff must never become eligible sooner than its
+ * own healthy pollIntervalMs, at any failure count. A flat
+ * `min(x, MAX_BACKOFF_MS)` cap breaks this for any source whose
+ * poll_interval exceeds 6h -- see MAX_BACKOFF_MS's comment and
+ * task-1-report.md's fix-round-1 entry for the worked example that caught
+ * it. Widening the ceiling to `max(MAX_BACKOFF_MS, pollIntervalMs)` restores
+ * it: both the first doubling (`pollIntervalMs * 2`) and the ceiling itself
+ * are bounded below by pollIntervalMs, so the invariant holds at every
+ * failure count, not just in the limit.
+ *
+ * `pollIntervalMs` is the source's configured poll_interval
+ * (config/sources.yaml, parsed by the caller -- this module has no YAML
+ * access) in milliseconds. Required, not optional, unlike `now`: there is no
+ * safe universal default for it that wouldn't silently reintroduce the bug
+ * above for a caller that omits it.
+ *
+ * Conditional-request validators and the last success are left untouched: a
+ * failed attempt doesn't invalidate the last known-good state.
  *
  * `now` defaults to the wall clock; see recordSuccess.
  */
-export function recordFailure(db: Db, sourceId: string, error: string, now: string = nowIso()): void {
+export function recordFailure(
+  db: Db,
+  sourceId: string,
+  error: string,
+  pollIntervalMs: number,
+  now: string = nowIso(),
+): void {
   assertCanonicalTimestamp('now', now);
 
   const existing = getRow(db, sourceId);
   const consecutiveFailures = (existing?.consecutive_failures ?? 0) + 1;
-  const delayMs = Math.min(BASE_BACKOFF_MS * 2 ** consecutiveFailures, MAX_BACKOFF_MS);
+  const ceilingMs = Math.max(MAX_BACKOFF_MS, pollIntervalMs);
+  const delayMs = Math.min(pollIntervalMs * 2 ** consecutiveFailures, ceilingMs);
   const nextEligibleAt = new Date(Date.parse(now) + delayMs).toISOString();
 
   upsert(db, {
