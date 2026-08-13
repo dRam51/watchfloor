@@ -1,0 +1,157 @@
+[
+  {
+    "note": "scheme+host lowercasing, path case preserved",
+    "input": "HTTPS://ExAmPle.COM/Path/To/Article",
+    "expected": "https://example.com/Path/To/Article"
+  },
+  {
+    "note": "strip www",
+    "input": "https://www.example.com/foo",
+    "expected": "https://example.com/foo"
+  },
+  {
+    "note": "drop fragment",
+    "input": "https://example.com/foo#section-2",
+    "expected": "https://example.com/foo"
+  },
+  {
+    "note": "tracking params stripped, rest sorted",
+    "input": "https://example.com/foo?z=1&utm_source=newsletter&a=2",
+    "expected": "https://example.com/foo?a=2&z=1"
+  },
+  {
+    "note": "fbclid + gclid stripped",
+    "input": "https://example.com/foo?gclid=abc123&fbclid=xyz789&id=42",
+    "expected": "https://example.com/foo?id=42"
+  },
+  {
+    "note": "mailchimp mc_cid/mc_eid stripped, empty query removed",
+    "input": "https://example.com/foo?mc_cid=abc123&mc_eid=def456",
+    "expected": "https://example.com/foo"
+  },
+  {
+    "note": "ref + source stripped",
+    "input": "https://example.com/foo?ref=homepage&source=twitter&id=9",
+    "expected": "https://example.com/foo?id=9"
+  },
+  {
+    "note": "at_* stripped",
+    "input": "https://example.com/foo?at_medium=email&at_campaign=weekly&x=1",
+    "expected": "https://example.com/foo?x=1"
+  },
+  {
+    "note": "trailing slash stripped on non-root",
+    "input": "https://example.com/foo/",
+    "expected": "https://example.com/foo"
+  },
+  {
+    "note": "root path preserved as slash",
+    "input": "https://example.com/",
+    "expected": "https://example.com/"
+  },
+  {
+    "note": "bare host gets root slash",
+    "input": "https://example.com",
+    "expected": "https://example.com/"
+  },
+  {
+    "note": "multiple trailing slashes collapse to none (idempotence-critical)",
+    "input": "https://example.com/foo//",
+    "expected": "https://example.com/foo"
+  },
+  {
+    "note": "force https for known-https host",
+    "input": "http://arxiv.org/abs/2508.01234",
+    "expected": "https://arxiv.org/abs/2508.01234"
+  },
+  {
+    "note": "unknown host: scheme left alone, not forced",
+    "input": "http://some-obscure-blog.example/post/1",
+    "expected": "http://some-obscure-blog.example/post/1"
+  },
+  {
+    "note": "google news redirect url left alone structurally, generic rules still apply",
+    "input": "HTTPS://News.Google.com/rss/articles/CBMixyz123ABC?oc=5#x",
+    "expected": "https://news.google.com/rss/articles/CBMixyz123ABC?oc=5"
+  },
+  {
+    "note": "arxiv version suffix NOT stripped (not a URL-textual rule)",
+    "input": "https://arxiv.org/abs/2508.01234v2",
+    "expected": "https://arxiv.org/abs/2508.01234v2"
+  },
+  {
+    "note": "repeated query key: stable sort keeps relative order",
+    "input": "https://example.com/foo?b=2&a=1&b=1",
+    "expected": "https://example.com/foo?a=1&b=2&b=1"
+  },
+  {
+    "note": "nvd cve detail url passthrough",
+    "input": "https://nvd.nist.gov/vuln/detail/CVE-2026-12345",
+    "expected": "https://nvd.nist.gov/vuln/detail/CVE-2026-12345"
+  },
+  {
+    "note": "ap article url passthrough",
+    "input": "https://apnews.com/article/example-slug-123abc",
+    "expected": "https://apnews.com/article/example-slug-123abc"
+  },
+  {
+    "note": "federal register: www stripped + utm removed + fragment dropped + remaining param kept",
+    "input": "https://www.federalregister.gov/documents/2026/08/10/2026-12345/example-rule?utm_campaign=daily&type=RULE#open-comment",
+    "expected": "https://federalregister.gov/documents/2026/08/10/2026-12345/example-rule?type=RULE"
+  },
+  {
+    "note": "uppercase scheme+www, unknown host: only case/www normalized, no https force",
+    "input": "HTTP://WWW.EXAMPLE.COM/Foo/Bar/",
+    "expected": "http://example.com/Foo/Bar"
+  },
+  {
+    "note": "substack utm_source+utm_medium fully removed leaves no query string",
+    "input": "https://example.substack.com/p/some-post-title?utm_source=substack&utm_medium=email",
+    "expected": "https://example.substack.com/p/some-post-title"
+  },
+  {
+    "note": "substack CUSTOM domain does NOT get https-forced (only *.substack.com subdomains are known-https; custom domains are unverified)",
+    "input": "http://www.semianalysis.com/p/some-post",
+    "expected": "http://semianalysis.com/p/some-post"
+  },
+  {
+    "note": "port preserved through www-strip and normalization",
+    "input": "http://www.example.com:8080/foo/",
+    "expected": "http://example.com:8080/foo"
+  },
+  {
+    "note": "userinfo preserved (not a rule we touch)",
+    "input": "https://user:pass@example.com/foo",
+    "expected": "https://user:pass@example.com/foo"
+  },
+  {
+    "note": "already-canonical url is a fixed point",
+    "input": "https://example.com/foo?a=1&b=2",
+    "expected": "https://example.com/foo?a=1&b=2"
+  },
+  {
+    "note": "github repo url passthrough, https forced from http",
+    "input": "http://github.com/anthropics/claude-code",
+    "expected": "https://github.com/anthropics/claude-code"
+  },
+  {
+    "note": "whitehouse actions rss item url, www stripped",
+    "input": "https://www.whitehouse.gov/briefing-room/presidential-actions/2026/08/10/example-action/",
+    "expected": "https://whitehouse.gov/briefing-room/presidential-actions/2026/08/10/example-action"
+  },
+  {
+    "note": "scotus slip opinion pdf-style path, query with tracking param",
+    "input": "https://www.supremecourt.gov/opinions/25pdf/example.pdf?utm_source=rss",
+    "expected": "https://supremecourt.gov/opinions/25pdf/example.pdf"
+  },
+  {
+    "note": "weather.gov alert url with mixed-case host",
+    "input": "HTTPS://WWW.weather.gov/fl/alert-123",
+    "expected": "https://weather.gov/fl/alert-123"
+  },
+  {
+    "note": "composite: uppercase+www+http+utm+ref+fragment+trailing-slash all compose in one pass",
+    "input": "HTTP://WWW.EXAMPLE.COM/Archive/Post/?utm_source=digest&utm_medium=email&ref=footer&keep=1#comments",
+    "expected": "http://example.com/Archive/Post?keep=1"
+  }
+]
