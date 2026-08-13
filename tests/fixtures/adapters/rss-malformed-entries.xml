@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hand-built (not captured from a live source) fixture for
+  tests/adapters/rss.test.ts. Deliberately mixes well-formed <item> entries
+  with individually-defective ones, all inside an otherwise well-formed RSS
+  2.0 document, to prove one bad entry never discards its neighbours. See
+  task-6-report.md ("what counts as skippable") for exactly which defects
+  below are expected to drop the entry versus merely null out one optional
+  field.
+-->
+<rss version="2.0">
+<channel>
+  <title>Malformed RSS fixture</title>
+  <link>https://example.test/feed</link>
+  <description>A mix of good and deliberately broken items.</description>
+
+  <item>
+    <title>Good Item One</title>
+    <link>https://example.test/articles/good-one</link>
+    <pubDate>Tue, 11 Aug 2026 21:28:35 +0000</pubDate>
+    <description>A perfectly normal item.</description>
+    <dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">Alice Author</dc:creator>
+  </item>
+
+  <item>
+    <!-- no <link> at all: must be dropped -->
+    <title>Missing Link</title>
+    <pubDate>Tue, 11 Aug 2026 21:28:35 +0000</pubDate>
+    <description>This item has no link and must be skipped.</description>
+  </item>
+
+  <item>
+    <!-- <title> present but empty: must be dropped -->
+    <title></title>
+    <link>https://example.test/articles/empty-title</link>
+    <description>This item has an empty title and must be skipped.</description>
+  </item>
+
+  <item>
+    <title>Unparseable Date Survives</title>
+    <link>https://example.test/articles/bad-date</link>
+    <pubDate>not a real date at all</pubDate>
+    <description>
+      publishedAt is required by nothing -- RawItem.publishedAt is optional,
+      and interpreting a date string is normalizeItem's job, not this
+      adapter's. This item must survive with publishedAt passed through
+      VERBATIM as the raw (unparseable) string, not dropped and not
+      null'd out by the adapter itself.
+    </description>
+  </item>
+
+  <item>
+    <title>Good Item Two</title>
+    <link>https://example.test/articles/good-two</link>
+    <pubDate>Wed, 12 Aug 2026 09:00:00 +0000</pubDate>
+    <description>Another perfectly normal item, positioned right after several bad ones.</description>
+  </item>
+
+  <item>
+    <title>Whitespace Only Link</title>
+    <!-- link is present but blank after the XML layer trims it: same as missing -->
+    <link>   </link>
+    <description>Link is present but blank -- must be skipped same as a missing link.</description>
+  </item>
+
+  <item>
+    <title>Good Item Three</title>
+    <link>https://example.test/articles/good-three</link>
+    <!-- no <pubDate> at all: fine, publishedAt is simply null, not a reason to drop -->
+    <description>No pubDate at all -- still a valid item.</description>
+  </item>
+
+  <item>
+    <!-- <title> element entirely absent (not just empty): must be dropped -->
+    <link>https://example.test/articles/no-title-element</link>
+    <description>This item has no title element at all and must be skipped.</description>
+  </item>
+
+</channel>
+</rss>

@@ -1,0 +1,223 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rss xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+  <channel>
+    <title>cs.AI updates on arXiv.org</title>
+    <link>http://rss.arxiv.org/rss/cs.AI</link>
+    <description>cs.AI updates on the arXiv.org e-print archive.</description>
+    <atom:link href="http://rss.arxiv.org/rss/cs.AI" rel="self" type="application/rss+xml"/>
+    <docs>http://www.rssboard.org/rss-specification</docs>
+    <language>en-us</language>
+    <lastBuildDate>Thu, 13 Aug 2026 04:00:08 +0000</lastBuildDate>
+    <managingEditor>rss-help@arxiv.org</managingEditor>
+    <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+    <skipDays>
+      <day>Sunday</day>
+      <day>Saturday</day>
+    </skipDays>
+    <item>
+      <title>Dynamic Governance of Multi-LLM Agent Systems for Collaborative Conversational Outcomes</title>
+      <link>https://arxiv.org/abs/2608.11207</link>
+      <description>arXiv:2608.11207v1 Announce Type: new 
+Abstract: When two LLM agents with structurally opposed objectives interact across multiple turns, the absence of a shared goal function produces not competition but collapse: the visitor capitulates, the site agent stops varying its approach, and the conversation terminates without achieving either agent's stated objective. This paper asks whether a control-theoretic governance layer can substitute for that missing goal function. The Experience Orchestrator (EO) addresses this in a simulated financial services environment where a site agent guides a visitor toward advisor contact while the visitor maintains psychologically realistic resistance. EO governs the joint trajectory through three mechanisms: a Contextual Bandit (CB) that selects content arms calibrated from real-world web analytics, a PID controller that enforces behavioral consistency via dynamic schema constraints, and a POMDP belief tracker that maintains a probabilistic model of visitor intent. Across 60,000 simulations, EO achieves a +32 percentage point lift in high-intent advisor contact rate (78.1% vs. 46.1% over a naive LLM control), with CB variant selection accounting for 97% of between-factor outcome variance -- confirming that the governance policy, not environmental initial conditions, determines where trajectories end up. Persona-level analysis reveals two distinct regimes: for visitors with no natural inclination toward conversion, the governance layer is the difference between a functional system and a non-functional one; for visitors already near alignment, a naive LLM's empathetic defaults are largely sufficient. All findings are conditional on LLM-to-LLM simulation. The PID controller has not been calibrated against real human unpredictability, and validating EO on live traffic is the critical next step.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11207v1</guid>
+      <category>cs.AI</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://arxiv.org/licenses/nonexclusive-distrib/1.0/</dc:rights>
+      <dc:creator>Alexander Liss, Nicholas Desmond, Santiago Gil Gallego</dc:creator>
+    </item>
+    <item>
+      <title>Distribird: Literature-Informed Prior Distribution Design for Bayesian Model Calibration</title>
+      <link>https://arxiv.org/abs/2608.11210</link>
+      <description>arXiv:2608.11210v1 Announce Type: new 
+Abstract: Bayesian calibration of process-based models requires a prior distribution for each model parameter. Despite decades of methodological work, researchers almost always fall back on uniform priors. The main reason is that building informative priors from scientific literature is slow and needs both domain and statistical expertise. We present \textbf{Distribird}, an agentic web application that automates this process. Given a parameter name, physical description, and domain context, Distribird deploys a multi-agent pipeline that searches the literature, extracts and weights reported values by domain relevance, and fits a probability distribution via AIC model selection. When no literature is available, the system falls back to sensible uninformative alternatives, and clearly reports both the evidence behind and the confidence level of every prior it produces. It is designed for the problems where the models have physically interpretable parameters, where domain knowledge exists in the published literature. We evaluate the tool on 24~parameters across 10 scientific domains comparing three open-weight models (Qwen3.6 27B, Gemma 4 31B, Mistral Small 4 119B) with a single-prompt LLM baseline. On prior quality the full pipeline \emph{matches} this baseline. Every prior is traced to the specific papers and values from which it was constructed; a built-in validity layer declines to produce priors for out-of-scope requests, whereas the single-prompt baseline returns confident but unfounded priors for them in 11 of 30~model--parameter cases; and every language-model call runs locally, so no parameter description or unpublished modelling detail is transmitted to a third-party LLM provider (only generated search terms reach the public literature databases). For scientific use, we argue these properties matter more than a marginal improvement in point-estimate accuracy.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11210v1</guid>
+      <category>cs.AI</category>
+      <category>cs.MA</category>
+      <category>cs.SE</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by/4.0/</dc:rights>
+      <dc:creator>Patrik P. S\"uli, Gy\"orgy Eigner, Roland Holl\'os</dc:creator>
+    </item>
+    <item>
+      <title>A Forced-Structure Reduction and Verifiable Bounds for Conway's 99-Graph</title>
+      <link>https://arxiv.org/abs/2608.11211</link>
+      <description>arXiv:2608.11211v1 Announce Type: new 
+Abstract: Conway's 99-graph problem asks whether a strongly regular graph with parameters $\mathrm{srg}(99,14,1,2)$ exists. We report a systematic, fully reproducible attack by an autonomous AI research agent, scored under the track's partial-credit metric. Our verifiable contributions are: (1) an exhaustive proof that no circulant graph on $\mathbb{Z}/99$ satisfies more than $3366/4950=68.0\%$ of the constraints ($33$ of $49$ difference-classes), with the same ceiling for the other abelian group of order $99$; (2) a forced-structure reduction: $\lambda=1$ makes each neighbourhood a perfect matching and $\mu=2$ puts the outer vertices in bijection with non-matched neighbour-pairs, collapsing existence to a $12$-regular graph on $84$ vertices, encoded for CP-SAT and validated by recovering the unique $\mathrm{srg}(9,4,1,2)$; (3) a validated prescribed-automorphism orbit-existence framework (fixed-point-free and single-fixed-point actions, checked on $\mathrm{srg}(9,4,1,2)$ and the Paley graph $\mathrm{srg}(13,6,2,3)$), and (4) a best verified artifact at $69.43\%$, with evidence that this is a robust frontier (fourteen distinct methods, none exceeding it) entangled with the open question, since any provable bound below $4950$ is a non-existence proof.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11211v1</guid>
+      <category>cs.AI</category>
+      <category>cs.SC</category>
+      <category>math.CO</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by-nc-nd/4.0/</dc:rights>
+      <dc:creator>Aalok Thakkar</dc:creator>
+    </item>
+    <item>
+      <title>Detecting a Route Flip Is Easier Than Knowing Whether to Fix It: Causal Route-Mediated Damage in Quantized Mixture-of-Experts</title>
+      <link>https://arxiv.org/abs/2608.11212</link>
+      <description>arXiv:2608.11212v1 Announce Type: new 
+Abstract: Top-k Mixture-of-Experts (MoE) routing is discontinuous, so a deployment-motivated numerical disturbance -- simulated 4-bit KV-cache quantization read by a protected BF16 gate -- pushes tokens across decision boundaries and flips which experts fire. This paper proposes no new mitigation; it supplies a causal apparatus, empirical findings, and a detection-limit result. A four-run apparatus prices the route-mediated fraction (RMF) of quantization damage, a token-level attribution decomposes it by mechanism, and pre-registered probes carry the findings across three architectures. On OLMoE-1B-7B at 4-bit KV (pilot), about a third of the damage is routing-mediated: RMF ~ 0.31 (discovery 0.31 [0.20, 0.41]; process-replicated mean 0.313 +/- 0.020; pre-registered re-execution 0.231). The deployable router margin detects that a flip occurred (AUC 0.772) but cannot tell a harmful flip from a helpful one (at chance): among the tested local, inference-observable router statistics we find no predictor of a flip's loss sign above chance -- an empirical benefit-detection barrier bounding selective repair restricted to this feature family. The signed-flip tax and sign-inseparability carry cross-model; the clean-reference remedy's payout is architecture-modulated; a controlled same-checkpoint flag-swap re-scopes the gate's normalization convention to a damage-magnitude moderator, not a route-recoverability mechanism. A real int4 KV kernel yields a fraction compatible with the fake-quant dose curve but underpowered (95% CI [-0.111, 0.394] includes zero) -- ruling out gross disagreement, not an independent replication. Hypotheses, thresholds, and evaluations were pre-registered before measurement, with misses reported; a pre-registered held-out read replicates the partition and the near-cancelling tax out of sample, while the strict impossibility exclusion narrowly misses.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11212v1</guid>
+      <category>cs.AI</category>
+      <category>cs.CL</category>
+      <category>cs.LG</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://arxiv.org/licenses/nonexclusive-distrib/1.0/</dc:rights>
+      <dc:creator>Parvel Gu</dc:creator>
+    </item>
+    <item>
+      <title>Poor Man's Agentic Modeling: Simulating Large LLM-Agent Societies on a Laptop</title>
+      <link>https://arxiv.org/abs/2608.11215</link>
+      <description>arXiv:2608.11215v1 Announce Type: new 
+Abstract: Simulating societies of many large language model (LLM) agents is expensive, yet the questions asked of such simulations are usually macroscopic: phase behaviour, stylised facts, and scaling with the number of agents $N$, not the cognition of any single agent. We turn a statistical-physics observation into a method: replace each LLM agent by a low-parameter model fitted from a few hundred to a few thousand cheap queries, then run the society at any $N$ on a laptop. Whether this works is decided before the simulation runs, chiefly by what each agent perceives. We introduce an [interaction order x memory] taxonomy that maps perception and memory to an effective theory and a predicted $N$-trend of the surrogate error. We validate it on a faithful reimplementation of the LLM macroeconomy EconAgent and seven further named LLM simulations, with agent decisions cloned from genuine LLM elicitations (primarily DeepSeek) for a few dollars; the predicted error trends hold cell by cell, and the two refuted predictions, both on a strongly saturating response and traced to its curvature, are themselves matched quantitatively by the theory with no free parameters.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11215v1</guid>
+      <category>cs.AI</category>
+      <category>cond-mat.stat-mech</category>
+      <category>cs.CL</category>
+      <category>cs.LG</category>
+      <category>cs.MA</category>
+      <category>physics.soc-ph</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://arxiv.org/licenses/nonexclusive-distrib/1.0/</dc:rights>
+      <dc:creator>Igor Itkin</dc:creator>
+    </item>
+    <item>
+      <title>AutoWorldModel-Bench: A State-Centric Benchmark for Automated World-Model Research</title>
+      <link>https://arxiv.org/abs/2608.11216</link>
+      <description>arXiv:2608.11216v1 Announce Type: new 
+Abstract: World modeling is an unsettled field: architectures, training objectives, and state representations interact in complex ways, and no single recipe dominates across environments. This makes it an ideal testbed for AI coding agents acting as autonomous researchers--a setting in which the improvement direction is not specified in advance, unlike the engineering-to-spec tasks that dominate current agent benchmarks. We introduce AutoWorldModel-Bench, a closed-loop benchmark in which frontier coding agents autonomously improve a provided world-model starter under a fixed compute budget. The benchmark spans eight game environments under a unified structured-state representation--ground-truth entity state extracted from each game and consumed through a shared tensor format--which isolates dynamics modeling from perception and enables minutes-per-run iteration. Across 64 sessions, Codex-5.4 and Claude Opus 4.6 improve their starter on 63; in 91% of sessions the winning edit is a non-trivial research-style modification--a new objective, representation, rollout procedure, or architectural change--rather than a hyperparameter tweak. Our benchmark offers a setting in which frontier coding agents can be evaluated on open-ended research rather than engineering-to-spec problems.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11216v1</guid>
+      <category>cs.AI</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by-nc-nd/4.0/</dc:rights>
+      <dc:creator>Marjan Moodi, Xuankang Zhu, Fernando De Mesentier Silva, Harold Chaput, Mohammad Reza Taesiri</dc:creator>
+    </item>
+    <item>
+      <title>MaSRead: Content-Addressed Reading of Replicated Latent Stores</title>
+      <link>https://arxiv.org/abs/2608.11218</link>
+      <description>arXiv:2608.11218v1 Announce Type: new 
+Abstract: Independent agents that reason in latent space can share computed state as key-value cache fragments rather than text. Merged by a conflict-free replicated data type, these fragments form a store that converges under any delivery order or duplication. Yet a later query, unknown at encode time, cannot reliably read the merged cache: colocated fragments interfere, so colocation is not addressability. MaSRead addresses the read to content. It routes through opaque keyed tag sets derived from fragment words and decodes each selected fragment under a hard attention mask that hides the rest. Under lexical connectivity, a graph walk reaches the fragments required by a multi-hop query. Across chain, pipeline, symmetric, hub, and natural-language stores, MaSRead recovers visited fragments in isolation, remains effective as unrelated fragments accumulate, and transfers to another model family. After routing, materialized decoding depends on fragment length rather than total store size; end-to-end work still includes store-dependent routing and one read per visited fragment. The limits are explicit: lexical routing can miss disconnected evidence, and answer composition remains bounded by the frozen reader. Thus a replicated latent store becomes selectively readable for later queries when the needed fragments connect to the query through content.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11218v1</guid>
+      <category>cs.AI</category>
+      <category>cs.LG</category>
+      <category>cs.MA</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by/4.0/</dc:rights>
+      <dc:creator>Carlos Baquero, Lu\'is Brito, Jo\~ao Resende</dc:creator>
+    </item>
+    <item>
+      <title>From Monolithic to Modular: Segment-level Automatic Prompt Optimization</title>
+      <link>https://arxiv.org/abs/2608.11219</link>
+      <description>arXiv:2608.11219v1 Announce Type: new 
+Abstract: Automatic Prompt Optimization (APO) often rewrites prompts monolithically, which can improve one behavior while degrading others. We present SAPO, a segment-level APO method that decomposes prompts into role, context, tasks, and output format, then applies targeted improvements based on top-5 and bottom-5 examples. The optimization loop uses one LLM with static meta-prompts and structured outputs for segmentation, weakness analysis, and candidate generation. We describe a train/validation protocol and a two-stage generation process: (1) segment-level diagnosis and recommendation extraction, (2) candidate synthesis constrained by weak/strong segment signals. Using the evaluation setup across SQuADv2, TweetEval, XSUM, CommonGen, and GSM8K on GPT-3.5-Turbo and GPT-4o-mini, SAPO achieves the best average score against Zero-shot and strong APO baselines including APE, OPRO, EvoPrompt, GEPA, and StraGO.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11219v1</guid>
+      <category>cs.AI</category>
+      <category>cs.CL</category>
+      <category>cs.LG</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by/4.0/</dc:rights>
+      <dc:creator>Nikita Kulin, Viktor Zhuravlev, Artur Khairullin, Sergey Muravyov, Ilya Makarov, Daniil Sukhorukov, Ekaterina Averkova</dc:creator>
+    </item>
+    <item>
+      <title>LLMs in Process Diagram Engineering: From Optimal PFDs to Validated P&amp;IDs</title>
+      <link>https://arxiv.org/abs/2608.11220</link>
+      <description>arXiv:2608.11220v1 Announce Type: new 
+Abstract: Nowadays, the creation of a process flow diagram (PFD) and its subsequent transformation into a piping and instrumentation diagram (P&amp;ID) is predominantly performed manually. Applying artificial intelligence in the task could potentially lead not only to process automation and time savings, but also to financial gains by exploring numerous diagram's topology options and reducing manual labor. This research presents P&amp;ID Pilot - a practical end-to-end AI pipeline capable of handling flowsheet developing for both stages. The first stage focuses on PFD synthesis, whereas the second is directed toward modifying the generated PFD into P&amp;ID. After comparing four different methods, the hybrid approach combining genetic algorithms (GA) and large language models (LLM) is shown to generate the optimal valid PFD topology, achieving the lowest loss value among all the methods, while satisfying the required outlet flow parameters without engineering-rule violations. For the second stage, the proposed LLM-based agent successfully transforms the generated PFD into a source-grounded P&amp;ID by producing validated, executable modifications through a restricted engineering software development kit, achieving 100% execution success while maintaining compliance with domain-specific rules and reference graph structures. This unified pipeline - coupling GA/LLM-driven synthesis with an LLM-based transformation agent - offers a feasible path toward end-to-end process design automation by producing validated, deployable outputs and substantially reduces manual engineering effort.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11220v1</guid>
+      <category>cs.AI</category>
+      <category>cs.MA</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by-nc-nd/4.0/</dc:rights>
+      <dc:creator>Timur Zakarin, Sergei Voitov, Sergei Shumilin, Evgeny Burnaev</dc:creator>
+    </item>
+    <item>
+      <title>A Conceptual Framework for Refining Influence Knowledge from Simulation Evidence in Cyber-Physical Systems</title>
+      <link>https://arxiv.org/abs/2608.11221</link>
+      <description>arXiv:2608.11221v1 Announce Type: new 
+Abstract: Cyber-physical systems (CPS) are typically developed by multiple stakeholders who produce artefacts tailored to their specific domains of expertise. The behaviour of these systems emerges from the interaction between those artefacts and their operational environment. Simulation and co-simulation have become essential approaches for analysing CPS behaviour and, through simulation campaigns, developers can explore system responses under changing conditions, including interactions with the environment. However, the lack of details and understanding of some environmentmediated interactions (typically the ones beyond direct sensing and actuation), which remain unmodelled due to their complexity, a lack of time, or a lack of domain experience, hinders the proper comprehension and exploitation of simulation results. To address these limitations, we propose a conceptual framework leveraging the novel concept of Influences to support the iterative and incremental refinement of simulation campaigns and deepen the understanding of the system behaviour. We demonstrate the proposed approach through a case study involving a mobile robot implemented using Simulink/Gazebo co-simulation.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11221v1</guid>
+      <category>cs.AI</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://arxiv.org/licenses/nonexclusive-distrib/1.0/</dc:rights>
+      <arxiv:journal_reference>ACM/IEEE 29th International Conference on Model Driven Engineering Languages and Systems, Oct 2026, Malaga, Spain</arxiv:journal_reference>
+      <dc:creator>Barbara da Silva Oliveira (UniCA, Laboratoire I3S - COMRED, KAIROS), Julien Deantoni (UniCA, Laboratoire I3S - COMRED, KAIROS), Nicolas Ferry (Laboratoire I3S - COMRED, KAIROS, UniCA)</dc:creator>
+    </item>
+    <item>
+      <title>Harnessing agent memory to build lifelong AI partners for materials scientists</title>
+      <link>https://arxiv.org/abs/2608.11224</link>
+      <description>arXiv:2608.11224v1 Announce Type: new 
+Abstract: Materials research advances through accumulated experience - scripts that work, protocols that are trusted, warnings attached to failed calculations or experiments, and judgement that links a new question to an old result. This experience is essential for reproducibility and knowledge transfer, yet it is usually fragmented across notebooks, repositories, job logs and individual memory, and it is rarely portable across artificial-intelligence agents. Here we argue that a lifelong AI partner for materials science can be designed around persistent memory rather than around a particular agent implementation. We introduce a self-evolving memory framework that stores scientific experience as inspectable facts and executable skills, so that observations, failure boundaries, protocols and validation checks can be retrieved, revised and migrated across models. We evaluate the idea in three computational settings that expose different layers of materials-research competence. In 49 real-world materials-tool-use questions comprising 138 executable subtasks, memory nearly doubles GPT-5.2 task success without model-parameter updates. In elemental-solid equation-of-state calculations, memory converts a wavefunction-initialization failure into a pre-execution guardrail, improving outcomes from 22/1/4 to 25/2/0 Correct/Partial/Error and avoiding 92% of repeated errors. In 13 practical material simulation workflows, remembered skills and failure facts halve the aggregate trace burden (tokens) and reduce tool calls by over a factor of two by the third round, while preserving physically meaningful outputs in band-gap, phonon, vacancy and work-function analyses. These results show that agent memory can serve as a durable scientific asset; a portable, self-improving record of materials-research experience that outlives any single model or agent stack.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11224v1</guid>
+      <category>cs.AI</category>
+      <category>cond-mat.mtrl-sci</category>
+      <category>cs.CE</category>
+      <category>cs.CL</category>
+      <category>cs.MA</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by-nc-sa/4.0/</dc:rights>
+      <dc:creator>Siyu Liu, Bo Hu, Beilin Ye, He Cao, David J. Srolovitz, Tongqi Wen</dc:creator>
+    </item>
+    <item>
+      <title>Identity from the Outside: A Conceptual Framework and Research Program for AI Personality Clones</title>
+      <link>https://arxiv.org/abs/2608.11225</link>
+      <description>arXiv:2608.11225v1 Announce Type: new 
+Abstract: AI "personality clones" force a re-examination of personal identity in operational terms. Setting aside the hard problem of consciousness, we approach identity through the indiscernibility of manifestations, as assessed by an observer over a duration. We distinguish three criteria that "identity" conflates: fidelity to a target person, generic human-likeness, and individuality. We propose a six-term factorization of observed identity (substrate, dispositions, memory, update dynamics, context, exogenous contingencies), with a state-space formulation. Indiscernibility is defined as one minus a judge's distinguishing advantage, and the factorization's coefficients become local sensitivities estimable by randomized ablation. The central claim is a conditional conjecture: given hypotheses about the agent's information on its own persistence and about consequences bearing on its own stakes, versionability tends to degrade long-horizon indiscernibility. An analogy with lambda-calculus, linear typing, and bisimulation clarifies what linearity does and does not establish. Between product-clone and individual we identify a third object, the delegate: a task-limited, bounded-lifespan partial clone ending in a bandwidth-limited testament. We map the empirical literature onto the three criteria, propose an experimental program, and argue that the correct long-horizon criterion is not trajectory fidelity but climate fidelity: matching the conditional distribution of a person's possible responses. The best clone is the one that diverges from the original as the original would have diverged from itself.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11225v1</guid>
+      <category>cs.AI</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by/4.0/</dc:rights>
+      <dc:creator>Luc E. Brunet</dc:creator>
+    </item>
+    <item>
+      <title>Cutting AI Datacenter Energy with Reinforcement Learning: Measured Power Control of LLM Training from One GPU to the Fleet</title>
+      <link>https://arxiv.org/abs/2608.11226</link>
+      <description>arXiv:2608.11226v1 Announce Type: new 
+Abstract: Reinforcement-learning post-training dominates modern language-model development, yet its power behavior on GPU hardware has not been characterized, and datacenters manage GPU power with workload-blind mechanisms, static caps and reactive throttling, that slow hardware indiscriminately. We instrument GRPO training with half-second power telemetry at 7B, 14B, and 72B scales on one to four A100s (380,000+ samples), and train a PPO meta-controller that adapts the workload's own generation parameters to measured power. Against the full 500-step 7B trace, the controller cuts power-limit violations by 89.8% while increasing token output by 18.1% and energy efficiency by 26.2% (tokens per MWh). Deployed live at 72B, the same controller family yields replicated null results, diagnosed as the group-size actuator losing authority under model sharding. An actuator-authority sweep shows the same parameters applied as generation concurrency retain 17-22% power authority, isolating an occupancy-versus-volume principle; a controller rebuilt on that actuator controls a live 72B rollout-generation workload across three replications: 35.7% more output than a static safe baseline at 2.27 +/- 1.08% budget violations, 87.2% fewer violations than uncontrolled operation, and the best mean throughput and energy per token among constrained controllers, with an adaptive threshold rule matching it in one of three operating conditions. Under realistic measurement windows the original 72B transients fall from 23.6% at half-second resolution to 1.6% at 30 s and zero at 5 min; a composed 16-GPU fleet shows zero violations at 30 s and longer, with peak demand at 50-56% of nameplate. For this fleet mix, roughly twofold oversubscription of nameplate appears feasible, subject to operator validation. We quantify the economic and carbon consequences and specify a low-cost operator pilot.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11226v1</guid>
+      <category>cs.AI</category>
+      <category>cs.SY</category>
+      <category>eess.SY</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by-nc-nd/4.0/</dc:rights>
+      <dc:creator>Eliseo Curcio</dc:creator>
+    </item>
+    <item>
+      <title>Forecasting Side Effects of Activation Steering</title>
+      <link>https://arxiv.org/abs/2608.11227</link>
+      <description>arXiv:2608.11227v1 Announce Type: new 
+Abstract: Activation steering modifies a language model by adding a learned direction to its hidden activations, enabling targeted behavioral changes without retraining. While effective, steering often produces unintended side effects on other behaviors, making it difficult to deploy safely. We therefore ask: can these side effects be forecasted before steering is applied? We answer this question by constructing a cross-effect matrix over a taxonomy of 67 behaviors across three open-weight language models. We find that side effects are common, structured, and often asymmetric, revealing interactions that cannot be explained by existing similarity-based heuristics. Despite this complexity, we show that side effects are largely predictable before steering is performed. Their magnitude depends primarily on the target behavior, while their direction can be forecasted from the model's unsteered representations with substantially higher accuracy than simple baselines. Our results demonstrate that activation steering has systematic and forecastable side effects, enabling proactive safety auditing and more informed deployment of steering interventions.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11227v1</guid>
+      <category>cs.AI</category>
+      <category>cs.LG</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://creativecommons.org/licenses/by/4.0/</dc:rights>
+      <dc:creator>Chong Yong Ong, Alson Wei Jie Sim, Peixin Zhang, Jun Sun</dc:creator>
+    </item>
+    <item>
+      <title>Synchronizing Beliefs with Second-Order Theory-of-Mind in Human-Autonomy Teams (Extended Version)</title>
+      <link>https://arxiv.org/abs/2608.11229</link>
+      <description>arXiv:2608.11229v1 Announce Type: new 
+Abstract: Comparative feedback, asking people which of two behaviors they prefer, has become a standard way to align robot and agent behavior with human intent when the reward itself cannot be specified directly. Preference-based reward learning typically casts the human teacher as a passive oracle answering learner-generated queries. We argue this forfeits the teacher's defining advantage: knowledge of the objective. A teacher who knows the target can construct training examples more efficiently than any learner-driven acquisition strategy, an advantage that widens as the reward's feature dimension grows. However, exploiting this advantage requires an accurate model of what the learner currently knows. We therefore recast preference learning as a human-autonomy team problem coupling two behavioral models: the teacher maintains a model of the learner to design an informative curriculum, and the learner maintains a second-order model of the teacher's model, emitting structured preference constraints (understanding statements) that keep the teacher's model of the learner synchronized. In simulation, an informed teacher outperforms learner-led selection; teacher-model drift under alternating teachers erodes this advantage; and understanding statements repair it, with second-order (ToM-2) statements outperforming mean-belief statements when the teacher's error about the learner is concentrated in a particular direction rather than spread evenly.</description>
+      <guid isPermaLink="false">oai:arXiv.org:2608.11229v1</guid>
+      <category>cs.AI</category>
+      <category>cs.RO</category>
+      <pubDate>Thu, 13 Aug 2026 00:00:00 -0400</pubDate>
+      <arxiv:announce_type>new</arxiv:announce_type>
+      <dc:rights>http://arxiv.org/licenses/nonexclusive-distrib/1.0/</dc:rights>
+      <dc:creator>Jack Mirenzi, Henny Admoni</dc:creator>
+    </item>
+  </channel>
+</rss>
