@@ -1,0 +1,18 @@
+{
+  // Typecheck-only pass over everything the build config leaves out. The base
+  // tsconfig scopes itself to src/ because that is what gets emitted to dist/,
+  // which left tests, scripts, and the vitest config checked by nothing —
+  // vitest transpiles without typechecking, so "typecheck clean" was a much
+  // weaker signal than it read as. Both configs run in `npm run typecheck`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // rootDir/outDir belong to the emitting config; widen the root so files
+    // outside src/ are not "not under rootDir" errors.
+    "rootDir": ".",
+    "checkJs": false,
+    "allowJs": false
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist", "attic"]
+}
