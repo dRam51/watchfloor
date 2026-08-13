@@ -116,19 +116,26 @@ export class FetchTimeoutError extends PoliteFetchError {
 }
 
 /**
- * The response declared a charset other than UTF-8 in its Content-Type.
- * politeFetch always decodes as UTF-8 (see readBodyWithCeiling) — silently
- * decoding different bytes as UTF-8 produces corrupted text (mojibake /
- * replacement characters) with nothing in FetchResult to say so happened.
- * Thrown instead of guessed-and-decoded, matching this codebase's existing
- * rule that a normalizer never guesses at a format it cannot validate
- * (compare InvalidTimestampError in src/domain/item.ts). Not retryable: the
- * same source will keep declaring the same charset moments later.
+ * The response declared a charset other than UTF-8 (or a safe UTF-8
+ * subset — see SAFE_CHARSETS) in its Content-Type. politeFetch always
+ * decodes as UTF-8 (see readBodyWithCeiling) — silently decoding different
+ * bytes as UTF-8 produces corrupted text (mojibake / replacement
+ * characters) with nothing in FetchResult to say so happened. Thrown
+ * instead of guessed-and-decoded, matching this codebase's existing rule
+ * that a normalizer never guesses at a format it cannot validate (compare
+ * InvalidTimestampError in src/domain/item.ts). Not retryable: the same
+ * source will keep declaring the same charset moments later.
+ *
+ * `status` carries the real response status (always a genuine 2xx — this
+ * only fires once the status-code gauntlet above has already passed) since
+ * a real response was in hand at the throw point; unlike ResponseTooLargeError
+ * and FetchTimeoutError, which have no real status to report, there's no
+ * reason to discard this one to null (fix round 2, bundled item).
  */
 export class UnsupportedCharsetError extends PoliteFetchError {
-  constructor(url: string, charset: string) {
+  constructor(url: string, charset: string, status: number) {
     super(`response from ${url} declared charset "${charset}"; only utf-8 is supported`, {
-      status: null,
+      status,
       retryable: false,
     });
     this.name = 'UnsupportedCharsetError';
@@ -199,11 +206,23 @@ async function discardBody(response: Response): Promise<void> {
 const CHARSET_PATTERN = /charset\s*=\s*"?([^;"]+)"?/i;
 
 /**
+ * Charsets that are safe to decode as UTF-8 with zero corruption risk.
+ * US-ASCII (and its IANA-canonical name, which appears occasionally in the
+ * wild) is a strict, byte-identical subset of UTF-8 -- every valid
+ * US-ASCII byte sequence decodes the same way under both. Fix round 2:
+ * do NOT broaden this set any further. ISO-8859-1 and similar encodings
+ * have bytes (0x80-0xFF) that mean something different under UTF-8, which
+ * is exactly the corruption this check exists to catch -- they must keep
+ * throwing.
+ */
+const SAFE_CHARSETS = new Set(['utf-8', 'utf8', 'us-ascii', 'ascii', 'ansi_x3.4-1968']);
+
+/**
  * Returns the declared charset, lowercased, if Content-Type names one and
- * it isn't UTF-8; returns null if there's no charset param at all (e.g.
- * most JSON responses, which RFC 8259 mandates as UTF-8 with no param
- * needed) or if it's already UTF-8. No Content-Type at all also reads as
- * null — nothing declared to contradict the UTF-8 assumption.
+ * it isn't in SAFE_CHARSETS; returns null if there's no charset param at
+ * all (e.g. most JSON responses, which RFC 8259 mandates as UTF-8 with no
+ * param needed) or if the declared one is safe. No Content-Type at all
+ * also reads as null — nothing declared to contradict the UTF-8 assumption.
  */
 function detectUnsupportedCharset(response: Response): string | null {
   const contentType = response.headers.get('content-type');
@@ -212,7 +231,7 @@ function detectUnsupportedCharset(response: Response): string | null {
   const raw = match?.[1];
   if (!raw) return null;
   const charset = raw.trim().toLowerCase();
-  return charset === 'utf-8' || charset === 'utf8' ? null : charset;
+  return SAFE_CHARSETS.has(charset) ? null : charset;
 }
 
 function classifyTransportError(
@@ -322,7 +341,7 @@ export async function politeFetch(url: string, opts: PoliteFetchOptions = {}): P
     const declaredCharset = detectUnsupportedCharset(response);
     if (declaredCharset) {
       await discardBody(response);
-      throw new UnsupportedCharsetError(url, declaredCharset);
+      throw new UnsupportedCharsetError(url, declaredCharset, response.status);
     }
 
     const body = await readBodyWithCeiling(response, maxBytes, url);

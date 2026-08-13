@@ -164,7 +164,39 @@ describe('politeFetch', () => {
       expect(e).toBeInstanceOf(UnsupportedCharsetError);
       expect((e as PoliteFetchError).retryable).toBe(false);
       expect((e as Error).message).toContain('iso-8859-1');
+      // Fix round 2, bundled item: a real 2xx was in hand at the throw
+      // point, so the status must be preserved, not discarded to null like
+      // the transport-level errors (timeout, oversized body) that have no
+      // real status to report.
+      expect((e as PoliteFetchError).status).toBe(200);
     }
+  });
+
+  it('does not throw for us-ascii, a strict byte-identical subset of UTF-8 with no corruption risk', async () => {
+    // Fix round 2: us-ascii (and its IANA-canonical alias) must NOT be
+    // treated as unsupported -- every valid US-ASCII byte decodes
+    // identically under UTF-8, unlike ISO-8859-1 above where bytes
+    // 0x80-0xFF genuinely mean something different.
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=us-ascii' });
+      res.end('plain ascii body');
+    });
+
+    const result = await politeFetch(`${baseUrl}/`);
+
+    expect(result.body).toBe('plain ascii body');
+    expect(result.notModified).toBe(false);
+  });
+
+  it('accepts a quoted charset="utf-8" declaration', async () => {
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset="utf-8"' });
+      res.end('quoted charset ok');
+    });
+
+    const result = await politeFetch(`${baseUrl}/`);
+
+    expect(result.body).toBe('quoted charset ok');
   });
 
   it('enforces the per-host minimum interval across concurrent calls to the same host', async () => {
