@@ -49,6 +49,20 @@ Status: **preflight passed; M0 not yet planned or approved.** No application cod
   development machine (§12 runbook step 8).
 - `.claude/settings.json` is read-only infrastructure. Do not modify it without being asked.
 
+## How to run
+
+    npm install
+    cp .env.example .env      # then edit — no absolute paths
+    npm run dev               # api on 127.0.0.1:$WF_API_PORT
+    npm test
+    npm run check:portability
+
+## How to add a source
+
+Edit `config/sources.yaml` — never code. Fields and allowed values are documented
+in the file header and enforced by `src/sources/load.ts`. A source with a
+malformed `weight`, `beat`, or `poll_interval` fails at load, not at fetch time.
+
 ## Portability debt
 
 None yet. Anything macOS-only gets recorded here rather than left silent.
