@@ -1,0 +1,66 @@
+User-Agent: *
+Disallow:
+Disallow: *_ptid=*
+Disallow: *?prx_t=*
+Disallow: /zephr*
+Disallow: /blaize*
+Disallow: /search?q=*
+Disallow: /*.rss
+Disallow: /buyline-shopping/*
+Disallow: /buyline-personal-finance/*
+Disallow: *?jw_start
+Disallow: *&jw_start
+Disallow: /gallery/
+Disallow: /config/newrelic/prod
+Disallow: /parsely-api-endpoint
+Disallow: /apdata/
+Disallow: /article/border-immigration-election-2182fec11fa008ec96c4202e5656d19e
+Disallow: /api/v2/feed/
+Disallow: /press-release/*
+
+Sitemap: https://apnews.com/ap-sitemap.xml
+Sitemap: https://apnews.com/news-sitemap-content.xml
+Sitemap: https://apnews.com/hubs-sitemap-content.xml
+Sitemap: https://apnews.com/video-sitemap.xml
+Sitemap: https://apnews.com/projects/elections-2026/sitemap-index.xml
+
+# Disallow Rules
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: GPTBot
+Disallow: /
+
+User-agent: anthropic-ai
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: Claude-Web
+Disallow: /
+
+User-agent: cohere-ai
+Disallow: /
+
+User-agent: PerplexityBot
+Disallow: /
+
+User-agent: Amazonbot
+Disallow: /
+
+User-agent: Applebot-Extended
+Disallow: /
+
+User-agent: Bytedance
+Disallow: /
+
+User-agent: Timpibot
+Disallow: /
+
+User-agent: Claude-User
+Disallow: /
+
+User-agent: Claude-SearchBot
+Disallow: /
