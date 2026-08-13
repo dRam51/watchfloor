@@ -110,13 +110,26 @@ function isValidCalendarDateTime(
 
 /**
  * Turns a UTC millisecond instant into a canonical timestamp, or `null` if
- * it isn't finite or falls outside the plausible-year window (see above).
+ * it isn't finite, isn't within `Date`'s own representable range (which
+ * shows up as a NaN year, not a thrown error -- see below), or falls
+ * outside the plausible-year window (see above).
  */
 function toCanonical(millis: number): string | null {
   if (!Number.isFinite(millis)) return null;
   const date = new Date(millis);
   const year = date.getUTCFullYear();
-  if (year < MIN_PLAUSIBLE_YEAR || year > MAX_PLAUSIBLE_YEAR) return null;
+  // `new Date` does not throw for a finite `millis` value outside its own
+  // +/-8,640,000,000,000,000ms representable range -- it silently becomes
+  // an Invalid Date, whose getUTCFullYear() returns NaN. Every NaN
+  // comparison is false, so without this explicit check both
+  // `year < MIN_PLAUSIBLE_YEAR` and `year > MAX_PLAUSIBLE_YEAR` evaluate
+  // false, the plausible-year guard is silently bypassed, and
+  // `date.toISOString()` below throws RangeError: Invalid time value --
+  // an uncaught exception from ordinary-looking epoch-seconds input (e.g.
+  // an accidental epoch-microseconds value), not the "malformed timestamp
+  // throws loudly at insertItem" case this module is designed around.
+  // (Fix round 1, Finding 1.)
+  if (!Number.isFinite(year) || year < MIN_PLAUSIBLE_YEAR || year > MAX_PLAUSIBLE_YEAR) return null;
   return date.toISOString();
 }
 
@@ -148,19 +161,28 @@ const MONTHS: Record<string, number> = {
 // given feed, so per "never guess a date" the whole class yields null.
 const UTC_ZONE_TOKENS = new Set(['UT', 'UTC', 'GMT', 'Z']);
 
+// No real-world UTC offset exceeds this. +14:00 (Kiribati's Line Islands) is
+// the extreme high case; bounding both directions symmetrically at 14:00
+// per fix round 1's bundled minor rather than modeling the true (slightly
+// asymmetric, -12:00..+14:00) real-world range, which nobody asked for and
+// which risks rejecting a legitimate offset if the real extremes ever shift.
+const MAX_OFFSET_MINUTES = 14 * 60;
+
 function parseZoneOffsetMinutes(zone: string): number | null {
   const numeric = /^([+-])(\d{2})(\d{2})$/.exec(zone);
   if (numeric) {
     const [, sign, hh, mm] = numeric;
     const hours = Number(hh);
     const minutes = Number(mm);
-    // A real UTC offset never exceeds +/-24h and always has a valid minute
-    // component; a value like "+9999" is corrupt input, not an unusual but
-    // legitimate offset. Rejecting it outright (rather than computing
-    // whatever nonsense arithmetic it implies and letting the plausible-year
-    // check maybe catch the fallout) keeps this a validation, not a hope.
-    if (hours > 23 || minutes > 59) return null;
     const magnitude = hours * 60 + minutes;
+    // Checking the combined magnitude (not `hours` alone against a fixed
+    // cap) also catches a value like "+1430", where `hours` on its own
+    // would still look plausible but the total does not. A
+    // corrupted-but-well-shaped offset like "+2200" would otherwise compute
+    // a numerically valid-looking but wrong instant -- the exact
+    // plausible-but-wrong failure this module exists to prevent -- rather
+    // than failing to parse. (Fix round 1, bundled minor: was +/-23:59.)
+    if (minutes > 59 || magnitude > MAX_OFFSET_MINUTES) return null;
     return sign === '-' ? -magnitude : magnitude;
   }
   if (UTC_ZONE_TOKENS.has(zone.toUpperCase())) return 0;
@@ -273,6 +295,13 @@ function parsePublishedAt(value: string | null | undefined): string | null {
 // Summary truncation
 // ---------------------------------------------------------------------------
 
+// A UTF-16 high surrogate (the first unit of a two-unit surrogate pair,
+// e.g. an emoji or other non-BMP character) never appears alone in
+// well-formed text -- it is always immediately followed by a low surrogate
+// (0xDC00-0xDFFF). Range from the Unicode standard, not a guess.
+const HIGH_SURROGATE_MIN = 0xd800;
+const HIGH_SURROGATE_MAX = 0xdbff;
+
 /**
  * Truncates to at most 300 characters at a word boundary, so an excerpt
  * never ends mid-word. Falls back to a hard cut only when there is no space
@@ -289,7 +318,23 @@ function truncateSummary(summary: string | null): string | null {
   // lastSpace > 0, not >= 0: a space at index 0 (the only space found) would
   // otherwise truncate to an empty string. Falling back to the hard cut
   // keeps at least the leading content.
-  const cut = lastSpace > 0 ? slice.slice(0, lastSpace) : slice;
+  let cut = lastSpace > 0 ? slice.slice(0, lastSpace) : slice;
+
+  // `.slice(0, 300)` cuts by UTF-16 code unit, which can land inside a
+  // surrogate pair (e.g. an emoji) and leave a lone high surrogate as the
+  // final character. Node's UTF-8 encoder does not throw on that -- it
+  // silently replaces the orphaned surrogate with U+FFFD, and SQLite TEXT
+  // storage goes through exactly this encoding, so this is real silent
+  // corruption of stored text, not a cosmetic glitch. Drop the orphaned
+  // surrogate rather than store it. `charCodeAt` on an empty string returns
+  // NaN, which safely fails both range comparisons below, so this is a
+  // no-op for the (unreachable in practice, but not assumed away) empty-cut
+  // case. (Fix round 1, Finding 3.)
+  const lastCode = cut.charCodeAt(cut.length - 1);
+  if (lastCode >= HIGH_SURROGATE_MIN && lastCode <= HIGH_SURROGATE_MAX) {
+    cut = cut.slice(0, -1);
+  }
+
   return cut.trimEnd();
 }
 
@@ -319,20 +364,32 @@ function countWords(text: string): number {
 
 /**
  * items.item_type is NOT NULL with a CHECK constraint (event | analysis |
- * press), so M1 cannot insert a row without SOME value. This four-branch
- * rule is deliberately crude -- full classification is a later milestone's
- * job (M2/M4b). Implemented exactly as the brief states; not to be improved
- * here.
+ * press), so M1 cannot insert a row without SOME value. This rule is
+ * deliberately crude -- full classification is a later milestone's job
+ * (M2/M4b).
+ *
+ * Originally implemented as the brief's literal four branches with no
+ * `tier === 'analysis'` branch, per an explicit "do not improve it"
+ * instruction, and flagged in the task-4 report as a possible asymmetry
+ * worth a second look (Source.tier has two possible values but only
+ * tier:"event" participated). Fix round 1, Finding 2 ruled the omission a
+ * required addition: without it, every analysis-tier source silently falls
+ * through to the word-count/press branches unless it happens to exceed 400
+ * words, which is wrong for an explicit operator declaration. Placed
+ * alongside the tier:"event" check, ahead of both the government-primary
+ * check and the word-count fallback -- a tier is a stated fact about the
+ * source, not a heuristic, so it outranks both.
  *
  * Word count is measured against the FEED'S ORIGINAL summary, before the
  * 300-character truncation applied for storage. Truncating first would cap
  * every summary at roughly 50-60 words, making the >= 400 branch
  * permanently unreachable rather than merely rare -- the only reading under
- * which all four branches are actually exercisable, which the task's own
+ * which that branch is actually exercisable, which the task's own
  * definition of done requires.
  */
 function assignItemType(source: Source, originalSummary: string | null): ItemType {
   if (source.tier === 'event') return 'event';
+  if (source.tier === 'analysis') return 'analysis';
   if (isGovernmentPrimary(source.id)) return 'event';
   const wordCount = originalSummary === null ? 0 : countWords(originalSummary);
   if (wordCount >= 400) return 'analysis';

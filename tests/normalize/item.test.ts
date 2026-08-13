@@ -299,6 +299,52 @@ describe('normalizeItem', () => {
       const item = normalizeItem(rawItem({ publishedAt: '1786545000000' }), source(), FETCHED_AT);
       expect(item.publishedAt).toBeNull();
     });
+
+    // Fix round 1, Finding 1 (CRITICAL): a bare digit string that is a safe
+    // integer (Number.isSafeInteger passes, up to ~9.007e15) can still, once
+    // multiplied by 1000 to become milliseconds, exceed `Date`'s own
+    // representable range of +/-8.64e15ms. `new Date` does not throw for
+    // that -- it silently becomes an Invalid Date, whose getUTCFullYear()
+    // returns NaN. Every NaN comparison is false, so the plausible-year
+    // guard's `year < MIN` / `year > MAX` checks were BOTH silently bypassed
+    // and execution reached `date.toISOString()`, which throws a RangeError.
+    // That is not the brief's accepted "malformed input throws loudly at
+    // insertItem" case -- it is normalizeItem itself throwing an
+    // undocumented, wrongly-typed exception for input in exactly the
+    // bare-digit epoch-seconds shape this module claims to support. These
+    // three values reproduce it at increasing distance past the boundary
+    // (the first is barely over; MAX_SAFE_INTEGER is nowhere near it).
+    describe('epoch seconds beyond Date\'s own representable range must be null, never a thrown RangeError', () => {
+      const beyondDateRange = [
+        '8640000000001', // 8,640,000,000,001,000ms -- just over +/-8.64e15
+        '9007199254740991', // Number.MAX_SAFE_INTEGER
+        '100000000000000', // comfortably beyond range
+      ];
+
+      for (const publishedAt of beyondDateRange) {
+        it(`does not throw, and is null, for epoch seconds "${publishedAt}"`, () => {
+          const call = () => normalizeItem(rawItem({ publishedAt }), source(), FETCHED_AT);
+          expect(call).not.toThrow();
+          expect(call().publishedAt).toBeNull();
+        });
+      }
+    });
+
+    // Bundled minor (fix round 1): no real-world UTC offset exceeds
+    // +/-14:00 (Kiribati's Line Islands is the extreme case). "+9999" was
+    // already rejected (hours > 23), but a corrupted-but-well-shaped offset
+    // like "+2200" was NOT: hours=22 passed the old `> 23` check and
+    // produced a numerically valid-looking but wrong instant -- the exact
+    // plausible-but-wrong failure this module exists to prevent, just via a
+    // different input than Finding 1.
+    it('is null for a numeric offset beyond +/-14:00 that the old +/-23:59 bound would have silently accepted (+2200)', () => {
+      const item = normalizeItem(
+        rawItem({ publishedAt: '2026-08-12T14:30:00+2200' }),
+        source(),
+        FETCHED_AT,
+      );
+      expect(item.publishedAt).toBeNull();
+    });
   });
 
   // ---------------------------------------------------------------------
@@ -338,6 +384,28 @@ describe('normalizeItem', () => {
       const noSpaces = 'a'.repeat(400);
       const item = normalizeItem(rawItem({ summary: noSpaces }), source(), FETCHED_AT);
       expect(item.summaryRaw).toBe('a'.repeat(300));
+    });
+
+    it('does not split a UTF-16 surrogate pair at the hard-cut boundary (fix round 1, Finding 3)', () => {
+      // 299 plain characters + one non-BMP emoji (a 2-code-unit surrogate
+      // pair) straddling the 300-unit cut point, then more filler with no
+      // spaces anywhere in the first 300 units -- forces the hard-cut
+      // fallback path, which is where the bug lived: `.slice(0, 300)` cuts
+      // by UTF-16 code unit, landing between the emoji's high and low
+      // surrogate and leaving a lone high surrogate as the final character.
+      const summary = 'a'.repeat(299) + '\u{1F600}' + 'b'.repeat(50);
+      const item = normalizeItem(rawItem({ summary }), source(), FETCHED_AT);
+
+      expect(item.summaryRaw).not.toBeNull();
+      const result = item.summaryRaw as string;
+
+      // A lone high surrogate at the end is exactly what silent UTF-8
+      // storage (SQLite TEXT storage goes through this same encoding) would
+      // mangle into U+FFFD without ever throwing. Round-tripping through
+      // the same encoding is a direct, precise check: a clean string
+      // survives unchanged; a string ending in an orphaned surrogate does
+      // not.
+      expect(Buffer.from(result, 'utf8').toString('utf8')).toBe(result);
     });
 
     it('is null when summary is null', () => {
@@ -468,17 +536,24 @@ describe('normalizeItem', () => {
       expect((item.summaryRaw as string).length).toBeLessThanOrEqual(300);
     });
 
-    it('tier "analysis" (a markets-only value) does NOT itself force item_type analysis -- only the four stated branches apply', () => {
-      // The brief's rule has exactly four branches and explicitly says not
-      // to improve it. Source.tier has two possible values but only
-      // tier:"event" participates in the rule; tier:"analysis" falls
-      // through to the word-count/press branches like any other source.
+    it('branch (ruling, fix round 1 Finding 2): tier "analysis" forces item_type analysis, even with a short summary', () => {
+      // Originally implemented as a literal four-branch rule with no
+      // tier:"analysis" branch, per the brief's "do not improve it"
+      // instruction, and flagged in the task-4 report as a possible
+      // asymmetry worth a second look (Source.tier has two values but only
+      // tier:"event" participated). Fix round 1, Finding 2 ruled the
+      // omission a required addition: without it, an analysis-tier source
+      // silently falls through to word-count/press unless it happens to
+      // exceed 400 words, when a tier is an explicit operator declaration
+      // that should outrank a heuristic. A one-word summary (nowhere near
+      // the 400-word threshold) proves the tier branch is what wins here,
+      // not a coincidental word-count match.
       const item = normalizeItem(
         rawItem({ summary: 'short' }),
         source({ id: 'some-index', tier: 'analysis' }),
         FETCHED_AT,
       );
-      expect(item.itemType).toBe('press');
+      expect(item.itemType).toBe('analysis');
     });
   });
 
@@ -600,6 +675,16 @@ describe('normalizeItem', () => {
         'Sun, 29 Feb 2026 12:00:00 +0000',
         'Thu, 29 Feb 2024 12:00:00 +0000',
         'Wed, 12 Aug 2026 25:30:00 +0000',
+        // Fix round 1, Finding 1: 13-16 digit safe integers that exceed
+        // Date's own +/-8.64e15ms representable range once multiplied into
+        // milliseconds -- the original version of this test topped out at
+        // '1786545000000' (13 digits, but still inside Date's range), which
+        // is why it didn't catch the RangeError this module could throw.
+        '8640000000001',
+        '9007199254740991',
+        '100000000000000',
+        // Fix round 1, bundled minor: an offset beyond the new +/-14:00 bound.
+        '2026-08-12T14:30:00+2200',
       ];
 
       for (const publishedAt of inputs) {
