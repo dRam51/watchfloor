@@ -7,6 +7,7 @@ import {
   PoliteFetchError,
   ResponseTooLargeError,
   FetchTimeoutError,
+  UnsupportedCharsetError,
   USER_AGENT,
 } from '../../src/fetch/http.ts';
 
@@ -55,7 +56,7 @@ afterEach(async () => {
 });
 
 describe('politeFetch', () => {
-  it('sends an honest User-Agent naming the package version, and it reaches the wire', async () => {
+  it('sends a User-Agent naming the package version, with no URL or email in it, and it reaches the wire', async () => {
     let receivedUserAgent: string | undefined;
     const baseUrl = await serve((req, res) => {
       receivedUserAgent = req.headers['user-agent'];
@@ -69,9 +70,14 @@ describe('politeFetch', () => {
 
     await politeFetch(`${baseUrl}/`);
 
-    // Shape required by the brief: watchfloor/<version> (+<repo url>; personal research dashboard)
-    expect(USER_AGENT.startsWith(`watchfloor/${pkgVersion} (+`)).toBe(true);
-    expect(USER_AGENT.endsWith('; personal research dashboard)')).toBe(true);
+    // Ruling (fix round 1, Finding 1): no repo URL exists and none ever will
+    // (the project never pushes), and the owner's email has no business
+    // going to ~22 third-party operators for no benefit. No "+<url>" segment
+    // at all — just a name, version, and a plain-language description.
+    expect(USER_AGENT).toBe(`watchfloor/${pkgVersion} (self-hosted personal feed reader; single user)`);
+    expect(USER_AGENT).not.toContain('http://');
+    expect(USER_AGENT).not.toContain('https://');
+    expect(USER_AGENT).not.toContain('@');
     expect(receivedUserAgent).toBe(USER_AGENT);
   });
 
@@ -125,7 +131,10 @@ describe('politeFetch', () => {
       res.writeHead(200, {
         ETag: '"fresh-etag"',
         'Last-Modified': 'Thu, 01 Jan 2026 00:00:00 GMT',
-        'Content-Type': 'application/rss+xml',
+        // Explicit utf-8 declaration, not just an absent charset param -- a
+        // real (if slightly different) code path through the charset check
+        // than "no charset present at all".
+        'Content-Type': 'application/rss+xml; charset=utf-8',
       });
       res.end('<rss><channel><title>test feed</title></channel></rss>');
     });
@@ -137,6 +146,25 @@ describe('politeFetch', () => {
     expect(result.body).toBe('<rss><channel><title>test feed</title></channel></rss>');
     expect(result.etag).toBe('"fresh-etag"');
     expect(result.lastModified).toBe('Thu, 01 Jan 2026 00:00:00 GMT');
+  });
+
+  it('throws when the response declares a non-UTF-8 charset, instead of silently mangling the body', async () => {
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=ISO-8859-1' });
+      // "Caf" + 0xE9 ('é' in ISO-8859-1). 0xE9 alone is not valid UTF-8, so a
+      // naive UTF-8 decode mangles it into a replacement character -- the
+      // silent-corruption case the reviewer reproduced.
+      res.end(Buffer.from([0x43, 0x61, 0x66, 0xe9]));
+    });
+
+    try {
+      await politeFetch(`${baseUrl}/`);
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(UnsupportedCharsetError);
+      expect((e as PoliteFetchError).retryable).toBe(false);
+      expect((e as Error).message).toContain('iso-8859-1');
+    }
   });
 
   it('enforces the per-host minimum interval across concurrent calls to the same host', async () => {
@@ -263,6 +291,44 @@ describe('politeFetch', () => {
     }
   });
 
+  it('throws on a 302 with no Location header, rather than silently returning it as success', async () => {
+    // fetch's redirect: 'follow' cannot follow a redirect status with no
+    // Location to follow -- it returns the response as-is. A malformed
+    // upstream server, not a quirk; reachable across ~22 real operators.
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(302); // no Location
+      res.end('moved, but nowhere to go');
+    });
+
+    try {
+      await politeFetch(`${baseUrl}/`);
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(PoliteFetchError);
+      expect((e as PoliteFetchError).status).toBe(302);
+      expect((e as PoliteFetchError).retryable).toBe(false);
+    }
+  });
+
+  it('throws on a 300 Multiple Choices even with a Location header, since 300 is never auto-followed', async () => {
+    // 300 is not in the WHATWG Fetch spec's redirect-status set (301, 302,
+    // 303, 307, 308 only) -- a Location header does not change that, so this
+    // reaches politeFetch exactly as the server sent it.
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(300, { Location: '/pick-one' });
+      res.end('multiple choices');
+    });
+
+    try {
+      await politeFetch(`${baseUrl}/`);
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(PoliteFetchError);
+      expect((e as PoliteFetchError).status).toBe(300);
+      expect((e as PoliteFetchError).retryable).toBe(false);
+    }
+  });
+
   it('times out a hanging response and classifies it as retryable', async () => {
     const baseUrl = await serve((req, res) => {
       res.on('error', () => {});
@@ -300,5 +366,27 @@ describe('politeFetch', () => {
       expect((e as PoliteFetchError).retryable).toBe(true);
     }
     expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  it('classifies a connection failure as retryable, distinct from a timeout', async () => {
+    // The non-timeout branch of classifyTransportError: a genuine transport
+    // failure (DNS, connection refused) rather than the deadline firing.
+    // Start a real server so the URL's host/port are valid, then close it --
+    // nothing is listening there anymore, so the connection is refused.
+    const { server, baseUrl } = await startServer((req, res) => {
+      res.writeHead(200);
+      res.end('unreachable');
+    });
+    await closeServer(server);
+
+    try {
+      await politeFetch(`${baseUrl}/`);
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(PoliteFetchError);
+      expect(e).not.toBeInstanceOf(FetchTimeoutError);
+      expect((e as PoliteFetchError).status).toBeNull();
+      expect((e as PoliteFetchError).retryable).toBe(true);
+    }
   });
 });

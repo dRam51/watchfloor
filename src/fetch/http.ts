@@ -11,28 +11,22 @@ const packageJson = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf
 };
 
 /**
- * Contact string for the User-Agent's "+<repo url>" segment.
- *
- * No canonical repository URL exists anywhere in this checkout yet: `git
- * remote -v` is empty, package.json has no "repository" or "homepage"
- * field, and there is no README. A guessed github.com/<owner>/watchfloor
- * URL was deliberately NOT used — guessing risks pointing at a real,
- * unrelated repository, which is worse than an inert placeholder for a
- * header whose entire purpose is honest identification. `.invalid` is the
- * RFC 2606 reserved TLD for exactly this situation: guaranteed to never
- * resolve, so it cannot be mistaken for a working link by an operator who
- * clicks it. Flagged in task-3-report.md — replace with the real
- * repository URL once one exists.
- */
-const CONTACT_URL = 'https://watchfloor.invalid/source';
-
-/**
- * Sent on every request so a feed operator can identify this project and
- * block or contact it if they want (§ politeness). Computed once from
+ * Sent on every request so a feed operator can identify this project by
+ * name and block it if they want to (§ politeness). Computed once from
  * package.json rather than a hardcoded literal, so it tracks version bumps
  * automatically.
+ *
+ * Deliberately carries no URL and no email (ruling, fix round 1, Finding 1
+ * — see task-3-report.md). No repository URL exists — no git remote, no
+ * package.json "repository"/"homepage"/"bugs" field, no README — and the
+ * project's own rule against ever pushing means none ever will, so this
+ * isn't a placeholder waiting to be filled in like the earlier `.invalid`
+ * URL was; there is nothing to fill in. Putting the owner's personal email
+ * here instead was considered and rejected: it would broadcast that
+ * address to roughly two dozen third-party feed operators for no real
+ * benefit at this request volume.
  */
-export const USER_AGENT = `watchfloor/${packageJson.version} (+${CONTACT_URL}; personal research dashboard)`;
+export const USER_AGENT = `watchfloor/${packageJson.version} (self-hosted personal feed reader; single user)`;
 
 /** Whole-request deadline (connect + headers + body). */
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -121,6 +115,26 @@ export class FetchTimeoutError extends PoliteFetchError {
   }
 }
 
+/**
+ * The response declared a charset other than UTF-8 in its Content-Type.
+ * politeFetch always decodes as UTF-8 (see readBodyWithCeiling) — silently
+ * decoding different bytes as UTF-8 produces corrupted text (mojibake /
+ * replacement characters) with nothing in FetchResult to say so happened.
+ * Thrown instead of guessed-and-decoded, matching this codebase's existing
+ * rule that a normalizer never guesses at a format it cannot validate
+ * (compare InvalidTimestampError in src/domain/item.ts). Not retryable: the
+ * same source will keep declaring the same charset moments later.
+ */
+export class UnsupportedCharsetError extends PoliteFetchError {
+  constructor(url: string, charset: string) {
+    super(`response from ${url} declared charset "${charset}"; only utf-8 is supported`, {
+      status: null,
+      retryable: false,
+    });
+    this.name = 'UnsupportedCharsetError';
+  }
+}
+
 // One promise chain per host, gating when the NEXT request to that host may
 // start. A call for a given host chains onto the previous call's slot
 // rather than reading a shared "last start" timestamp directly, so
@@ -182,6 +196,25 @@ async function discardBody(response: Response): Promise<void> {
   await response.body.cancel().catch(() => {});
 }
 
+const CHARSET_PATTERN = /charset\s*=\s*"?([^;"]+)"?/i;
+
+/**
+ * Returns the declared charset, lowercased, if Content-Type names one and
+ * it isn't UTF-8; returns null if there's no charset param at all (e.g.
+ * most JSON responses, which RFC 8259 mandates as UTF-8 with no param
+ * needed) or if it's already UTF-8. No Content-Type at all also reads as
+ * null — nothing declared to contradict the UTF-8 assumption.
+ */
+function detectUnsupportedCharset(response: Response): string | null {
+  const contentType = response.headers.get('content-type');
+  if (!contentType) return null;
+  const match = CHARSET_PATTERN.exec(contentType);
+  const raw = match?.[1];
+  if (!raw) return null;
+  const charset = raw.trim().toLowerCase();
+  return charset === 'utf-8' || charset === 'utf8' ? null : charset;
+}
+
 function classifyTransportError(
   err: unknown,
   url: string,
@@ -204,11 +237,16 @@ function classifyTransportError(
  * ceiling enforced while streaming, and retryable/permanent classification
  * of any non-2xx/304 outcome via a thrown PoliteFetchError.
  *
- * Resolves for 2xx (body populated, notModified: false) and 304
+ * Resolves only for 2xx (body populated, notModified: false) and 304
  * (body: null, notModified: true). Throws for everything else: 429 and 5xx
- * as retryable, other 4xx as permanent, an oversized body as
- * ResponseTooLargeError (permanent), and a timeout as FetchTimeoutError
- * (retryable).
+ * as retryable; any other 4xx as permanent; any other 3xx (300-399 minus
+ * 304) as permanent too — `redirect: 'follow'` resolves real redirects
+ * internally, so one reaching here means the server sent a redirect status
+ * `fetch` could not act on (no Location header, or a status like 300 that
+ * is outside the spec's redirect set), which a retry does not fix; an
+ * oversized body as ResponseTooLargeError (permanent); a declared non-UTF-8
+ * charset as UnsupportedCharsetError (permanent); and a timeout as
+ * FetchTimeoutError (retryable).
  */
 export async function politeFetch(url: string, opts: PoliteFetchOptions = {}): Promise<FetchResult> {
   const {
@@ -249,6 +287,19 @@ export async function politeFetch(url: string, opts: PoliteFetchOptions = {}): P
     };
   }
 
+  if (response.status >= 300 && response.status < 400) {
+    // Reaching here despite redirect: 'follow' means fetch could not
+    // resolve this one itself: no Location header (e.g. a bare 302), or a
+    // status like 300 that WHATWG Fetch never auto-follows regardless of
+    // headers (only 301/302/303/307/308 are followed). Either way this is
+    // exactly what the server sent, not a partially-processed redirect.
+    await discardBody(response);
+    throw new PoliteFetchError(
+      `${url} responded ${response.status} ${response.statusText} (not a followable redirect)`,
+      { status: response.status, retryable: false },
+    );
+  }
+
   if (response.status === 429 || response.status >= 500) {
     await discardBody(response);
     throw new PoliteFetchError(`${url} responded ${response.status} ${response.statusText}`, {
@@ -266,6 +317,14 @@ export async function politeFetch(url: string, opts: PoliteFetchOptions = {}): P
   }
 
   try {
+    // Cheap header check before spending any streaming/decoding effort on a
+    // body we're not going to trust the decode of.
+    const declaredCharset = detectUnsupportedCharset(response);
+    if (declaredCharset) {
+      await discardBody(response);
+      throw new UnsupportedCharsetError(url, declaredCharset);
+    }
+
     const body = await readBodyWithCeiling(response, maxBytes, url);
     return {
       status: response.status,
