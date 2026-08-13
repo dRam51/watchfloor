@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeDb } from '../../src/db/connection.ts';
-import { openDatabase, DatabaseOpenError } from '../../src/bin/openDatabase.ts';
+import { openDatabase, DatabaseOpenError } from '../../src/db/openDatabase.ts';
 
 const open: Array<ReturnType<typeof openDatabase>> = [];
 afterEach(() => {

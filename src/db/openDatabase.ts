@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { openDb, type Db } from '../db/connection.ts';
+import { openDb, type Db } from './connection.ts';
 
 export class DatabaseOpenError extends Error {
   constructor(dbPath: string, cause: unknown) {
@@ -14,7 +14,7 @@ export class DatabaseOpenError extends Error {
 }
 
 /**
- * Opens the entrypoint's database, creating only its own parent directory
+ * Opens a process's database, creating only its own parent directory
  * first — node:sqlite does not create missing parent directories itself
  * (confirmed: ERR_SQLITE_ERROR, errcode 14 SQLITE_CANTOPEN), so a clean
  * checkout would otherwise fail before ever reaching a health check.

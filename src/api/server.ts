@@ -3,7 +3,14 @@ import type { Db } from '../db/connection.ts';
 import type { Env } from '../config/env.ts';
 import { registerHealth } from './routes/health.ts';
 
-export function buildServer(deps: { db: Db; env: Env }): FastifyInstance {
+export interface ServerDeps {
+  db: Db;
+  env: Env;
+  /** Sources validated at boot. Surfaced by /health so a good config is observable. */
+  sourceCount: number;
+}
+
+export function buildServer(deps: ServerDeps): FastifyInstance {
   const server = Fastify({ logger: false });
   registerHealth(server, deps);
   return server;

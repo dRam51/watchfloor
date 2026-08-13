@@ -1,20 +1,55 @@
 import { join } from 'node:path';
 import { loadEnv } from '../config/env.ts';
-import { openDatabase } from './openDatabase.ts';
+import { openDatabase } from '../db/openDatabase.ts';
 import { runMigrations } from '../db/migrate.ts';
+import { loadSourcesFile } from '../sources/load.ts';
 import { buildServer } from '../api/server.ts';
-
-const env = loadEnv();
-const db = openDatabase(env.WF_DB_PATH);
+import { closeDb } from '../db/connection.ts';
 
 // Resolved relative to this module, not the process cwd: a process
 // supervisor (§12) may launch us from any working directory. This file lives
 // at src/bin/api.ts, so two levels up is the repo root.
-const migrationsDir = join(import.meta.dirname, '..', '..', 'db', 'migrations');
-const applied = runMigrations(db, migrationsDir);
-if (applied.length > 0) console.log(`applied migrations: ${applied.join(', ')}`);
+const repoRoot = join(import.meta.dirname, '..', '..');
 
-const server = buildServer({ db, env });
-// Bind to loopback only; external reach is via Tailscale (§2).
-await server.listen({ port: env.WF_API_PORT, host: '127.0.0.1' });
-console.log(`watchfloor api listening on 127.0.0.1:${env.WF_API_PORT} (TZ=${env.WF_TZ})`);
+try {
+  const env = loadEnv();
+  const db = openDatabase(env.WF_DB_PATH);
+
+  const applied = runMigrations(db, join(repoRoot, 'db', 'migrations'));
+  if (applied.length > 0) console.log(`applied migrations: ${applied.join(', ')}`);
+
+  // Validate the feed config at boot. Nothing polls these yet, but a
+  // malformed sources.yaml that is only read at first poll fails at the
+  // worst possible moment — hours later, in a scheduler, far from the deploy
+  // that broke it. Fail here instead, while someone is still watching.
+  const sources = loadSourcesFile(join(repoRoot, 'config', 'sources.yaml'));
+
+  const server = buildServer({ db, env, sourceCount: sources.length });
+  // Bind to loopback only; external reach is via Tailscale (§2).
+  await server.listen({ port: env.WF_API_PORT, host: '127.0.0.1' });
+  console.log(
+    `watchfloor api listening on 127.0.0.1:${env.WF_API_PORT} ` +
+      `(TZ=${env.WF_TZ}, sources=${sources.length})`,
+  );
+
+  // Close the server before the database: an in-flight request still holds a
+  // statement against it.
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => {
+      console.log(`${signal} received, shutting down`);
+      server
+        .close()
+        .catch((err: unknown) => console.error(`server close failed: ${(err as Error).message}`))
+        .finally(() => {
+          closeDb(db);
+          process.exit(0);
+        });
+    });
+  }
+} catch (err) {
+  // EnvError, DatabaseOpenError and SourceConfigError all carry messages
+  // written specifically to name the offending variable, path, or config
+  // line. A raw stack trace buries exactly that.
+  console.error((err as Error).message);
+  process.exit(1);
+}
