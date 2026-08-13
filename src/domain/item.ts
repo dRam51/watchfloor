@@ -16,6 +16,33 @@ export class RetentionHorizonError extends Error {
   }
 }
 
+// Timestamps are compared lexicographically (JS `<`/`<=` and SQLite `<=` on
+// TEXT columns), which is only equivalent to chronological order when every
+// value shares the exact same fixed-width shape. A missing-milliseconds or
+// non-UTC-offset value silently breaks that invariant and can leak a later
+// version into an as_of read (see task-4 fix-round-1 report, Finding 1).
+// Reject rather than coerce: silently rewriting a caller's timestamp would
+// mask a genuinely broken feed, and `items` is append-only, so a malformed
+// value written once can never be corrected.
+const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+export class InvalidTimestampError extends Error {
+  constructor(field: string, value: string) {
+    super(
+      `${field} '${value}' is not a canonical UTC timestamp ` +
+        `(expected YYYY-MM-DDTHH:mm:ss.sssZ); rejected rather than coerced so a ` +
+        `malformed value can't silently corrupt as_of ordering`,
+    );
+    this.name = 'InvalidTimestampError';
+  }
+}
+
+function assertCanonicalTimestamp(field: string, value: string): void {
+  if (!CANONICAL_TIMESTAMP.test(value)) {
+    throw new InvalidTimestampError(field, value);
+  }
+}
+
 export interface NewItem {
   url: string;
   canonicalUrl: string;
@@ -46,6 +73,9 @@ export function deriveItemKey(canonicalUrl: string): string {
 }
 
 export function insertItem(db: Db, item: NewItem): Item {
+  assertCanonicalTimestamp('fetchedAt', item.fetchedAt);
+  if (item.publishedAt !== null) assertCanonicalTimestamp('publishedAt', item.publishedAt);
+
   const itemId = randomUUID();
   const itemKey = deriveItemKey(item.canonicalUrl);
   const createdAt = new Date().toISOString();
@@ -84,11 +114,26 @@ export function insertItem(db: Db, item: NewItem): Item {
 
     db.exec('commit');
   } catch (cause) {
-    db.exec('rollback');
+    // SQLite auto-rolls-back the transaction itself on some internal errors
+    // (SQLITE_FULL, SQLITE_IOERR, SQLITE_NOMEM); an unconditional rollback
+    // here would then throw "cannot rollback - no transaction is active" and
+    // replace the real `cause` with that confusing message. Same hazard,
+    // same guard, as src/db/migrate.ts.
+    if (db.isTransaction) db.exec('rollback');
     throw cause;
   }
 
-  return { ...item, item_id: itemId, item_key: itemKey, created_at: createdAt };
+  // Copy the arrays: item is the caller's own object, and returning its
+  // beats/entities by reference would let a caller's in-place mutation (e.g.
+  // `result.beats.sort()`) silently corrupt the input they still hold.
+  return {
+    ...item,
+    beats: [...item.beats],
+    entities: [...item.entities],
+    item_id: itemId,
+    item_key: itemKey,
+    created_at: createdAt,
+  };
 }
 
 interface ItemRow {
@@ -145,13 +190,20 @@ function hydrate(db: Db, row: ItemRow): Item {
 }
 
 export function getCurrentItem(db: Db, itemKey: string): Item | null {
+  // items has no uniqueness on (item_key, fetched_at); two versions can
+  // legally share an instant (batch ingest, second-precision source). SQL
+  // guarantees no tiebreak among equal sort keys, so `rowid desc` is added
+  // explicitly — items is a rowid table, so rowid gives insertion order for
+  // free and the most recently inserted version deterministically wins.
   const row = db
-    .prepare('select * from items where item_key = ? order by fetched_at desc limit 1')
+    .prepare('select * from items where item_key = ? order by fetched_at desc, rowid desc limit 1')
     .get(itemKey) as ItemRow | undefined;
   return row ? hydrate(db, row) : null;
 }
 
 export function getItemAsOf(db: Db, itemKey: string, asOf: string): Item | null {
+  assertCanonicalTimestamp('asOf', asOf);
+
   const horizon = db.prepare('select oldest_intact_fetched_at from retention_horizon where id = 1').get() as
     | { oldest_intact_fetched_at: string }
     | undefined;
@@ -161,7 +213,7 @@ export function getItemAsOf(db: Db, itemKey: string, asOf: string): Item | null 
 
   const row = db
     .prepare(
-      'select * from items where item_key = ? and fetched_at <= ? order by fetched_at desc limit 1',
+      'select * from items where item_key = ? and fetched_at <= ? order by fetched_at desc, rowid desc limit 1',
     )
     .get(itemKey, asOf) as ItemRow | undefined;
   return row ? hydrate(db, row) : null;
