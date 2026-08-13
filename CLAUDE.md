@@ -7,7 +7,7 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **preflight passed; M0 not yet planned or approved.** No application code exists.
+Status: **M0 scaffold complete, tagged `m0-scaffold`.** `npm run dev` starts, `npm test` passes, `npm run check:portability` passes.
 
 ## Settled decisions
 

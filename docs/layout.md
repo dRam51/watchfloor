@@ -16,7 +16,8 @@ a map, not an essay — see the file itself for the real detail.
 | `src/cost/gate.ts` | The single chokepoint any billable call must pass through; hard-disabled without a `WF_ALLOW_PAID_*` flag. |
 | `src/api/server.ts` | Builds the Fastify instance and registers routes; never calls `.listen()` itself. |
 | `src/api/routes/health.ts` | `GET /health` — unauthenticated liveness probe: db reachability, migration count, TZ, cost-gate status. |
-| `src/bin/api.ts` | Process entrypoint: load env, open the db, run migrations, build the server, listen on loopback. |
+| `src/bin/api.ts` | Process entrypoint: load env, open the db via `openDatabase`, run migrations, build the server, listen on loopback. |
+| `src/bin/openDatabase.ts` | Opens the entrypoint's db, creating only its own parent directory (not `WF_DATA_DIR`/`WF_LOG_DIR`); a failed open is rethrown naming the resolved path instead of disappearing into a silent empty database. |
 | `db/migrations/` | Ordered, numbered `.sql` files; each applied exactly once and recorded in `schema_migrations`. |
 | `scripts/` | Standalone maintenance/CI scripts run outside the app process, e.g. `check-portability.mjs`. |
 | `config/` | Runtime configuration read by the app, e.g. `sources.yaml` — data, never code. |

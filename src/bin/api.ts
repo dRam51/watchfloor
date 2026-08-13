@@ -1,20 +1,12 @@
-import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { loadEnv } from '../config/env.ts';
-import { openDb } from '../db/connection.ts';
+import { openDatabase } from './openDatabase.ts';
 import { runMigrations } from '../db/migrate.ts';
 import { buildServer } from '../api/server.ts';
 
 const env = loadEnv();
-// A clean checkout has none of these directories yet, and SQLite (unlike
-// most fopen-backed tools) will not create missing parent directories for
-// us — it fails with ERR_SQLITE_ERROR/SQLITE_CANTOPEN instead. Additive only
-// (mkdirSync recursive is a no-op when the directory already exists); never
-// removes anything, consistent with the never-delete rule.
-mkdirSync(env.WF_DATA_DIR, { recursive: true });
-mkdirSync(dirname(env.WF_DB_PATH), { recursive: true });
-mkdirSync(env.WF_LOG_DIR, { recursive: true });
-const db = openDb(env.WF_DB_PATH);
+const db = openDatabase(env.WF_DB_PATH);
+
 // Resolved relative to this module, not the process cwd: a process
 // supervisor (§12) may launch us from any working directory. This file lives
 // at src/bin/api.ts, so two levels up is the repo root.
