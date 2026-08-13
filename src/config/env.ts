@@ -28,12 +28,23 @@ const relativePath = z
 
 const EnvSchema = z.object({
   WF_DB_PATH: relativePath,
-  WF_DATA_DIR: relativePath,
-  WF_LOG_DIR: relativePath,
+  // Optional until something reads them. Nothing in src/ consumes either one
+  // yet, so requiring them made a fresh deploy hard-fail on variables that
+  // change no behavior. They keep their relative-path validation for when a
+  // real consumer arrives.
+  WF_DATA_DIR: relativePath.optional(),
+  WF_LOG_DIR: relativePath.optional(),
   WF_VAULT_ROOT: relativePath.optional(),
   WF_TZ: z.string().min(1).refine(isValidTimeZone, {
     message: 'must be a valid IANA timezone, e.g. America/New_York',
   }),
+  // NO ROUTE ENFORCES THIS TOKEN YET. It is validated here and then never
+  // read: the only route is /health, which is deliberately public (a liveness
+  // probe for process supervision). Required so the credential exists and is
+  // long enough before the first authenticated route needs it — but do not
+  // assume any request is being checked against it today. Authentication
+  // belongs to the milestone that adds the real API surface; until then,
+  // treat every route as unauthenticated. Also stated in docs/layout.md.
   WF_API_TOKEN: z.string().min(8),
   WF_API_PORT: z.coerce.number().int().positive().default(8787),
 });

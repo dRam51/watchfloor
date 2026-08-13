@@ -24,10 +24,24 @@ describe('loadEnv', () => {
     } catch (e) {
       expect(e).toBeInstanceOf(EnvError);
       const msg = (e as EnvError).message;
-      for (const key of ['WF_DB_PATH', 'WF_DATA_DIR', 'WF_LOG_DIR', 'WF_TZ', 'WF_API_TOKEN']) {
+      for (const key of ['WF_DB_PATH', 'WF_TZ', 'WF_API_TOKEN']) {
         expect(msg).toContain(key);
       }
     }
+  });
+
+  it('does not require the vars nothing consumes yet', () => {
+    // WF_DATA_DIR and WF_LOG_DIR have no reader anywhere in src/. Requiring
+    // them made a fresh deploy hard-fail on variables that change no
+    // behavior. They stay validated when present, just not mandatory.
+    const { WF_DATA_DIR, WF_LOG_DIR, ...rest } = valid;
+    expect(WF_DATA_DIR && WF_LOG_DIR).toBeTruthy();
+
+    const env = loadEnv(rest);
+    expect(env.WF_DATA_DIR).toBeUndefined();
+    expect(env.WF_LOG_DIR).toBeUndefined();
+
+    expect(() => loadEnv({ ...rest, WF_LOG_DIR: '/var/log/wf' })).toThrow(EnvError);
   });
 
   it('rejects a timezone that is not a real IANA zone', () => {
