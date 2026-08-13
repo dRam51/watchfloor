@@ -1,0 +1,26 @@
+{
+  "name": "watchfloor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=26 <27" },
+  "scripts": {
+    "dev": "node --watch --env-file=.env src/bin/api.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file=.env dist/bin/api.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:portability": "node scripts/check-portability.mjs"
+  },
+  "dependencies": {
+    "fastify": "^5.2.0",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
