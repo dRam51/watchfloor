@@ -36,17 +36,22 @@
  * NOT an error: it resolves with `items: []`, matching a genuinely quiet
  * publishing day rather than being conflated with a broken fetch.
  *
- * Known limitation (disclosed in task-6-report.md): `fast-xml-parser` is a
+ * Recovering entries absorbed by an unclosed element. `fast-xml-parser` is a
  * lenient TOKENIZER, not a validating, self-healing parser. Content-level
  * malformations (unescaped `&`, stray control characters, a closing tag
  * with a mismatched namespace prefix) are all verified to recover cleanly,
- * every sibling entry intact. A genuinely UNCLOSED element with no closing
- * tag anywhere later in the document is a different, worse case: verified
- * empirically to sometimes absorb the rest of the document as descendants
- * of the broken element rather than being contained to it. No mitigation
- * within this dependency was found that doesn't trade this for a worse
- * failure mode (see task-6-report.md); a truncated response is still caught
- * (the tokenizer itself throws), which is the more common real-world cause.
+ * every sibling entry intact -- no special handling needed. A genuinely
+ * UNCLOSED element with no closing tag anywhere later in the document is a
+ * different case: the tokenizer parses later siblings as DESCENDANTS of the
+ * broken element instead of throwing or leaving them alone. Fix round 1
+ * (task-6-report.md, Finding 2) closed this: a conformant `<item>`/`<entry>`
+ * never contains a descendant of the same name, so finding one nested
+ * anywhere inside an already-extracted entry is a zero-false-positive
+ * signature of exactly this corruption -- `recoverAbsorbedEntries` below
+ * detects it and re-parses the recovered siblings as their own entries, so
+ * nothing is lost. A response truncated mid-tag (no well-formed content
+ * following the break at all) is a distinct, more common case, and is still
+ * caught the original way: the tokenizer itself throws for that.
  */
 
 import { XMLParser } from 'fast-xml-parser';
@@ -60,6 +65,7 @@ import {
   parseEntries,
   type Adapter,
   type AdapterResult,
+  type ParseEntriesResult,
 } from './types.ts';
 
 /**
@@ -158,7 +164,10 @@ function parseRssItem(item: unknown): RawItem | null {
   // "summary" meaning an excerpt on every feed that provides one, while
   // still surfacing SOMETHING for a minimal feed that only populates the
   // full-content field. normalizeItem's 300-character cap applies to
-  // whichever this resolves to either way.
+  // whichever this resolves to either way. Precedence (not just fallback)
+  // is mutation-tested: the Krebs/NPR fixtures have both fields on every
+  // item with different content, and reversing this `??` breaks exactly
+  // those two tests.
   const summary = textOf(item.description) ?? textOf(item['content:encoded']);
 
   // <dc:creator> (Dublin Core) is what both real fixtures that carry an
@@ -166,6 +175,10 @@ function parseRssItem(item: unknown): RawItem | null {
   // is rarely populated in practice and, per spec, holds an email address
   // rather than a display name. Preferring dc:creator, falling back to the
   // native element, covers both without guessing which a given feed means.
+  // Precedence is mutation-tested via a fixture entry carrying both fields
+  // with different values (fix round 1 follow-up -- the initial fallback
+  // fixtures only ever had ONE of the two present, which cannot distinguish
+  // "falls back correctly" from "prefers the wrong one when both exist").
   const author = textOf(item['dc:creator']) ?? textOf(item.author);
 
   return {
@@ -192,20 +205,27 @@ function parseRssItem(item: unknown): RawItem | null {
  * (rarely, and not strictly spec-conformant) missing its attributes
  * entirely. Resolves to the `rel="alternate"` one -- the article's own page,
  * which is what Atom calls the default when `rel` is omitted (RFC 4287
- * SS4.2.7.2) -- preferring an explicit `rel="alternate"` match but falling
- * back to the first link-shaped entry if none is explicitly marked
- * alternate, rather than returning nothing just because every link declared
- * some other relation.
+ * SS4.2.7.2) -- or `null` if no candidate is explicitly `alternate` or
+ * rel-less.
+ *
+ * Fix round 1, Finding 5: this used to fall back to the first link
+ * regardless of its `rel` (an entry whose only link was `rel="enclosure"`
+ * or `rel="edit"` got that URL as its item URL). `canonical_url` feeds
+ * `item_key`, which is permanent under append-only storage -- the same
+ * reasoning that shaped every URL-canonicalization decision in this
+ * milestone applies here: a knowingly-wrong URL can never be corrected once
+ * written, so an entry with no genuine alternate link is dropped (returns
+ * `null`, which `parseAtomEntry` below treats as "no usable link") rather
+ * than guessed at.
  */
 function extractAtomLink(value: unknown): string | null {
   if (typeof value === 'string') return isBlank(value) ? null : value;
 
   const candidates = Array.isArray(value) ? value.filter(isXmlNode) : isXmlNode(value) ? [value] : [];
-  if (candidates.length === 0) return null;
-
   const alternate = candidates.find((l) => l['@_rel'] === undefined || l['@_rel'] === 'alternate');
-  const chosen = alternate ?? candidates[0]!;
-  const href = chosen['@_href'];
+  if (!alternate) return null;
+
+  const href = alternate['@_href'];
   return typeof href === 'string' && !isBlank(href) ? href : null;
 }
 
@@ -224,13 +244,17 @@ function parseAtomEntry(entry: unknown, feedAuthor: string | null): RawItem | nu
 
   // <summary> is Atom's short-form field; <content> may legitimately hold
   // the complete entry body (RFC 4287 SS4.1.3). Same preference order as
-  // RSS's description/content:encoded, for the same reason.
+  // RSS's description/content:encoded, for the same reason. Precedence is
+  // mutation-tested via a fixture entry carrying both with different text.
   const summary = textOf(entry.summary) ?? textOf(entry.content);
 
   // <published> is the original publish time; <updated> is last-modified
   // and is REQUIRED on every Atom entry, so it is the one date field
   // guaranteed to exist if <published> is absent. Passed through untouched
-  // either way.
+  // either way. The live Simon Willison fixture has both fields on every
+  // entry but always IDENTICAL, so it cannot prove precedence by itself;
+  // a synthetic fixture entry with two DIFFERENT values does (fix round 1
+  // follow-up, mutation-tested).
   const publishedAt = textOf(entry.published) ?? textOf(entry.updated);
 
   // An entry without its own <author> inherits the feed's, per RFC 4287
@@ -264,6 +288,60 @@ function asEntryArray(value: unknown): unknown[] {
   return value === undefined ? [] : [value];
 }
 
+/**
+ * A conformant RSS `<item>` never contains a descendant `<item>`; a
+ * conformant Atom `<entry>` never contains a descendant `<entry>`. Finding
+ * one nested anywhere inside an already-extracted entry is therefore a
+ * reliable, zero-false-positive signature that a genuinely unclosed element
+ * elsewhere in the document (see the module doc comment's "recovering
+ * absorbed entries" section) absorbed later siblings as descendants of this
+ * entry, rather than leaving them as their own top-level siblings.
+ * Recursively collects every such nested occurrence into `out` -- a chain of
+ * several unclosed elements can absorb more than one extra layer, verified
+ * against a synthetic three-item chain (see task-6-report.md fix round 1).
+ */
+function collectAbsorbedEntries(node: unknown, key: 'item' | 'entry', out: unknown[]): void {
+  if (Array.isArray(node)) {
+    for (const child of node) collectAbsorbedEntries(child, key, out);
+    return;
+  }
+  if (!isXmlNode(node)) return;
+  for (const [childKey, value] of Object.entries(node)) {
+    if (childKey === key && Array.isArray(value)) {
+      out.push(...value);
+      // The absorbed entries themselves might have absorbed further
+      // siblings in a longer chain -- keep looking inside what was just
+      // recovered, not just the first level.
+      for (const child of value) collectAbsorbedEntries(child, key, out);
+    } else {
+      collectAbsorbedEntries(value, key, out);
+    }
+  }
+}
+
+/**
+ * Expands `entries` to include anything `collectAbsorbedEntries` finds
+ * nested inside any of them, so a sibling absorbed by an earlier entry's
+ * unclosed element is still parsed as its own entry rather than silently
+ * lost (fix round 1, Finding 2 -- see task-6-report.md; the earlier version
+ * of this module disclosed this as an unfixable known limitation, which was
+ * wrong: fast-xml-parser's own `isArray` forcing already puts the absorbed
+ * entries somewhere structurally addressable, this just has to go find
+ * them). Returns the SAME array, no new allocation, when nothing was
+ * absorbed -- a no-op on every well-formed feed, which is the overwhelming
+ * common case.
+ */
+function recoverAbsorbedEntries(entries: unknown[], key: 'item' | 'entry'): unknown[] {
+  const absorbed: unknown[] = [];
+  for (const entry of entries) {
+    if (!isXmlNode(entry)) continue;
+    for (const value of Object.values(entry)) {
+      collectAbsorbedEntries(value, key, absorbed);
+    }
+  }
+  return absorbed.length === 0 ? entries : [...entries, ...absorbed];
+}
+
 function detectFeed(parsed: unknown, url: string): DetectedFeed {
   const root = isXmlNode(parsed) ? parsed : {};
 
@@ -272,13 +350,13 @@ function detectFeed(parsed: unknown, url: string): DetectedFeed {
     if (!isXmlNode(channel)) {
       throw new FeedParseError(url, '<rss> root has no <channel>');
     }
-    return { entries: asEntryArray(channel.item), parseOne: parseRssItem };
+    return { entries: recoverAbsorbedEntries(asEntryArray(channel.item), 'item'), parseOne: parseRssItem };
   }
 
   if (isXmlNode(root.feed)) {
     const feedAuthor = extractAtomAuthorName(root.feed.author);
     return {
-      entries: asEntryArray(root.feed.entry),
+      entries: recoverAbsorbedEntries(asEntryArray(root.feed.entry), 'entry'),
       parseOne: (raw) => parseAtomEntry(raw, feedAuthor),
     };
   }
@@ -289,7 +367,7 @@ function detectFeed(parsed: unknown, url: string): DetectedFeed {
   );
 }
 
-function parseFeedBody(body: string, url: string): RawItem[] {
+function parseFeedBody(body: string, url: string): ParseEntriesResult {
   let parsed: unknown;
   try {
     parsed = parser.parse(body);
@@ -323,7 +401,7 @@ export const rssAdapter: Adapter = {
       throw new FeedParseError(source.url, 'politeFetch returned a null body for a non-304 response');
     }
 
-    const items = parseFeedBody(fetchResult.body, source.url);
-    return fetchedResult(fetchResult, items);
+    const parsed = parseFeedBody(fetchResult.body, source.url);
+    return fetchedResult(fetchResult, parsed);
   },
 };

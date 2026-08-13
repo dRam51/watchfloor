@@ -85,4 +85,64 @@
     <summary type="html">Link element is present but its href is blank -- must be skipped.</summary>
   </entry>
 
+  <entry>
+    <!-- no <published> at all: publishedAt must fall back to <updated>
+         rather than staying null when a date IS available (fix round 1,
+         Finding 4). <updated> is REQUIRED on every Atom entry, so this is
+         the one date field guaranteed present when <published> is not. -->
+    <title>Updated Only Fallback</title>
+    <link href="https://example.test/entries/updated-only-fallback" rel="alternate"/>
+    <updated>2026-08-10T00:00:00+00:00</updated>
+    <id>https://example.test/entries/updated-only-fallback</id>
+    <summary type="html">No published element -- publishedAt must fall back to updated.</summary>
+  </entry>
+
+  <entry>
+    <!-- no <summary> at all, only <content> (fix round 1, Finding 4). -->
+    <title>Content Only Fallback</title>
+    <link href="https://example.test/entries/content-only-fallback" rel="alternate"/>
+    <published>2026-08-12T11:00:00+00:00</published>
+    <id>https://example.test/entries/content-only-fallback</id>
+    <content type="html">Full content, no summary element on this entry at all.</content>
+  </entry>
+
+  <entry>
+    <!-- ONLY a rel="enclosure" link (a podcast-style attachment), no
+         rel="alternate" and no rel-less link to default to alternate.
+         Must be DROPPED, not resolved to a knowingly-wrong URL -- fix
+         round 1, Finding 5: canonical_url feeds item_key, which is
+         permanent under append-only storage. -->
+    <title>Only Non-Alternate Link</title>
+    <link href="https://example.test/entries/podcast.mp3" rel="enclosure" type="audio/mpeg"/>
+    <id>urn:example:only-enclosure</id>
+    <summary type="html">Only a rel="enclosure" link, no alternate -- must be skipped.</summary>
+  </entry>
+
+  <entry>
+    <!-- BOTH <summary> and <content> present, with DIFFERENT text (fix
+         round 1, mutation-testing follow-up): proves summary is actually
+         PREFERRED, not merely that content is used when summary is
+         absent. -->
+    <title>Both Summary And Content Present</title>
+    <link href="https://example.test/entries/both-summary-content" rel="alternate"/>
+    <published>2026-08-12T12:30:00+00:00</published>
+    <id>https://example.test/entries/both-summary-content</id>
+    <summary type="html">Preferred summary text.</summary>
+    <content type="html">Should-lose full content text.</content>
+  </entry>
+
+  <entry>
+    <!-- BOTH <published> and <updated> present, with DIFFERENT values (fix
+         round 1, mutation-testing follow-up): the live Simon Willison
+         fixture has both fields on every entry, but always IDENTICAL, which
+         cannot distinguish precedence -- this proves published is actually
+         preferred, not merely present. -->
+    <title>Both Published And Updated Present</title>
+    <link href="https://example.test/entries/both-dates" rel="alternate"/>
+    <published>2026-08-01T00:00:00+00:00</published>
+    <updated>2026-08-12T00:00:00+00:00</updated>
+    <id>https://example.test/entries/both-dates</id>
+    <summary type="html">Both published and updated present with different values -- published must win.</summary>
+  </entry>
+
 </feed>

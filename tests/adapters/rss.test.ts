@@ -215,11 +215,24 @@ describe('rssAdapter', () => {
 
       const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
 
-      // 8 items in the fixture, 4 defective -> exactly 4 survive.
-      expect(result.items).toHaveLength(4);
+      // 11 items in the fixture, 4 defective -> exactly 7 survive.
+      expect(result.items).toHaveLength(7);
+      // skipped reports the 4 defective ones -- distinct from "the feed
+      // simply published nothing new" (fix round 1, Finding 3; see the
+      // dedicated `AdapterResult.skipped` tests below for the case this
+      // actually needed to distinguish).
+      expect(result.skipped).toBe(4);
       const titles = result.items.map((i) => i.title).sort();
       expect(titles).toEqual(
-        ['Good Item One', 'Good Item Three', 'Good Item Two', 'Unparseable Date Survives'].sort(),
+        [
+          'Good Item One',
+          'Good Item Three',
+          'Good Item Two',
+          'Unparseable Date Survives',
+          'Content Encoded Fallback',
+          'Native Author Fallback',
+          'Both Author Fields Present',
+        ].sort(),
       );
 
       // A bad date does NOT cause a drop -- it survives with the raw string
@@ -232,6 +245,35 @@ describe('rssAdapter', () => {
       expect(noDate.publishedAt).toBeNull();
     });
 
+    it('resolves the content:encoded and native <author> RSS fallbacks when the short-form fields are absent (fix round 1, Finding 4)', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/rss+xml' });
+        res.end(fixture('rss-malformed-entries.xml'));
+      });
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      // No <description> at all on this item -- summary must come from
+      // <content:encoded> rather than staying null, proving the `??`
+      // actually falls through rather than being dead code no test exercised.
+      const contentFallback = result.items.find((i) => i.title === 'Content Encoded Fallback')!;
+      expect(contentFallback.summary).toBe(
+        'Full HTML content, no description element on this item at all.',
+      );
+
+      // No <dc:creator> at all on this item -- author must come from the
+      // native RSS <author> element, verbatim (not reformatted).
+      const authorFallback = result.items.find((i) => i.title === 'Native Author Fallback')!;
+      expect(authorFallback.author).toBe('native@example.test (Native Author)');
+
+      // BOTH fields present with different values -- dc:creator must be
+      // PREFERRED, not merely used when it's the only one available.
+      // Mutation-tested: swapping this `??`'s operand order breaks only
+      // this one assertion, nothing else in the suite.
+      const bothAuthor = result.items.find((i) => i.title === 'Both Author Fields Present')!;
+      expect(bothAuthor.author).toBe('Preferred Creator');
+    });
+
     it('drops defective Atom entries (no link, empty title, blank href) while good ones survive, resolving rel="alternate" among multiple links and entry-level author overriding the feed default', async () => {
       const baseUrl = await serve((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/atom+xml' });
@@ -240,8 +282,9 @@ describe('rssAdapter', () => {
 
       const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
 
-      // 8 entries in the fixture, 3 defective -> exactly 5 survive.
-      expect(result.items).toHaveLength(5);
+      // 13 entries in the fixture, 4 defective -> exactly 9 survive.
+      expect(result.items).toHaveLength(9);
+      expect(result.skipped).toBe(4);
       const titles = result.items.map((i) => i.title).sort();
       expect(titles).toEqual(
         [
@@ -250,6 +293,10 @@ describe('rssAdapter', () => {
           'Good Entry With Multiple Links',
           'Good Entry With Own Author',
           'Unparseable Date Survives',
+          'Updated Only Fallback',
+          'Content Only Fallback',
+          'Both Summary And Content Present',
+          'Both Published And Updated Present',
         ].sort(),
       );
 
@@ -269,6 +316,103 @@ describe('rssAdapter', () => {
       expect(inherited.author).toBe('Feed-Level Author');
       const overridden = result.items.find((i) => i.title === 'Good Entry With Own Author')!;
       expect(overridden.author).toBe('Entry-Level Author');
+    });
+
+    it('resolves the <updated> and <content> Atom fallbacks when the short-form fields are absent (fix round 1, Finding 4)', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/atom+xml' });
+        res.end(fixture('atom-malformed-entries.xml'));
+      });
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      // No <published> at all on this entry -- publishedAt must come from
+      // <updated> rather than staying null.
+      const updatedFallback = result.items.find((i) => i.title === 'Updated Only Fallback')!;
+      expect(updatedFallback.publishedAt).toBe('2026-08-10T00:00:00+00:00');
+
+      // No <summary> at all on this entry -- summary must come from <content>.
+      const contentFallback = result.items.find((i) => i.title === 'Content Only Fallback')!;
+      expect(contentFallback.summary).toBe('Full content, no summary element on this entry at all.');
+
+      // BOTH fields present with different text -- summary must be
+      // PREFERRED, not merely used when it's the only one available.
+      const bothSummary = result.items.find((i) => i.title === 'Both Summary And Content Present')!;
+      expect(bothSummary.summary).toBe('Preferred summary text.');
+
+      // BOTH date fields present with DIFFERENT values -- published must be
+      // preferred. The live Simon Willison fixture has both fields on every
+      // entry but always IDENTICAL, which cannot distinguish precedence;
+      // this is the case that actually proves it.
+      const bothDates = result.items.find((i) => i.title === 'Both Published And Updated Present')!;
+      expect(bothDates.publishedAt).toBe('2026-08-01T00:00:00+00:00');
+    });
+
+    it('drops an Atom entry whose only link has a non-alternate rel, rather than resolving to a knowingly-wrong URL (fix round 1, Finding 5)', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/atom+xml' });
+        res.end(fixture('atom-malformed-entries.xml'));
+      });
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      // This entry's ONLY <link> is rel="enclosure" (a podcast-style
+      // attachment) -- canonical_url feeds item_key, which is permanent
+      // under append-only storage, so a URL with no alternate/rel-less
+      // link to fall back to must drop the entry, not guess.
+      expect(result.items.some((i) => i.title === 'Only Non-Alternate Link')).toBe(false);
+    });
+  });
+
+  describe('AdapterResult.skipped (fix round 1, Finding 3)', () => {
+    it('reports skipped: 0 alongside items: [] for a genuinely quiet, well-formed feed', async () => {
+      const baseUrl = await serveBody(
+        '<rss version="2.0"><channel><title>Empty</title><link>https://example.test</link><description>none today</description></channel></rss>',
+        { headers: { 'Content-Type': 'application/rss+xml' } },
+      );
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      expect(result.items).toEqual([]);
+      expect(result.skipped).toBe(0);
+    });
+
+    it('distinguishes "nothing published" from "every entry was individually defective" -- both yield items: [], only skipped tells them apart', async () => {
+      // Every one of these 3 items is missing its <link> -- a fetch that
+      // genuinely succeeded (the channel parsed fine) but whose entries were
+      // all unusable. Before this field existed, this state was
+      // INDISTINGUISHABLE from the quiet-feed case above: both produced
+      // `items: []`, and a scheduler calling recordSuccess(itemCount: 0)
+      // would see no difference between a healthy quiet source and one
+      // whose parsing had silently broken for every entry.
+      const baseUrl = await serveBody(
+        `<rss version="2.0"><channel><title>t</title>
+<item><title>No Link One</title></item>
+<item><title>No Link Two</title></item>
+<item><title>No Link Three</title></item>
+</channel></rss>`,
+        { headers: { 'Content-Type': 'application/rss+xml' } },
+      );
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      expect(result.items).toEqual([]);
+      expect(result.skipped).toBe(3);
+    });
+
+    it('leaves skipped undefined on a notModified result -- nothing was parsed, so there is no count to report', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(304, { ETag: '"still-current"' });
+        res.end();
+      });
+
+      const result = await rssAdapter.fetch(
+        makeSource({ url: `${baseUrl}/feed` }),
+        makeState({ etag: '"still-current"' }),
+      );
+
+      expect(result.notModified).toBe(true);
+      expect(result.skipped).toBeUndefined();
     });
   });
 
@@ -320,20 +464,24 @@ describe('rssAdapter', () => {
       expect(result.items[0]!.title).toBe('café & friends — ❤');
     });
 
-    it('KNOWN LIMITATION (documented in task-6-report.md, not desired behaviour): a genuinely unclosed element with well-formed content continuing after it can absorb later siblings rather than being contained to its own entry', async () => {
+    it('recovers entries absorbed by a genuinely unclosed element instead of losing them (fix round 1, Finding 2)', async () => {
       // Deliberately pathological: <description> is opened in the first
       // item and never closed anywhere in the rest of the document (as
       // opposed to every other malformation tested above, which fast-xml-
-      // parser -- verified -- tolerates cleanly). This is fundamentally
-      // different from "a whole feed is truncated" (the tokenizer throws on
-      // that, proven by the empty/plain-text/HTML cases above): here,
-      // well-formed content genuinely continues afterward, and the lenient
-      // tokenizer's recovery swallows it rather than either containing the
-      // damage to one entry or throwing. No fix was found within
-      // fast-xml-parser that doesn't trade this for a worse failure mode
-      // (see task-6-report.md). This test pins CURRENT behaviour so a
-      // future dependency bump that changes it is visible, not silent --
-      // it is not an assertion that this is correct.
+      // parser -- verified -- tolerates cleanly without corrupting sibling
+      // parsing at all). This is fundamentally different from "a whole feed
+      // is truncated" (the tokenizer throws on that, proven by the
+      // empty/plain-text/HTML cases above): here, well-formed content
+      // genuinely continues afterward, and the lenient tokenizer's recovery
+      // parses "Good Two" as a descendant of "Broken One"'s unclosed
+      // <description> rather than as its own sibling <item>.
+      //
+      // A conformant <item> never contains a descendant <item> (same for
+      // Atom's <entry>) -- that is a zero-false-positive signature this
+      // adapter now detects and recovers from: "Good Two" is lifted back out
+      // and parsed as its own entry, so both survive. Verified this is a
+      // true recovery, not a coincidence, against a THREE-item chain too
+      // (below) -- multiple absorbed siblings all come back, not just one.
       const baseUrl = await serveBody(
         `<rss version="2.0"><channel><title>t</title>
 <item><title>Broken One</title><link>https://example.test/broken</link><description>oops no closing tag
@@ -344,17 +492,65 @@ describe('rssAdapter', () => {
 
       const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
 
-      // "Broken One" survives (it has a usable link and title -- its
-      // <description> just happens to now contain "Good Two" nested inside
-      // it as parsed structure, not text). "Good Two" does NOT independently
-      // survive: it was absorbed into "Broken One"'s unclosed <description>
-      // rather than remaining its own sibling item, so it never reaches
-      // parseEntries as its own entry at all. If this ever starts returning
-      // both as independent items, the underlying parser behaviour has
-      // improved and this test (and the report) should be updated to say so.
-      expect(result.items).toHaveLength(1);
-      expect(result.items[0]!.title).toBe('Broken One');
-      expect(result.items.some((i) => i.title === 'Good Two')).toBe(false);
+      expect(result.items).toHaveLength(2);
+      const titles = result.items.map((i) => i.title).sort();
+      expect(titles).toEqual(['Broken One', 'Good Two']);
+      // "Broken One" itself is still a valid item (usable link and title) --
+      // its <description> is genuinely truncated content, exactly the
+      // "truncated element" case named in the original brief, not itself a
+      // reason to drop the entry.
+      const brokenOne = result.items.find((i) => i.title === 'Broken One')!;
+      expect(brokenOne.summary).toBe('oops no closing tag');
+      const goodTwo = result.items.find((i) => i.title === 'Good Two')!;
+      expect(goodTwo.url).toBe('https://example.test/good-two');
+      expect(goodTwo.summary).toBe('fine');
+    });
+
+    it('recovers a CHAIN of multiple entries absorbed by the same unclosed element', async () => {
+      const baseUrl = await serveBody(
+        `<rss version="2.0"><channel><title>t</title>
+<item><title>Broken One</title><link>https://example.test/broken</link><description>oops no closing tag
+<item><title>Good Two</title><link>https://example.test/good-two</link><description>fine</description></item>
+<item><title>Good Three</title><link>https://example.test/good-three</link><description>fine too</description></item>
+</channel></rss>`,
+        { headers: { 'Content-Type': 'application/rss+xml' } },
+      );
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      expect(result.items).toHaveLength(3);
+      expect(result.items.map((i) => i.title).sort()).toEqual(['Broken One', 'Good Three', 'Good Two']);
+    });
+
+    it('recovers an Atom entry absorbed by an unclosed <summary>, the same way', async () => {
+      const baseUrl = await serveBody(
+        `<feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>
+<entry><title>Broken One</title><link href="https://example.test/broken" rel="alternate"/><summary>oops no closing tag
+<entry><title>Good Two</title><link href="https://example.test/good-two" rel="alternate"/><summary>fine</summary></entry>
+</feed>`,
+        { headers: { 'Content-Type': 'application/atom+xml' } },
+      );
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      expect(result.items).toHaveLength(2);
+      expect(result.items.map((i) => i.title).sort()).toEqual(['Broken One', 'Good Two']);
+    });
+
+    it('does not change well-formed feeds at all (no false positives from entry recovery)', async () => {
+      // Every one of the four real, live fixtures already proves this
+      // (their item/entry counts are asserted exactly elsewhere in this
+      // file) -- this is the minimal, direct version: a normal two-item
+      // feed with no nesting anywhere must come through unchanged.
+      const baseUrl = await serveBody(
+        '<rss version="2.0"><channel><item><title>A</title><link>https://example.test/a</link></item><item><title>B</title><link>https://example.test/b</link></item></channel></rss>',
+        { headers: { 'Content-Type': 'application/rss+xml' } },
+      );
+
+      const result = await rssAdapter.fetch(makeSource({ url: `${baseUrl}/feed` }), null);
+
+      expect(result.items).toHaveLength(2);
+      expect(result.items.map((i) => i.title)).toEqual(['A', 'B']);
     });
   });
 

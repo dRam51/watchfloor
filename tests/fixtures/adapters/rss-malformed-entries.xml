@@ -76,5 +76,37 @@
     <description>This item has no title element at all and must be skipped.</description>
   </item>
 
+  <item>
+    <!-- no <description> at all: summary must fall back to content:encoded
+         rather than staying null when there IS text available, just under
+         a different element (fix round 1, Finding 4). -->
+    <title>Content Encoded Fallback</title>
+    <link>https://example.test/articles/content-encoded-fallback</link>
+    <content:encoded xmlns:content="http://purl.org/rss/1.0/modules/content/"><![CDATA[Full HTML content, no description element on this item at all.]]></content:encoded>
+  </item>
+
+  <item>
+    <!-- no <dc:creator>, only RSS 2.0's native <author> (an email-shaped
+         string per spec, passed through verbatim -- not reformatted). -->
+    <title>Native Author Fallback</title>
+    <link>https://example.test/articles/native-author-fallback</link>
+    <description>No dc:creator on this item, only the native RSS author element.</description>
+    <author>native@example.test (Native Author)</author>
+  </item>
+
+  <item>
+    <!-- BOTH dc:creator and native <author> present, with DIFFERENT values
+         (fix round 1, mutation-testing follow-up): proves dc:creator is
+         actually PREFERRED, not merely that a fallback exists when the
+         other is absent -- a swapped `??` order passes the fallback-only
+         tests above (nothing to fall back to when only one is present) but
+         must fail this one. -->
+    <title>Both Author Fields Present</title>
+    <link>https://example.test/articles/both-author-fields</link>
+    <description>Both dc:creator and native author are present here -- dc:creator must win.</description>
+    <dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">Preferred Creator</dc:creator>
+    <author>should-lose@example.test (Should Lose)</author>
+  </item>
+
 </channel>
 </rss>

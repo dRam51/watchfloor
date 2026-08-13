@@ -42,6 +42,24 @@ import type { FetchResult } from '../fetch/http.ts';
 export type SourceType = Source['type'];
 
 /**
+ * Every complete scheduler registry needs one `Adapter` per `SourceType`.
+ * Declaring a registry with this type (`const registry: AdapterRegistry =
+ * {...}`) rather than as an untyped object literal makes a missing
+ * `SourceType` key a COMPILE error, not a routing hole only discovered at
+ * runtime the day a source of that type is configured -- exactly the
+ * mechanical enforcement the `'atom'` wrinkle above needs and a prose
+ * comment alone can't provide.
+ *
+ * `'atom'` is not actually unhandled: `rssAdapter` (src/adapters/rss.ts)
+ * covers it, since it content-sniffs the format rather than trusting
+ * `source.type`. A conforming registry must still list `atom: rssAdapter`
+ * explicitly, the same instance as `rss:` -- `Record<SourceType, Adapter>`
+ * requires every key to be present and has no way to know two keys should
+ * resolve to the same value without being told.
+ */
+export type AdapterRegistry = Record<SourceType, Adapter>;
+
+/**
  * Implemented by each format adapter. `type` identifies which `SourceType`
  * a scheduler should dispatch to this adapter (see the note on rss/atom
  * above for the one case that isn't a straight 1:1 mapping); `fetch` performs
@@ -67,6 +85,22 @@ export interface AdapterResult {
   etag: string | null;
   lastModified: string | null;
   notModified: boolean;
+  /**
+   * How many raw entries this fetch attempted to parse but discarded --
+   * either a legitimate per-entry defect (see `EntryParser`) or an
+   * `EntryParser` bug that threw (see `parseEntries`'s backstop catch).
+   * Optional: a `notModifiedResult` has nothing to report (nothing was
+   * parsed at all), so it is left `undefined` there rather than a
+   * fabricated `0`. When present (every `fetchedResult` call populates it),
+   * it is what makes `items: []` distinguishable between two states that
+   * otherwise look identical: a source that genuinely published nothing new
+   * this cycle (`skipped: 0`), versus one whose entries all failed to parse
+   * (`skipped: <entries.length>`) -- the same `recordSuccess(itemCount: 0)`
+   * a scheduler would otherwise call in both cases with no way to tell them
+   * apart. Consumed by the source-health page (Task 10's `PollReport`), not
+   * required for correctness today. Added fix round 1, Finding 3.
+   */
+  skipped?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,19 +136,22 @@ export function notModifiedResult(fetchResult: FetchResult, state: FetchState | 
 }
 
 /**
- * Builds the `AdapterResult` for an ordinary 2xx fetch. Unlike
- * `notModifiedResult`, there is no fallback to prior state: a 2xx response
- * is authoritative about its own current validators, and a source that
- * simply doesn't send an ETag shouldn't be made to look like one that does
- * by reusing an old value that may no longer describe the (possibly
- * just-changed) content.
+ * Builds the `AdapterResult` for an ordinary 2xx fetch, from a
+ * `ParseEntriesResult` (see `parseEntries` below) so `skipped` is always
+ * populated alongside `items` -- there is no code path that produces one
+ * without the other. Unlike `notModifiedResult`, there is no fallback to
+ * prior state for the validators: a 2xx response is authoritative about its
+ * own current ones, and a source that simply doesn't send an ETag shouldn't
+ * be made to look like one that does by reusing an old value that may no
+ * longer describe the (possibly just-changed) content.
  */
-export function fetchedResult(fetchResult: FetchResult, items: RawItem[]): AdapterResult {
+export function fetchedResult(fetchResult: FetchResult, parsed: ParseEntriesResult): AdapterResult {
   return {
-    items,
+    items: parsed.items,
     etag: fetchResult.etag,
     lastModified: fetchResult.lastModified,
     notModified: false,
+    skipped: parsed.skipped,
   };
 }
 
@@ -155,29 +192,42 @@ export function fetchedResult(fetchResult: FetchResult, items: RawItem[]): Adapt
  */
 export type EntryParser<TRawEntry> = (rawEntry: TRawEntry) => RawItem | null;
 
+/** `parseEntries`'s return shape -- see `AdapterResult.skipped` for why the count travels alongside the items rather than being discarded. */
+export interface ParseEntriesResult {
+  items: RawItem[];
+  skipped: number;
+}
+
 /**
- * Applies an `EntryParser` across a batch of raw entries, keeping only the
- * ones that parsed. Deliberately trivial: the value here is making the
- * null-means-skip convention above impossible to miss, and making "one bad
- * entry can't take the rest of the batch down" a property of the shared
+ * Applies an `EntryParser` across a batch of raw entries, keeping the ones
+ * that parsed and counting the ones that didn't. The counting and the
+ * null-means-skip mechanics are deliberately trivial: the value here is
+ * making that convention impossible to miss, and making "one bad entry
+ * can't take the rest of the batch down" (and, since fix round 1's Finding
+ * 3, "a discarded entry is always counted, never silently dropped from both
+ * the items AND the record of what happened") a property of the shared
  * contract rather than of each implementer's diligence. The try/catch is a
  * backstop, not the primary mechanism -- an `EntryParser` is expected to
  * return `null`, not throw, for a single bad entry, but a bug that throws
  * unexpectedly (an unguarded property access on an unusually-shaped entry,
- * say) still only costs its own entry here, not the batch.
+ * say) still only costs its own entry here, not the batch, and is still
+ * counted in `skipped` the same as a well-behaved `null`.
  */
 export function parseEntries<TRawEntry>(
   rawEntries: TRawEntry[],
   parseOne: EntryParser<TRawEntry>,
-): RawItem[] {
+): ParseEntriesResult {
   const items: RawItem[] = [];
+  let skipped = 0;
   for (const rawEntry of rawEntries) {
     try {
       const item = parseOne(rawEntry);
       if (item !== null) items.push(item);
+      else skipped++;
     } catch {
       // See the doc comment above.
+      skipped++;
     }
   }
-  return items;
+  return { items, skipped };
 }

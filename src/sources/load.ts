@@ -13,7 +13,14 @@ export class SourceConfigError extends Error {
 const SourceSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'must be kebab-case'),
   name: z.string().min(1),
-  type: z.enum(['rss', 'atom', 'json', 'github_search', 'api', 'market_data']),
+  // Every value here must have an adapter that can emit `type: <value>`
+  // (src/adapters/types.ts's SourceType is derived from this union, not the
+  // other way around) -- add the new value in the SAME change that
+  // introduces its adapter, never after. Missed for news_sitemap/
+  // google_news until M1 task 6 fix round 1: Tasks 8 and 9 (the AP and
+  // Reuters adapters) could not otherwise construct a conforming `Adapter`
+  // at all without a cast or editing this file outside their own scope.
+  type: z.enum(['rss', 'atom', 'json', 'github_search', 'api', 'market_data', 'news_sitemap', 'google_news']),
   url: z.string().url(),
   beats: z.array(z.enum(BEATS)).min(1),
   weight: z.number().min(0.1).max(2.0),

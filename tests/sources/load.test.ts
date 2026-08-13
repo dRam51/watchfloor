@@ -49,4 +49,14 @@ sources:
     const sources = loadSourcesFile(join(process.cwd(), 'config', 'sources.yaml'));
     expect(sources.length).toBeGreaterThan(0);
   });
+
+  it('accepts news_sitemap and google_news as valid source types (Tasks 8 and 9 have no other way to declare a conforming source)', () => {
+    const yaml = `
+sources:
+  - { id: ap-news, name: AP News, type: news_sitemap, url: 'https://apnews.com/news-sitemap-content.xml', beats: [usnews], weight: 1, poll_interval: 1h, enabled: true }
+  - { id: reuters-gnews, name: Reuters via Google News, type: google_news, url: 'https://news.google.com/rss/search?q=site:reuters.com', beats: [usnews], weight: 1, poll_interval: 1h, enabled: true }
+`;
+    const sources = loadSources(yaml);
+    expect(sources.map((s) => s.type)).toEqual(['news_sitemap', 'google_news']);
+  });
 });
