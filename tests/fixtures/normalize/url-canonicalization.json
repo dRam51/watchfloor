@@ -10,6 +10,16 @@
     "expected": "https://example.com/foo"
   },
   {
+    "note": "fix round 1, finding 1: repeated www. collapses fully in one pass (idempotence-critical, mirrors the multi-trailing-slash case)",
+    "input": "https://www.www.example.com/foo",
+    "expected": "https://example.com/foo"
+  },
+  {
+    "note": "fix round 1, finding 1 symptom 2: repeated www. AND same-pass https upgrade on a known-https host -- a single-pass www strip would leave 'www.arxiv.org', miss the allowlist match, and only upgrade on a second application",
+    "input": "http://www.www.arxiv.org/abs/1",
+    "expected": "https://arxiv.org/abs/1"
+  },
+  {
     "note": "drop fragment",
     "input": "https://example.com/foo#section-2",
     "expected": "https://example.com/foo"
@@ -30,9 +40,14 @@
     "expected": "https://example.com/foo"
   },
   {
-    "note": "ref + source stripped",
+    "note": "fix round 1 ruling: ref + source are NOT stripped (reversed -- brief's must-list conflicted with prefer-under-normalizing; principle won). They pass through and sort like any other param.",
     "input": "https://example.com/foo?ref=homepage&source=twitter&id=9",
-    "expected": "https://example.com/foo?id=9"
+    "expected": "https://example.com/foo?id=9&ref=homepage&source=twitter"
+  },
+  {
+    "note": "fix round 1 ruling, motivating case: hn-algolia aggregates arbitrary third-party URLs, so a real doc site's meaningful ?ref= (e.g. sidebar navigation tracking) survives untouched -- this is exactly the reachable collision that reversed the ref/source rule",
+    "input": "https://docs.example.com/guide/setup?ref=sidebar-nav",
+    "expected": "https://docs.example.com/guide/setup?ref=sidebar-nav"
   },
   {
     "note": "at_* stripped",
@@ -63,6 +78,11 @@
     "note": "force https for known-https host",
     "input": "http://arxiv.org/abs/2508.01234",
     "expected": "https://arxiv.org/abs/2508.01234"
+  },
+  {
+    "note": "fix round 1, finding 2: project-zero's host is a *.blogspot.com subdomain, not a custom domain -- Google's own Blogger support docs state HTTPS is on-by-default and cannot be disabled for non-custom-domain blogs, so this is a platform-subdomain rule (same tier as *.substack.com), not an unverified custom-domain guess",
+    "input": "http://googleprojectzero.blogspot.com/2026/01/example-post.html",
+    "expected": "https://googleprojectzero.blogspot.com/2026/01/example-post.html"
   },
   {
     "note": "unknown host: scheme left alone, not forced",
@@ -150,8 +170,8 @@
     "expected": "https://weather.gov/fl/alert-123"
   },
   {
-    "note": "composite: uppercase+www+http+utm+ref+fragment+trailing-slash all compose in one pass",
+    "note": "composite: uppercase+www+http+utm+fragment+trailing-slash all compose in one pass; ref is NOT stripped (fix round 1 ruling) and survives, sorted alongside keep",
     "input": "HTTP://WWW.EXAMPLE.COM/Archive/Post/?utm_source=digest&utm_medium=email&ref=footer&keep=1#comments",
-    "expected": "http://example.com/Archive/Post?keep=1"
+    "expected": "http://example.com/Archive/Post?keep=1&ref=footer"
   }
 ]

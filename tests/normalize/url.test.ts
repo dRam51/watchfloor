@@ -11,9 +11,19 @@ interface GoldenCase {
 
 // Checked-in golden file, not inlined: a future change to the rules shows up
 // as a reviewable diff on this one file instead of scattered test edits.
+//
+// Resolved relative to this file's own location, not process.cwd(): fix
+// round 1 (task-2-report.md). Every existing test file in this repo resolves
+// fixtures via process.cwd() instead, which is reliable here specifically
+// because `npm test` runs `vitest` with cwd already normalized to the
+// package root — so this is not a bug fix, just a switch to the more
+// direct, invocation-independent form the M1 plan calls out
+// (docs/superpowers/plans/2026-08-13-m1-ingest.md: "All paths via env or
+// import.meta.dirname"), matching how src/bin/api.ts and src/fetch/http.ts
+// already resolve repo-relative paths.
 const golden: GoldenCase[] = JSON.parse(
   readFileSync(
-    join(process.cwd(), 'tests', 'fixtures', 'normalize', 'url-canonicalization.json'),
+    join(import.meta.dirname, '..', 'fixtures', 'normalize', 'url-canonicalization.json'),
     'utf8',
   ),
 );
