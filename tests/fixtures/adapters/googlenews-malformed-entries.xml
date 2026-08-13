@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hand-built (not captured from a live source) fixture for
+  tests/adapters/googleNews.test.ts. Deliberately mixes well-formed <item>
+  entries with individually-defective ones, all inside an otherwise
+  well-formed RSS 2.0 document shaped the way Google News actually emits it
+  (see googlenews-reuters-rss2.xml for the real, captured-live counterpart
+  this is modeled on: every item carries a title suffixed " - <source>", a
+  news.google.com/rss/articles/... link, and a <source url="..."> element).
+
+  What this fixture proves, item by item:
+    - a missing/blank <link>, and a missing/empty <title>, still drop the
+      entry exactly the way rss.ts's own base RSS 2.0 rules require (this
+      adapter adds no new relaxation of that rule);
+    - a title with an internal hyphen survives suffix-stripping intact --
+      the risk task-9-report.md calls out explicitly;
+    - an unparseable/missing <pubDate> survives (verbatim / null), never
+      dropped -- interpreting dates is normalizeItem's job, not this
+      adapter's;
+    - an item with NO <source> element at all keeps its title completely
+      UNSTRIPPED, because there is no trusted publisher name to strip
+      against and this adapter never guesses;
+    - an item whose title does NOT actually end with " - <source text>"
+      (a mismatch) is left UNSTRIPPED rather than mangled;
+    - <description> is never surfaced as `summary`, regardless of its
+      content -- proven here with an item whose description contains
+      unexpected extra text, so the null isn't just "happened to be empty".
+-->
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel>
+  <title>Malformed Google News fixture</title>
+  <link>https://news.google.com/search?q=site:example.test</link>
+  <description>A mix of good and deliberately broken Google News items.</description>
+
+  <item>
+    <title>Good Item One - Reuters</title>
+    <link>https://news.google.com/rss/articles/GOODONE?oc=5</link>
+    <guid isPermaLink="false">GOODONE</guid>
+    <pubDate>Tue, 11 Aug 2026 21:28:35 GMT</pubDate>
+    <description>&lt;a href="https://news.google.com/rss/articles/GOODONE?oc=5" target="_blank"&gt;Good Item One&lt;/a&gt;&amp;nbsp;&amp;nbsp;&lt;font color="#6f6f6f"&gt;Reuters&lt;/font&gt;</description>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <!-- no <link> at all: must be dropped, same base rule as rss.ts -->
+    <title>Missing Link - Reuters</title>
+    <pubDate>Tue, 11 Aug 2026 21:28:35 GMT</pubDate>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <!-- <title> present but empty: must be dropped -->
+    <title></title>
+    <link>https://news.google.com/rss/articles/EMPTYTITLE?oc=5</link>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <title>Markets brace for wide-ranging tariff changes next quarter - Reuters</title>
+    <link>https://news.google.com/rss/articles/HYPHENGOOD?oc=5</link>
+    <guid isPermaLink="false">HYPHENGOOD</guid>
+    <pubDate>Wed, 12 Aug 2026 09:00:00 GMT</pubDate>
+    <description>&lt;a href="https://news.google.com/rss/articles/HYPHENGOOD?oc=5" target="_blank"&gt;Markets brace for wide-ranging tariff changes next quarter&lt;/a&gt;&amp;nbsp;&amp;nbsp;&lt;font color="#6f6f6f"&gt;Reuters&lt;/font&gt;</description>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <!-- <title> element entirely absent (not just empty): must be dropped -->
+    <link>https://news.google.com/rss/articles/NOTITLEELEMENT?oc=5</link>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <title>Unparseable Date Survives - Reuters</title>
+    <link>https://news.google.com/rss/articles/BADDATE?oc=5</link>
+    <pubDate>not a real date at all</pubDate>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <!-- link is present but blank after the XML layer trims it: same as missing -->
+    <title>Whitespace Only Link - Reuters</title>
+    <link>   </link>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <title>No Date At All Survives - Reuters</title>
+    <link>https://news.google.com/rss/articles/NODATE?oc=5</link>
+    <!-- no <pubDate> at all: fine, publishedAt is simply null, not a reason to drop -->
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <!-- NO <source> element at all: there is no trusted publisher name to
+         strip against, so this title must survive completely UNSTRIPPED,
+         suffix and all -- never guess which trailing words are decoration. -->
+    <title>Missing Source Element - Mystery Publisher</title>
+    <link>https://news.google.com/rss/articles/NOSOURCE?oc=5</link>
+    <pubDate>Wed, 12 Aug 2026 10:00:00 GMT</pubDate>
+  </item>
+
+  <item>
+    <!-- <source> IS present (Reuters) but the title does NOT end with
+         " - Reuters" -- a mismatch. Must be left UNSTRIPPED rather than
+         mangled by stripping something that doesn't actually match. -->
+    <title>Source Present But Title Does Not Match It</title>
+    <link>https://news.google.com/rss/articles/MISMATCH?oc=5</link>
+    <pubDate>Wed, 12 Aug 2026 11:00:00 GMT</pubDate>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <!-- description carries EXTRA, non-boilerplate text beyond the usual
+         self-referential anchor+font shape -- summary must still come back
+         null, proving the decision is unconditional, not merely "this
+         description happened to be empty of real content". -->
+    <title>Description With Unexpected Content - Reuters</title>
+    <link>https://news.google.com/rss/articles/DESCCONTENT?oc=5</link>
+    <pubDate>Wed, 12 Aug 2026 12:00:00 GMT</pubDate>
+    <description>This is NOT the usual Google News boilerplate -- if this ever leaks into `summary`, that's a bug.</description>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+  <item>
+    <title>Good Item Two - Reuters</title>
+    <link>https://news.google.com/rss/articles/GOODTWO?oc=5</link>
+    <guid isPermaLink="false">GOODTWO</guid>
+    <pubDate>Wed, 12 Aug 2026 13:00:00 GMT</pubDate>
+    <description>&lt;a href="https://news.google.com/rss/articles/GOODTWO?oc=5" target="_blank"&gt;Good Item Two&lt;/a&gt;&amp;nbsp;&amp;nbsp;&lt;font color="#6f6f6f"&gt;Reuters&lt;/font&gt;</description>
+    <source url="https://www.reuters.com">Reuters</source>
+  </item>
+
+</channel>
+</rss>
