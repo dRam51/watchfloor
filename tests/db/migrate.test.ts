@@ -55,6 +55,57 @@ describe('runMigrations', () => {
   });
 });
 
+describe('runMigrations transaction integrity', () => {
+  it('rejects a migration that embeds its own COMMIT, preserving the real failure and recording nothing', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '0001_embeds_commit.sql'), 'create table x (id integer);\ncommit;\n');
+    const db = freshDb();
+
+    let caught: Error | undefined;
+    try {
+      runMigrations(db, dir);
+    } catch (err) {
+      caught = err as Error;
+    }
+
+    // Half 1: the caller gets an informative, version-scoped error — not the
+    // rollback-masking "cannot rollback - no transaction is active" that
+    // escapes the unguarded catch in the pre-fix implementation.
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/0001_embeds_commit/);
+    expect(caught!.message).not.toMatch(/cannot rollback - no transaction is active/);
+
+    // Half 2: nothing was left behind. No bookkeeping row for a migration
+    // that never truly completed...
+    const applied = db.prepare('select count(*) as c from schema_migrations').get() as {
+      c: number;
+    };
+    expect(applied.c).toBe(0);
+
+    // ...and no schema drift either: the embedded COMMIT must never reach
+    // SQLite, so table `x` must never come into existence at all.
+    const tables = db
+      .prepare("select name from sqlite_master where type = 'table' and name = 'x'")
+      .all();
+    expect(tables).toEqual([]);
+  });
+
+  it('rejects a migration that embeds its own ROLLBACK the same way', () => {
+    const dir = tempDir();
+    writeFileSync(
+      join(dir, '0001_embeds_rollback.sql'),
+      'create table y (id integer);\nrollback;\n',
+    );
+    const db = freshDb();
+
+    expect(() => runMigrations(db, dir)).toThrow(/0001_embeds_rollback/);
+    const applied = db.prepare('select count(*) as c from schema_migrations').get() as {
+      c: number;
+    };
+    expect(applied.c).toBe(0);
+  });
+});
+
 describe('0001_init', () => {
   it('applies the real schema and blocks updates and deletes on items', () => {
     const db = freshDb();
