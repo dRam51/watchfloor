@@ -793,4 +793,99 @@ describe('jsonAdapter', () => {
       });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Fix (disabled sources, M1 follow-up): nvd-cve's per-poll date-window url
+  // builder. See src/adapters/json.ts's JsonSourceMapper.buildUrl doc
+  // comment for the general mechanism (one optional function per source id,
+  // registered in JSON_SOURCE_MAPPERS the same way extractEntries/parseEntry
+  // already are) and nvdCveUrl's own doc comment for why nvd-cve needs it:
+  // NVD's unfiltered query sorts ascending from the start of its entire
+  // catalog (1988-era CVEs), not by recency, and a static config url cannot
+  // express "the last N days" the way a lastModStartDate/lastModEndDate
+  // window can.
+  // -------------------------------------------------------------------------
+  describe('nvd-cve: per-poll date-window url builder', () => {
+    it('builds lastModStartDate/lastModEndDate as a window ending at the injected "now", preserving the configured url\'s existing query params', async () => {
+      let requestUrl: string | undefined;
+      const baseUrl = await serve((req, res) => {
+        requestUrl = req.url;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ vulnerabilities: [] }));
+      });
+
+      const fixedNow = new Date('2026-08-14T03:00:00.000Z');
+      await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed?resultsPerPage=5` }),
+        null,
+        fixedNow,
+      );
+
+      const requested = new URL(requestUrl!, baseUrl);
+      // The configured url's own query param survives untouched -- buildUrl
+      // only adds/overwrites the two date-window params, never replaces the
+      // whole query string.
+      expect(requested.pathname).toBe('/feed');
+      expect(requested.searchParams.get('resultsPerPage')).toBe('5');
+      // A fully deterministic exact match -- possible only because "now" is
+      // an injected parameter, never read from the clock inside the
+      // builder itself (see buildUrl's doc comment).
+      expect(requested.searchParams.get('lastModEndDate')).toBe('2026-08-14T03:00:00.000Z');
+      expect(requested.searchParams.get('lastModStartDate')).toBe('2026-08-07T03:00:00.000Z');
+    });
+
+    it('defaults to the real current time when no "now" argument is given, so production callers (2-arg fetch) need no changes', async () => {
+      let requestUrl: string | undefined;
+      const baseUrl = await serve((req, res) => {
+        requestUrl = req.url;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ vulnerabilities: [] }));
+      });
+
+      const before = Date.now();
+      await jsonAdapter.fetch(makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }), null);
+      const after = Date.now();
+
+      const requested = new URL(requestUrl!, baseUrl);
+      const windowEnd = Date.parse(requested.searchParams.get('lastModEndDate')!);
+      expect(windowEnd).toBeGreaterThanOrEqual(before);
+      expect(windowEnd).toBeLessThanOrEqual(after);
+    });
+
+    it('a source with no registered builder (e.g. cisa-kev) fetches its configured url completely unchanged, ignoring any injected "now"', async () => {
+      let requestUrl: string | undefined;
+      const baseUrl = await serve((req, res) => {
+        requestUrl = req.url;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ vulnerabilities: [] }));
+      });
+
+      await jsonAdapter.fetch(
+        makeSource({ id: 'cisa-kev', url: `${baseUrl}/feed?x=1` }),
+        null,
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      // No lastModStartDate/lastModEndDate ever appears -- the request is
+      // byte-for-byte the configured url's own path and query string.
+      expect(requestUrl).toBe('/feed?x=1');
+    });
+
+    it('the nvd-cve mapper still parses its real fixture correctly with the builder wired in (no change to entry parsing)', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(fixture('nvd-cve.json'));
+      });
+
+      const result = await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed?resultsPerPage=5` }),
+        null,
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      expect(result.items).toHaveLength(5);
+      expect(result.skipped).toBe(0);
+      expect(result.items[0]!.url).toBe('https://nvd.nist.gov/vuln/detail/CVE-1999-0095');
+    });
+  });
 });

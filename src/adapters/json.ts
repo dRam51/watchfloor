@@ -78,6 +78,29 @@
  * url on CISA's own domain instead -- see `cisaKevUrl`'s doc comment for
  * exactly which one, including why the first shape considered for it
  * doesn't actually work.
+ *
+ * ---------------------------------------------------------------------------
+ * Fix (disabled sources, M1 follow-up): a per-source URL builder
+ * ---------------------------------------------------------------------------
+ * `nvd-cve` shipped `enabled: false` (config/sources.yaml, M1 task 11)
+ * because its only usable query (a `lastModStartDate`/`lastModEndDate`
+ * recency window) has to be computed relative to "now" at request time, and
+ * every JSON source before this fetched `source.url` verbatim, forever --
+ * no source had ever needed its request to vary poll to poll. `project-zero`
+ * was disabled for an unrelated reason (an oversized, unbounded response)
+ * and is `type: rss`, entirely out of this file -- see src/fetch/http.ts's
+ * `MAX_BYTES_OVERRIDES` doc comment for that one.
+ *
+ * `JsonSourceMapper` below gained exactly one new optional field,
+ * `buildUrl(configuredUrl, now)` -- symmetric with the `extractEntries`/
+ * `parseEntry` pair every mapper already had, registered the same way, in
+ * the same registry, never a second mechanism bolted on elsewhere. Four of
+ * the five sources have no `buildUrl` at all and are completely unaffected:
+ * no behavior change, no new code path exercised, `source.url` fetched
+ * exactly as before this existed. See `JsonSourceMapper`'s own doc comment
+ * for the full shape and why it deliberately stops there rather than
+ * growing into a templating language, and `nvdCveUrl` below for the one
+ * registered builder.
  */
 
 import { politeFetch, type FetchResult } from '../fetch/http.ts';
@@ -189,6 +212,38 @@ function firstNonBlank(a: string | null, b: string | null): string | null {
 interface JsonSourceMapper {
   extractEntries(body: unknown, sourceUrl: string, sourceId: string): unknown[];
   parseEntry: EntryParser<unknown>;
+  /**
+   * Optional, symmetric with `extractEntries`/`parseEntry` above: one
+   * function per source id, registered here rather than invented as a
+   * separate concept elsewhere. Takes the CONFIGURED url
+   * (config/sources.yaml, verbatim -- whatever query params it already
+   * carries, e.g. nvd-cve's own `?resultsPerPage=5`) and the current
+   * instant, and returns the url this poll should actually request. Absent
+   * for four of the five sources registered below, which have no reason to
+   * vary their request across polls -- those fetch `source.url` completely
+   * unchanged, exactly as every JSON source did before this field existed.
+   *
+   * Deliberately NOT a templating language, a query-string DSL, or a
+   * general per-source config hook -- it is one plain function, taking the
+   * two inputs a source's per-poll url could ever need with the state this
+   * adapter already has in hand (no cursor, no page token, nothing else is
+   * threaded through `parseJsonBody` or persisted between polls). A source
+   * that genuinely needed more than "the configured url plus the current
+   * time" -- a cursor from the previous response, say -- would need a
+   * different mechanism than this, not a bigger one wedged into this shape.
+   *
+   * `now` is a parameter here, and MUST be treated as the only source of
+   * the current time -- never `new Date()`/`Date.now()` inside a builder
+   * itself. `jsonAdapter.fetch` below reads the real clock exactly once
+   * (its own `now` parameter, defaulted so production callers need no
+   * changes) and passes that single value down to whichever builder runs;
+   * a builder that read the clock itself would make its own output
+   * untestable without either mocking global time or writing a test that
+   * tolerates "whenever this happened to run," which is exactly the
+   * nondeterminism this parameter exists to avoid. See `nvdCveUrl` below
+   * for the one registered builder today.
+   */
+  buildUrl?(configuredUrl: string, now: Date): string;
 }
 
 /**
@@ -291,6 +346,66 @@ function parseCisaKevEntry(rawEntry: unknown): RawItem | null {
 // ---------------------------------------------------------------------------
 // nvd-cve -- NVD API 2.0: { vulnerabilities: [{ cve: { id, published, descriptions: [...], ... } }] }
 // ---------------------------------------------------------------------------
+
+/**
+ * How far back each poll's `lastModStartDate`/`lastModEndDate` window
+ * looks. NVD's own documented ceiling for this window is 120 days
+ * (verified live: a several-year span 404s) -- 7 is nowhere near that
+ * ceiling, chosen instead against this source's own `poll_interval` (3h,
+ * config/sources.yaml): more than 50x that cadence is generous enough that
+ * a source sitting un-polled for a while (a missed cycle, a stretch of
+ * consecutive-failure backoff) does not open a gap between one successful
+ * poll's window and the next's. A CVE modified more than once inside two
+ * overlapping windows is simply re-fetched -- `parseNvdCveEntry` below has
+ * no memory of a previous poll and does not need one; see the module doc
+ * comment's "skip vs throw" section and `AdapterResult`'s own docs
+ * (src/adapters/types.ts) for how downstream storage is expected to treat
+ * a re-seen item.
+ */
+const NVD_WINDOW_DAYS = 7;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * NVD's CVE API 2.0, with no date filter, sorts ascending from the very
+ * start of its entire catalog rather than by recency -- verified live and
+ * against this file's own fixture (tests/fixtures/adapters/nvd-cve.json):
+ * its first entry is CVE-1999-0095, published 1988-10-01. Every poll of an
+ * unfiltered query returns that same ancient handful, forever --
+ * technically "working," permanently useless, and under append-only
+ * storage a source of repeated inserts of the same 1980s records.
+ * `lastModStartDate`/`lastModEndDate` is NVD's own documented recency
+ * filter and fixes this (verified live: a 7-day window against the real
+ * API returns thousands of genuinely current results, not the 1988-era
+ * handful) -- but the window has to be computed relative to "now" at
+ * request time, which a static config url can never express. This is the
+ * one registered `buildUrl` today -- see `JsonSourceMapper`'s doc comment
+ * (module-level, above) for the general mechanism.
+ *
+ * Built with `URL`/`searchParams.set` -- the same reason `cisaKevUrl` above
+ * uses it over string interpolation -- so any query param already on the
+ * CONFIGURED url (e.g. nvd-cve's own `?resultsPerPage=5`) survives
+ * untouched; this only adds/overwrites the two date-window params. The
+ * resulting percent-encoded ISO-8601 values (`searchParams.set` escapes the
+ * colons) were verified live to be accepted identically to an unencoded
+ * form -- NVD decodes the query string normally, as any compliant server
+ * would.
+ *
+ * Uses `now` (and `now` minus `NVD_WINDOW_DAYS`) exactly as given -- never
+ * reads the clock itself, see `JsonSourceMapper.buildUrl`'s doc comment for
+ * why. `toISOString()` always renders in UTC regardless of the host's own
+ * configured zone (verified live that NVD accepts exactly this
+ * "Z"-suffixed form), so this needs no timezone handling of its own --
+ * consistent with this project's portability rule against ever deriving
+ * behavior from the system timezone (CLAUDE.md §12).
+ */
+function nvdCveUrl(configuredUrl: string, now: Date): string {
+  const url = new URL(configuredUrl);
+  const windowStart = new Date(now.getTime() - NVD_WINDOW_DAYS * MS_PER_DAY);
+  url.searchParams.set('lastModStartDate', windowStart.toISOString());
+  url.searchParams.set('lastModEndDate', now.toISOString());
+  return url.href;
+}
 
 /**
  * NVD's CVE Schema 2.0 has no headline/title field at all (verified: none
@@ -475,7 +590,11 @@ function parseNwsFlAlertEntry(rawEntry: unknown): RawItem | null {
 
 const JSON_SOURCE_MAPPERS: Record<string, JsonSourceMapper> = {
   'cisa-kev': { extractEntries: extractArrayField('vulnerabilities'), parseEntry: parseCisaKevEntry },
-  'nvd-cve': { extractEntries: extractArrayField('vulnerabilities'), parseEntry: parseNvdCveEntry },
+  'nvd-cve': {
+    extractEntries: extractArrayField('vulnerabilities'),
+    parseEntry: parseNvdCveEntry,
+    buildUrl: nvdCveUrl,
+  },
   'hn-algolia': { extractEntries: extractArrayField('hits'), parseEntry: parseHnAlgoliaEntry },
   'federal-register': { extractEntries: extractArrayField('results'), parseEntry: parseFederalRegisterEntry },
   'nws-fl-alerts': { extractEntries: extractArrayField('features'), parseEntry: parseNwsFlAlertEntry },
@@ -504,15 +623,42 @@ function parseJsonBody(
   return parseEntries(entries, mapper.parseEntry);
 }
 
-export const jsonAdapter: Adapter = {
+// Not annotated `: Adapter` (compare rss.ts/newsSitemap.ts/googleNews.ts,
+// which all use that plain annotation) -- deliberately `satisfies Adapter`
+// instead. An explicit `: Adapter` annotation would WIDEN this object's own
+// static type down to exactly the `Adapter` interface, which only declares
+// a 2-parameter `fetch(source, state)` -- erasing the third `now` parameter
+// below from anything a direct importer (this file's own tests) could
+// legally pass, even though the interface itself is never touched and
+// every existing consumer (src/bin/scheduler.ts, calling through
+// `AdapterRegistry`/`Adapter`) keeps working unchanged: a function with an
+// extra optional/defaulted parameter is still structurally assignable
+// anywhere a shorter function type is expected. `satisfies` checks this
+// object against `Adapter` at THIS declaration (a real `type: 'json'`
+// typo, or a `fetch` genuinely incompatible with `Adapter`, still fails to
+// compile right here) while preserving the wider, more specific inferred
+// type on the `jsonAdapter` binding itself.
+export const jsonAdapter = {
   type: 'json',
 
-  async fetch(source: Source, state: FetchState | null): Promise<AdapterResult> {
+  async fetch(source: Source, state: FetchState | null, now: Date = new Date()): Promise<AdapterResult> {
     // Dispatch first, before any network call -- see UnknownJsonSourceError.
     const mapper = JSON_SOURCE_MAPPERS[source.id];
     if (!mapper) throw new UnknownJsonSourceError(source.id);
 
-    const fetchResult: FetchResult = await politeFetch(source.url, {
+    // Per-source url construction -- see `JsonSourceMapper.buildUrl`'s doc
+    // comment above. Absent for four of the five registered sources, which
+    // fetch `source.url` exactly as configured, byte-for-byte unchanged
+    // from before this field existed. `now` is read exactly once for this
+    // whole fetch -- as this method's own defaulted parameter, never inside
+    // a builder -- so every production caller (the scheduler, calling
+    // `fetch(source, state)` with no third argument) gets a real,
+    // current-instant window with zero code changes, while a test can pass
+    // a fixed `Date` as the third argument for a fully deterministic
+    // assertion on the exact url requested.
+    const fetchUrl = mapper.buildUrl ? mapper.buildUrl(source.url, now) : source.url;
+
+    const fetchResult: FetchResult = await politeFetch(fetchUrl, {
       etag: state?.etag ?? undefined,
       lastModified: state?.lastModified ?? undefined,
     });
@@ -524,10 +670,10 @@ export const jsonAdapter: Adapter = {
       // notModified is false (null only ever accompanies a 304, handled
       // above) -- this asserts that contract rather than silently treating
       // an impossible state as an empty document.
-      throw new JsonParseError(source.url, source.id, 'politeFetch returned a null body for a non-304 response');
+      throw new JsonParseError(fetchUrl, source.id, 'politeFetch returned a null body for a non-304 response');
     }
 
-    const parsed = parseJsonBody(fetchResult.body, source.url, source.id, mapper);
+    const parsed = parseJsonBody(fetchResult.body, fetchUrl, source.id, mapper);
     return fetchedResult(fetchResult, parsed);
   },
-};
+} satisfies Adapter;
