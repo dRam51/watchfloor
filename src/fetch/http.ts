@@ -16,17 +16,27 @@ const packageJson = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf
  * package.json rather than a hardcoded literal, so it tracks version bumps
  * automatically.
  *
- * Deliberately carries no URL and no email (ruling, fix round 1, Finding 1
- * — see task-3-report.md). No repository URL exists — no git remote, no
- * package.json "repository"/"homepage"/"bugs" field, no README — and the
- * project's own rule against ever pushing means none ever will, so this
- * isn't a placeholder waiting to be filled in like the earlier `.invalid`
- * URL was; there is nothing to fill in. Putting the owner's personal email
- * here instead was considered and rejected: it would broadcast that
- * address to roughly two dozen third-party feed operators for no real
- * benefit at this request volume.
+ * Carries a repository URL in the conventional `+https://…` form, so an
+ * operator who wants to know what is fetching them can read the source
+ * rather than guess from a name. This reverses the earlier ruling (fix
+ * round 1, Finding 1 — task-3-report.md), and the reversal is the point:
+ * that ruling rested on "no repository URL exists and the project's rule
+ * against ever pushing means none ever will." The repository is now public
+ * at the URL below, so the premise is simply gone. The `.invalid`
+ * placeholder that ruling rightly rejected was a URL that resolved to
+ * nothing; this one resolves to the actual code.
+ *
+ * Still deliberately carries no email. That half of the ruling stands on
+ * its own reasoning: it would broadcast the owner's personal address to
+ * roughly two dozen third-party feed operators for no benefit the repo
+ * link doesn't already provide. `tests/fetch/http.test.ts` pins the
+ * no-`@` guard for exactly that reason — the URL guards it dropped, the
+ * address guard it must not.
+ *
+ * `PRODUCT_TOKEN` (src/fetch/robots.ts) is `split('/')[0]` of this string,
+ * so robots.txt matching is unaffected by anything inside the parenthetical.
  */
-export const USER_AGENT = `watchfloor/${packageJson.version} (self-hosted personal feed reader; single user)`;
+export const USER_AGENT = `watchfloor/${packageJson.version} (+https://github.com/dRam51/watchfloor; self-hosted personal feed reader; single user)`;
 
 /** Whole-request deadline (connect + headers + body). */
 const DEFAULT_TIMEOUT_MS = 10_000;

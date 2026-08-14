@@ -72,14 +72,22 @@ describe('politeFetch', () => {
 
     await politeFetch(`${baseUrl}/`);
 
-    // Ruling (fix round 1, Finding 1): no repo URL exists and none ever will
-    // (the project never pushes), and the owner's email has no business
-    // going to ~22 third-party operators for no benefit. No "+<url>" segment
-    // at all — just a name, version, and a plain-language description.
-    expect(USER_AGENT).toBe(`watchfloor/${pkgVersion} (self-hosted personal feed reader; single user)`);
-    expect(USER_AGENT).not.toContain('http://');
-    expect(USER_AGENT).not.toContain('https://');
+    // The repository is public, so the UA now carries it in the conventional
+    // "+<url>" form: an operator who wants to know what is fetching them can
+    // read the source. The two URL guards this test used to assert are gone
+    // deliberately — they encoded "no repo URL exists and none ever will",
+    // which stopped being true when the repo was published.
+    expect(USER_AGENT).toBe(
+      `watchfloor/${pkgVersion} (+https://github.com/dRam51/watchfloor; self-hosted personal feed reader; single user)`,
+    );
+
+    // The email half of that ruling still stands and is still pinned: a repo
+    // link gives an operator everything a personal address would, without
+    // broadcasting it to ~22 third parties. This guard is the reason the
+    // assertion above is an exact match rather than a `toContain` — a future
+    // edit that appends "; contact: someone@example.com" fails both.
     expect(USER_AGENT).not.toContain('@');
+
     expect(receivedUserAgent).toBe(USER_AGENT);
   });
 
