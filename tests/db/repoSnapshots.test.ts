@@ -11,6 +11,7 @@ import {
   getStarSnapshots,
   resolveRepoId,
   getRepoNames,
+  getSnapshotWindow,
 } from '../../src/db/repoSnapshots.ts';
 
 const open: Array<ReturnType<typeof openDb>> = [];
@@ -260,5 +261,163 @@ describe('repo identity across a rename', () => {
     // And the two repos' star histories stayed separate, not merged.
     expect(getStarSnapshots(db, AGENTKIT.repoId).map((s) => s.stars)).toEqual([40]);
     expect(getStarSnapshots(db, 900002).map((s) => s.stars)).toEqual([3]);
+  });
+});
+
+/** Records one reading per listed day at 13:00 New York time (17:00Z in August). */
+function recordDays(
+  db: ReturnType<typeof migratedDb>,
+  days: Array<[day: string, stars: number]>,
+  repo = AGENTKIT,
+  tz = NY,
+) {
+  for (const [day, stars] of days) {
+    recordStarSnapshot(db, { ...repo, stars, observedAt: `${day}T17:00:00.000Z`, tz });
+  }
+}
+
+describe('getSnapshotWindow', () => {
+  it('reports a complete trailing window with no gaps', () => {
+    const db = migratedDb();
+    recordDays(db, [
+      ['2026-08-08', 40],
+      ['2026-08-09', 55],
+      ['2026-08-10', 90],
+      ['2026-08-11', 130],
+      ['2026-08-12', 200],
+      ['2026-08-13', 300],
+      ['2026-08-14', 400],
+    ]);
+
+    const window = getSnapshotWindow(db, AGENTKIT.repoId, {
+      throughDay: '2026-08-14',
+      days: 7,
+    });
+
+    expect(window.fromDay).toBe('2026-08-08');
+    expect(window.throughDay).toBe('2026-08-14');
+    expect(window.expectedDays).toBe(7);
+    expect(window.observedDays).toBe(7);
+    expect(window.missingDays).toEqual([]);
+    expect(window.snapshots.map((s) => s.stars)).toEqual([40, 55, 90, 130, 200, 300, 400]);
+  });
+
+  it('names the days the scheduler missed rather than leaving a consumer to infer them', () => {
+    // The case that will actually occur: the scheduler was down on the 10th
+    // and 11th. Nothing is stored for those days -- absence IS the signal --
+    // and the window says which days are absent so a consumer can tell "flat"
+    // from "we were not looking".
+    const db = migratedDb();
+    recordDays(db, [
+      ['2026-08-08', 40],
+      ['2026-08-09', 55],
+      ['2026-08-12', 200],
+      ['2026-08-13', 300],
+      ['2026-08-14', 400],
+    ]);
+
+    const window = getSnapshotWindow(db, AGENTKIT.repoId, {
+      throughDay: '2026-08-14',
+      days: 7,
+    });
+
+    expect(window.expectedDays).toBe(7);
+    expect(window.observedDays).toBe(5);
+    expect(window.missingDays).toEqual(['2026-08-10', '2026-08-11']);
+    // No gap-filled zero and no interpolated value: only what was observed.
+    expect(window.snapshots.map((s) => s.snapshotDay)).toEqual([
+      '2026-08-08',
+      '2026-08-09',
+      '2026-08-12',
+      '2026-08-13',
+      '2026-08-14',
+    ]);
+  });
+
+  it('reports a whole window of missing days on a database with no history', () => {
+    // Day one of the lane. The M4a plan calls insufficient history a
+    // first-class state; this is what it looks like at the storage layer --
+    // seven named missing days, not seven zeros.
+    const window = getSnapshotWindow(migratedDb(), AGENTKIT.repoId, {
+      throughDay: '2026-08-14',
+      days: 7,
+    });
+
+    expect(window.observedDays).toBe(0);
+    expect(window.snapshots).toEqual([]);
+    expect(window.missingDays).toHaveLength(7);
+    expect(window.missingDays[0]).toBe('2026-08-08');
+    expect(window.missingDays.at(-1)).toBe('2026-08-14');
+  });
+
+  it('excludes days outside the window rather than widening it', () => {
+    const db = migratedDb();
+    recordDays(db, [
+      ['2026-08-06', 10],
+      ['2026-08-07', 20],
+      ['2026-08-08', 40],
+    ]);
+
+    const window = getSnapshotWindow(db, AGENTKIT.repoId, {
+      throughDay: '2026-08-08',
+      days: 2,
+    });
+
+    expect(window.fromDay).toBe('2026-08-07');
+    expect(window.snapshots.map((s) => s.stars)).toEqual([20, 40]);
+  });
+
+  it('crosses a month boundary correctly', () => {
+    const db = migratedDb();
+    recordDays(db, [
+      ['2026-07-30', 10],
+      ['2026-07-31', 20],
+      ['2026-08-01', 40],
+    ]);
+
+    const window = getSnapshotWindow(db, AGENTKIT.repoId, {
+      throughDay: '2026-08-01',
+      days: 3,
+    });
+
+    expect(window.fromDay).toBe('2026-07-30');
+    expect(window.missingDays).toEqual([]);
+    expect(window.observedDays).toBe(3);
+  });
+
+  it('flags a window whose days were bucketed under different zones', () => {
+    // Changing WF_TZ moves the day boundary, so days recorded either side of
+    // the change are not the same unit. Averaging across that seam silently
+    // produces a rate over days of two different lengths; the flag makes the
+    // seam visible instead.
+    const db = migratedDb();
+    recordDays(db, [['2026-08-08', 40]]);
+    // 03:00Z is 12:00 on 2026-08-09 in Tokyo -- the same calendar day the
+    // New York rows use, reached through a different zone.
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 90,
+      observedAt: '2026-08-09T03:00:00.000Z',
+      tz: TOKYO,
+    });
+
+    const window = getSnapshotWindow(db, AGENTKIT.repoId, {
+      throughDay: '2026-08-09',
+      days: 2,
+    });
+
+    expect(window.mixedTimezone).toBe(true);
+  });
+
+  it('does not flag a window recorded entirely under one zone', () => {
+    const db = migratedDb();
+    recordDays(db, [
+      ['2026-08-08', 40],
+      ['2026-08-09', 90],
+    ]);
+
+    expect(
+      getSnapshotWindow(db, AGENTKIT.repoId, { throughDay: '2026-08-09', days: 2 }).mixedTimezone,
+    ).toBe(false);
   });
 });

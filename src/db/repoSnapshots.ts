@@ -22,6 +22,37 @@ export function localDay(instant: string, tz: string): string {
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
+const CALENDAR_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * A snapshot day is a plain calendar LABEL (YYYY-MM-DD), not an instant. It is
+ * compared lexicographically by every read below, which only matches
+ * chronological order at this exact fixed width -- the same reasoning
+ * src/domain/item.ts applies to its canonical timestamps.
+ */
+export function assertCalendarDay(field: string, value: string): void {
+  if (!CALENDAR_DAY.test(value)) {
+    throw new RangeError(`${field} '${value}' is not a calendar day (expected YYYY-MM-DD)`);
+  }
+}
+
+/**
+ * Steps a calendar-day LABEL by `delta` whole days.
+ *
+ * Date.UTC is correct here, and is not a violation of the never-read-the-host-
+ * zone rule: both input and output are bare YYYY-MM-DD labels with no instant
+ * and no zone attached, so UTC is being used purely as a fixed frame for
+ * proleptic-Gregorian arithmetic. Nothing converts an instant to a day here --
+ * that only ever happens in localDay, with an explicit WF_TZ. Using the local
+ * `new Date(y, m, d)` constructor instead WOULD read the host zone, and would
+ * additionally be wrong across a DST shift, where a local day is 23 or 25
+ * hours and adding 86,400,000 ms lands on the wrong date.
+ */
+function shiftDay(day: string, delta: number): string {
+  const [year, month, date] = day.split('-').map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, date + delta)).toISOString().slice(0, 10);
+}
+
 /** One repo's star count on one calendar day in `tz`. */
 export interface RepoStarSnapshot {
   /** GitHub's immutable numeric repository id. */
@@ -202,8 +233,24 @@ export function getRepoNames(db: Db, repoId: number): RepoName[] {
   }));
 }
 
-/** Every recorded day for `repoId`, oldest first. Unobserved days are absent. */
-export function getStarSnapshots(db: Db, repoId: number): RepoStarSnapshot[] {
+/**
+ * Every recorded day for `repoId` within `[fromDay, throughDay]` (inclusive,
+ * whole history when omitted), oldest first.
+ *
+ * **Unobserved days are absent, never zero-filled and never interpolated.**
+ * A gap-filled zero would read as "this repo gained no stars that day", which
+ * is indistinguishable from a genuinely flat repo -- exactly the distinction
+ * §4's velocity ranking turns on. Callers that need the gap NAMED rather than
+ * merely absent should use getSnapshotWindow.
+ */
+export function getStarSnapshots(
+  db: Db,
+  repoId: number,
+  range: { fromDay?: string; throughDay?: string } = {},
+): RepoStarSnapshot[] {
+  if (range.fromDay !== undefined) assertCalendarDay('fromDay', range.fromDay);
+  if (range.throughDay !== undefined) assertCalendarDay('throughDay', range.throughDay);
+
   // Inline type literal, not `as RepoStarSnapshot[]`: casting .all()'s
   // Record<string, SQLOutputValue>[] to a NAMED interface array fails tsc's
   // overlap check while a structurally identical inline literal passes. See
@@ -213,9 +260,13 @@ export function getStarSnapshots(db: Db, repoId: number): RepoStarSnapshot[] {
       `select repo_id, snapshot_day, stars, observed_at, tz
          from github_repo_star_snapshots
         where repo_id = ?
+          and snapshot_day >= ?
+          and snapshot_day <= ?
         order by snapshot_day asc`,
     )
-    .all(repoId) as Array<{
+    // Sentinels rather than a dynamically built WHERE: snapshot_day is a
+    // fixed-width YYYY-MM-DD, so these bound every real value lexicographically.
+    .all(repoId, range.fromDay ?? '0000-01-01', range.throughDay ?? '9999-12-31') as Array<{
     repo_id: number;
     snapshot_day: string;
     stars: number;
@@ -230,4 +281,75 @@ export function getStarSnapshots(db: Db, repoId: number): RepoStarSnapshot[] {
     observedAt: r.observed_at,
     tz: r.tz,
   }));
+}
+
+/**
+ * A trailing window of days, with the gaps in it named.
+ *
+ * The whole point of this shape is that `snapshots` alone cannot tell a
+ * consumer whether a short series means "this repo is new" or "the scheduler
+ * was down" -- so both are stated: `expectedDays` is how many calendar days
+ * the window covers, `observedDays` how many were actually recorded, and
+ * `missingDays` which ones were not.
+ */
+export interface SnapshotWindow {
+  repoId: number;
+  /** First day of the window, inclusive. */
+  fromDay: string;
+  /** Last day of the window, inclusive. */
+  throughDay: string;
+  /** Calendar days the window spans. */
+  expectedDays: number;
+  /** Days actually recorded -- equal to `snapshots.length`. */
+  observedDays: number;
+  /** Days in the window with no reading at all, ascending. */
+  missingDays: string[];
+  /** Only the observed days, oldest first. */
+  snapshots: RepoStarSnapshot[];
+  /**
+   * True when the window's rows were bucketed under more than one zone --
+   * i.e. WF_TZ changed mid-window, so the days in it do not all mean the same
+   * thing. A consumer computing a rate over them is measuring across a seam.
+   */
+  mixedTimezone: boolean;
+}
+
+/**
+ * The trailing `days`-day window ending on (and including) `throughDay`.
+ *
+ * `throughDay` is a caller-supplied calendar day in WF_TZ, not a clock read
+ * here -- this module never reads the wall clock, matching every other domain
+ * module in the project (src/domain/item.ts, src/db/fetchState.ts,
+ * src/domain/itemState.ts). Callers get it from `localDay(now, env.WF_TZ)`.
+ */
+export function getSnapshotWindow(
+  db: Db,
+  repoId: number,
+  opts: { throughDay: string; days: number },
+): SnapshotWindow {
+  assertCalendarDay('throughDay', opts.throughDay);
+  if (!Number.isInteger(opts.days) || opts.days < 1) {
+    throw new RangeError(`days must be a positive integer, got ${opts.days}`);
+  }
+
+  const fromDay = shiftDay(opts.throughDay, -(opts.days - 1));
+  const snapshots = getStarSnapshots(db, repoId, { fromDay, throughDay: opts.throughDay });
+  const observed = new Set(snapshots.map((s) => s.snapshotDay));
+
+  const missingDays: string[] = [];
+  for (let i = 0; i < opts.days; i += 1) {
+    const day = shiftDay(fromDay, i);
+    if (!observed.has(day)) missingDays.push(day);
+  }
+
+  return {
+    repoId,
+    fromDay,
+    throughDay: opts.throughDay,
+    expectedDays: opts.days,
+    observedDays: snapshots.length,
+    missingDays,
+    snapshots,
+    mixedTimezone: new Set(snapshots.map((s) => s.tz)).size > 1,
+  };
 }
