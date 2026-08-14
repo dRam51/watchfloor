@@ -35,9 +35,16 @@ const PAGE_SIZE = 25;
 export interface StreamProps {
   token: string;
   onUnauthorized: () => void;
+  /**
+   * Opens the real search view (M3 task 11's SearchView). Optional: when
+   * absent, `/` falls back to focusing the inert in-toolbar SearchBox, which
+   * is what task 9 built and tested before a search view existed. Passing it
+   * is what makes `/` actually search rather than focus a decorative field.
+   */
+  onOpenSearch?: () => void;
 }
 
-export function Stream({ token, onUnauthorized }: StreamProps) {
+export function Stream({ token, onUnauthorized, onOpenSearch }: StreamProps) {
   const [beat, setBeat] = useState<Beat | null>(null);
 
   // ---------------------------------------------------------------------
@@ -187,7 +194,11 @@ export function Stream({ token, onUnauthorized }: StreamProps) {
           // focus. Cancelling the key's default action here means there is
           // nothing left for the browser to insert anywhere.
           event.preventDefault();
-          searchInputRef.current?.focus();
+          if (onOpenSearch) {
+            onOpenSearch();
+          } else {
+            searchInputRef.current?.focus();
+          }
           return;
         default: {
           const digitBeat = beatForDigitKey(event.key);

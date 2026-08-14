@@ -42,6 +42,13 @@ import { beatForDigitKey, hasNavModifier, isEditableTarget, nextFocusIndex } fro
 export interface LaneBoardProps {
   token: string;
   onUnauthorized: () => void;
+  /**
+   * Opens the real search view (M3 task 11's SearchView). Optional: when
+   * absent, `/` falls back to focusing the inert in-toolbar SearchBox, which
+   * is what task 9 built and tested before a search view existed. Passing it
+   * is what makes `/` actually search rather than focus a decorative field.
+   */
+  onOpenSearch?: () => void;
 }
 
 type LayoutLoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' };
@@ -51,7 +58,7 @@ interface FocusedItem {
   itemKey: string;
 }
 
-export function LaneBoard({ token, onUnauthorized }: LaneBoardProps) {
+export function LaneBoard({ token, onUnauthorized, onOpenSearch }: LaneBoardProps) {
   const [lanes, setLanes] = useState<LaneLayoutEntry[] | null>(null);
   const [layoutState, setLayoutState] = useState<LayoutLoadState>({ status: 'loading' });
   const [focusedItem, setFocusedItem] = useState<FocusedItem | null>(null);
@@ -236,7 +243,11 @@ export function LaneBoard({ token, onUnauthorized }: LaneBoardProps) {
           return;
         case '/':
           event.preventDefault();
-          searchInputRef.current?.focus();
+          if (onOpenSearch) {
+            onOpenSearch();
+          } else {
+            searchInputRef.current?.focus();
+          }
           return;
         default: {
           const digitBeat = beatForDigitKey(event.key);

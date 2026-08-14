@@ -795,3 +795,71 @@ a {
     overflow-x: visible;
   }
 }
+
+/* -------------------------------------------------------------------------
+   View navigation (coordinator wiring: mounts task 11's SearchView and
+   SourceHealthPage alongside task 10's LaneBoard/Stream).
+
+   §7.1: every keyboard action needs a visible, tappable equivalent, and
+   nothing may rely on hover to convey information -- so these are always
+   visible, never revealed on hover, and meet the 44px target even though
+   they read as compact text buttons.
+   ------------------------------------------------------------------------- */
+
+.shell__nav {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0 var(--space-4);
+}
+
+.shell__nav-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch-target-min);
+  padding: 0 var(--space-3);
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: color var(--motion-base) ease-out, border-color var(--motion-base) ease-out;
+}
+
+.shell__nav-button:hover {
+  /* Enhancement only -- the active state below is what actually carries
+     "which view am I on", and it is not hover-dependent. */
+  color: var(--color-text-primary);
+}
+
+.shell__nav-button--active {
+  color: var(--color-accent);
+  border-color: var(--color-accent-dim);
+}
+
+.shell__nav-button kbd {
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--color-text-dim);
+  border: 1px solid var(--color-border);
+  border-radius: 2px;
+  padding: 0 var(--space-1);
+}
+
+/* A failing-source count on the nav itself, so §7's "make them loud" reaches
+   the operator even while they are looking at items rather than the health
+   page. --color-error, not --color-alert: tokens.css records that alert is a
+   watchfloor SIGNAL (a KEV pin), whereas a failing feed is a genuine fault. */
+.shell__nav-badge {
+  min-width: 1.25rem;
+  padding: 0 var(--space-1);
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--color-bg);
+  background: var(--color-error);
+  border-radius: 2px;
+}

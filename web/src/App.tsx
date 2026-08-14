@@ -4,6 +4,8 @@ import { AuthGate } from './auth/AuthGate.tsx';
 import { apiFetch, ApiError } from './api/client.ts';
 import { Stream } from './components/Stream.tsx';
 import { LaneBoard } from './components/LaneBoard.tsx';
+import { SearchView } from './components/SearchView.tsx';
+import { SourceHealthPage } from './components/SourceHealthPage.tsx';
 import { useIsWideViewport } from './lib/viewport.ts';
 
 /**
@@ -17,6 +19,18 @@ interface DashboardHeader {
   failingSources: number;
   enrichmentSpend: unknown;
 }
+
+/**
+ * Which of the three views is showing. Deliberately a small union in state
+ * rather than a router: the app has three views, and adding a routing
+ * dependency for that is not justified (M3 task 11's brief said as much).
+ *
+ * `search` and `sources` were built standalone by task 11 while task 10 owned
+ * App.tsx for the six-lane layout -- the same central-wiring pattern Wave 2's
+ * routes used, where parallel tasks each export a component and one commit
+ * mounts them.
+ */
+type View = 'items' | 'search' | 'sources';
 
 type LoadState =
   | { status: 'loading' }
@@ -33,6 +47,7 @@ function Dashboard() {
   // M3 task 10 brief; see lib/viewport.ts for why the guarded default is
   // narrow (Stream) rather than wide.
   const isWide = useIsWideViewport();
+  const [view, setView] = useState<View>('items');
 
   useEffect(() => {
     if (!token) return;
@@ -76,6 +91,39 @@ function Dashboard() {
         <p className="shell__subtitle">situational awareness -- six beats, one wall</p>
       </header>
 
+      <nav className="shell__nav" aria-label="views">
+        {/* Visible and tappable, not hover-revealed (§7.1). `/` also opens
+            search, but the health page has no shortcut in §7's key list, so
+            a pointer affordance is its only route in. */}
+        <button
+          type="button"
+          className={`shell__nav-button${view === 'items' ? ' shell__nav-button--active' : ''}`}
+          aria-current={view === 'items' ? 'page' : undefined}
+          onClick={() => setView('items')}
+        >
+          items
+        </button>
+        <button
+          type="button"
+          className={`shell__nav-button${view === 'search' ? ' shell__nav-button--active' : ''}`}
+          aria-current={view === 'search' ? 'page' : undefined}
+          onClick={() => setView('search')}
+        >
+          search <kbd>/</kbd>
+        </button>
+        <button
+          type="button"
+          className={`shell__nav-button${view === 'sources' ? ' shell__nav-button--active' : ''}`}
+          aria-current={view === 'sources' ? 'page' : undefined}
+          onClick={() => setView('sources')}
+        >
+          source health
+          {state.status === 'ready' && state.data.failingSources > 0 && (
+            <span className="shell__nav-badge">{state.data.failingSources}</span>
+          )}
+        </button>
+      </nav>
+
       <section className="shell__status" aria-live="polite">
         {state.status === 'loading' && <p>connecting to api&hellip;</p>}
         {state.status === 'error' && (
@@ -93,11 +141,36 @@ function Dashboard() {
           only renders Dashboard once a token exists, but that fact isn't
           visible to the type checker from here, so this makes it explicit
           rather than asserting it away. */}
+      {token && view === 'search' && (
+        <SearchView
+          token={token}
+          onUnauthorized={() => setToken(null)}
+          onClose={() => setView('items')}
+        />
+      )}
+
+      {token && view === 'sources' && (
+        <SourceHealthPage
+          token={token}
+          onUnauthorized={() => setToken(null)}
+          onClose={() => setView('items')}
+        />
+      )}
+
       {token &&
+        view === 'items' &&
         (isWide ? (
-          <LaneBoard token={token} onUnauthorized={() => setToken(null)} />
+          <LaneBoard
+            token={token}
+            onUnauthorized={() => setToken(null)}
+            onOpenSearch={() => setView('search')}
+          />
         ) : (
-          <Stream token={token} onUnauthorized={() => setToken(null)} />
+          <Stream
+            token={token}
+            onUnauthorized={() => setToken(null)}
+            onOpenSearch={() => setView('search')}
+          />
         ))}
     </main>
   );
