@@ -7,17 +7,22 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **M0 complete (tagged `m0-scaffold`). M1 ingest complete. M2 dedupe+scoring complete
-and accepted** (2026-08-14). **1,081 tests.** All 19 sources enabled, robots-verified, and
-parsing dates at **0% null**.
+Status: **M0, M1, M2 complete. M3 API + dashboard — all 12 tasks landed; acceptance is the
+owner's judgement call and has not been made yet.** **1,507 tests.** 27 sources, all
+robots-verified. Pushed to GitHub through `6bf482c`.
 
-**M2 acceptance passed on a real 4,135-item corpus.** `npm run ingest` → `npm run score` →
-`npm run rank`. The US news top 10 is *entirely* multi-source stories (clusters of 2–3), with
-no sports and no Spanish-language copy; a story carried by AP *and* NPR *and* PBS tops it. The
-cyber top 10 is entirely CISA KEV override pins, at signal 0.000 — old enough that computed
-signal decayed to zero, pinned anyway, which is what "regardless of computed score" means.
+**There is a working dashboard.** `npm run migrate` → `npm run ingest` → `npm run score`, then
+`npm run dev` (API) and `npm run dev:web` (Vite, `http://localhost:5173`). It prompts once for
+`WF_API_TOKEN` and holds it in memory only.
 
-> [!important] The acceptance run is what found the milestone's worst bug
+> [!important] The acceptance question is not one a test can answer
+> §7's deliverable is "usable daily on a laptop, legible on a phone browser, and already looks
+> like a watchfloor." Everything mechanical is verified; whether it *reads like a terminal
+> rather than a content feed* is the owner's call. The palette in `web/src/styles/tokens.css`
+> is a **proposal**, not a settled choice — §7.1's tokens-in-one-place rule exists precisely so
+> retuning it is a one-file edit.
+
+> [!important] The acceptance run is what found M2's worst bug
 > Clustering chained **1,543 unrelated CVEs into one cluster** (37% of the corpus) via
 > transitive single-linkage over formulaic titles, which *promoted* churn because cluster size
 > feeds `signal_score`. It took two fix rounds: stop writing bad clusters (cross-source-only +
@@ -30,9 +35,17 @@ signal decayed to zero, pinned anyway, which is what "regardless of computed sco
 > are wrong if you read them from it. Use `getItemBeats` (`src/domain/itemBeats.ts`),
 > `getItemEntities` (`src/domain/itemEntities.ts`), and — for an undated item's decay
 > baseline — the first-seen `fetched_at` read path, not the current version's. Each exists
-> because the single-version read silently returned a *plausible* wrong answer. None of them
-> modify `item.ts`; `Item.beats` and `Item.entities` still return the single-version answer
-> on purpose, so nothing already written changes meaning.
+> because the single-version read silently returned a *plausible* wrong answer. This bit a
+> fourth time in M3: a cross-listed item appears in **two lanes at once**, so the keyboard
+> focus record is `{beat, itemKey}` rather than a bare key.
+
+> [!warning] Migrations are no longer applied on boot
+> `npm run migrate` is the **only** thing that applies them. `api`, `ingest`, `score`, `rank`,
+> and `scheduler` all refuse to start with pending migrations. This closed a real incident: a
+> routine `npm run rank` had applied a colleague's uncommitted `.sql`, and because
+> `schema_migrations` had no checksum, an edited migration was then skipped forever — the live
+> DB kept an unoptimised trigger (4.27x insert overhead vs 1.70x) with nothing reporting it.
+> **§12's runbook needs this step added**; the brief is not on this machine.
 
 ## Resuming work — read these first
 
