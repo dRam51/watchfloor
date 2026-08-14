@@ -94,9 +94,11 @@ Documents/Obsidian-Vault`, with Watchfloor owning `01 Tech Projects/Watchfloor/`
 not exist on Linux, so if the always-on host is Linux the §8.1 integration cannot run there.
 Decide before M5: Mac host, move the vault to Syncthing/git, or split ingest from vault-sync.
 
-**`WF_VAULT_ROOT` cannot point at that vault.** `src/config/env.ts` validates it as
-relative-only — an over-application of the zero-absolute-paths rule, which governs the source
-tree, not a gitignored `.env`. Relax it for this one variable before M5.
+~~**`WF_VAULT_ROOT` cannot point at that vault.**~~ **Fixed** (`74ae45d`). It now accepts an
+absolute path while `WF_DB_PATH`, `WF_DATA_DIR`, and `WF_LOG_DIR` remain relative-only. The
+zero-absolute-paths rule governs the **source tree**, not a gitignored `.env`, and a vault
+always lives outside the repo. Verified: the real vault path is accepted and the other three
+still reject absolute values.
 
 **Local LLM inference** will differ on the target host. Ollama on Apple Silicon uses Metal; a
 mini PC without a capable GPU may not run the same model at all.
