@@ -65,13 +65,10 @@ const EnvSchema = z.object({
   WF_TZ: z.string().min(1).refine(isValidTimeZone, {
     message: 'must be a valid IANA timezone, e.g. America/New_York',
   }),
-  // NO ROUTE ENFORCES THIS TOKEN YET. It is validated here and then never
-  // read: the only route is /health, which is deliberately public (a liveness
-  // probe for process supervision). Required so the credential exists and is
-  // long enough before the first authenticated route needs it — but do not
-  // assume any request is being checked against it today. Authentication
-  // belongs to the milestone that adds the real API surface; until then,
-  // treat every route as unauthenticated. Also stated in docs/layout.md.
+  // Enforced by src/api/auth.ts's onRequest hook (M3 task 1) against every
+  // route except /health, which stays public as a liveness probe. Compared
+  // via a constant-time, fixed-length digest comparison — see that file for
+  // why a plain `===` or a bare crypto.timingSafeEqual would leak timing.
   WF_API_TOKEN: z.string().min(8),
   WF_API_PORT: z.coerce.number().int().positive().default(8787),
   // How often src/bin/scheduler.ts's tick loop checks which sources are due

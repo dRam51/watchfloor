@@ -35,13 +35,15 @@ a map, not an essay — see the file itself for the real detail.
 | `config/` | Runtime configuration read by the app, e.g. `sources.yaml` — data, never code. |
 | `tests/` | Vitest specs, mirroring the `src/` tree one file at a time, plus fixtures under `tests/fixtures/`. |
 
-## `WF_API_TOKEN` is not enforced by anything yet
+## `WF_API_TOKEN` is enforced by `src/api/auth.ts` (M3 task 1)
 
-It is validated at startup and then never read. **No route checks it.** The
-only route is `/health`, which is deliberately public — a liveness probe for
-process supervision. Do not assume a request has been authenticated because a
-token is configured. Authentication arrives with the milestone that adds the
-real API surface; until then, treat every route as unauthenticated.
+A global `onRequest` hook, registered at the root Fastify instance in
+`buildServer`, rejects any request without a valid `Authorization: Bearer
+<token>` header. It is an exemption list, not a protection list: every route
+is covered by default, including ones registered after the hook — `/health`
+is the one named exception, kept public as a liveness probe for process
+supervision. A 401 looks identical whether the token was missing or wrong,
+and the comparison is constant-time (see that file's comments for why).
 
 ## Why `items` is append-only
 
