@@ -35,3 +35,15 @@ config/portfolio.yaml
 # The repo-root path is left free deliberately: a correct AGENTS.md could be
 # written there later. CLAUDE.md remains the authority either way.
 attic/AGENTS.md.corrupt-2026-08-14
+
+# A stray, byte-identical duplicate of src/score/overrides.ts that was written
+# to the repo ROOT by mistake during M2 task 6. Dead where it landed — its
+# `../domain/item.ts` import only resolves from src/score/ — and moved to attic/
+# rather than deleted, per the standing never-delete rule.
+#
+# Note for anyone reasoning about attic/: it is NOT blanket-gitignored. Only
+# specific patterns are (`*.db`, `*.db-wal`, `*.db-shm` above), which is why the
+# archived first-run database sits there untracked while a stray .ts would not.
+# Each non-matching file put there needs its own line here, or it stays visible
+# in `git status` as an untracked file forever.
+attic/overrides.ts.stray-2026-08-14
