@@ -1,0 +1,144 @@
+# Recency-decay half-lives for Watchfloor's two independent score profiles
+# (§5.1). Consumed by src/score/decay.ts. Decay is applied at READ time, not
+# stored (item_scores is append-only, and a continuously-decaying value has
+# no stable row to append) -- so a change here changes ranking on the very
+# next read. No rescoring pass, no migration, no restart required. This file
+# exists specifically so the owner can retune ranking without a code change.
+#
+# Validated by src/score/decay.ts's Zod schema at load time -- a missing
+# beat, an extra key, or a non-positive half-life fails load, not read.
+#
+# ---------------------------------------------------------------------------
+# Shape
+# ---------------------------------------------------------------------------
+#
+# Every half-life is in HOURS, uniformly, so decay.ts never converts units at
+# read time -- "weeks" values below are just larger hour counts (e.g. two
+# weeks = 336).
+#
+#   beats                One entry for each of the five non-markets beats:
+#                         ai, cyber, aisec, repos, usnews. Exactly these five
+#                         -- `markets` must NOT appear here (see below) and a
+#                         missing or misspelled beat fails config load.
+#
+#   markets_item_types    One entry for each of the three item_type values
+#                         (event, analysis, press). The markets beat is
+#                         special-cased: §5.1 keys its half-life on
+#                         item_type (an `event` -- e.g. an 8-K -- decays fast;
+#                         an `analysis` piece decays slowly), not on beat,
+#                         since every markets item shares one beat but the
+#                         two item_types behave completely differently. This
+#                         is why `markets` is deliberately absent from
+#                         `beats` above: giving it a single beat-level
+#                         half-life would silently ignore the item_type
+#                         split the spec requires.
+#
+#   signal_half_life_hours   signal_score: machine relevance -- novelty,
+#                             materiality, timeliness. Sharp decay.
+#   read_half_life_hours      read_score: human interest -- explanatory
+#                             value, primary-source-ness. Slow decay. Must
+#                             always exceed signal_half_life_hours for the
+#                             same beat/item_type (asserted by
+#                             tests/score/decay.test.ts against this exact
+#                             file) -- the two profiles must never blend into
+#                             one shared curve.
+#
+# ---------------------------------------------------------------------------
+# Reasoning behind these starting numbers (owner: retune freely; these are a
+# considered starting point, not a fixed target -- this is exactly the knob
+# to reach for when ranking feels wrong)
+# ---------------------------------------------------------------------------
+#
+# signal (fastest to slowest): markets:event (4h) < cyber (6h) = markets:press
+# (6h) < aisec (8h) < usnews (24h, matching the spec's own "roughly a day"
+# example) < ai (48h) < repos (72h) < markets:analysis (240h).
+#
+#   cyber / aisec   Active-exploitation and agent-security news is the most
+#                   perishable material in the whole system -- a CVE or
+#                   prompt-injection technique is "news" for a matter of
+#                   hours. aisec runs marginally slower than cyber because
+#                   it mixes incident reports with slower-moving research.
+#   ai              A model release or funding announcement stays "new" for
+#                   about two days, not hours -- slower-moving than active
+#                   exploitation, faster than settled research takes.
+#   repos           A notable GitHub repo trends over a few days as people
+#                   discover and star it -- slower than general AI news.
+#   usnews          Matches the spec's explicit example directly: "roughly a
+#                   day".
+#   markets:event   A filing or rule change (§5.1's own example) is stale
+#                   within hours -- the fastest signal half-life in the
+#                   config, deliberately.
+#   markets:press   Treated like other press/churn material: fast, close to
+#                   cyber's rate.
+#   markets:analysis Even on the sharp/machine-relevance profile, a
+#                   considered analysis piece retains some signal value
+#                   longer than a single event does -- ten days, still far
+#                   short of its own read-profile half-life.
+#
+# read (fastest to slowest): markets:event (168h) = usnews (168h) <
+# cyber (336h) = aisec (336h) = repos (336h) < ai (504h) < markets:analysis
+# (720h).
+#
+#   usnews / markets:event   Even for human-interest value, day-to-day news
+#                             and single filings age out over about a week.
+#   cyber / aisec / repos    A good writeup of a breach, exploit chain, or
+#                             notable repo keeps its explanatory value for
+#                             about two weeks.
+#   ai                       Explicitly the spec's "research papers over
+#                             weeks" example -- arXiv-heavy and the most
+#                             evergreen of the non-markets beats.
+#   markets:analysis          The spec's explicit worked example: "a
+#                             long-form piece must not fall off a cliff at
+#                             two weeks. A good analysis piece is worth
+#                             reading late." A 720h (30-day) half-life keeps
+#                             ~72% of its value at the two-week mark -- a
+#                             smooth glide, not a cliff -- and is the longest
+#                             half-life anywhere in this file, deliberately.
+#
+# ---------------------------------------------------------------------------
+# What this file does NOT decide
+# ---------------------------------------------------------------------------
+#
+# A null published_at (real: 1,715 of 3,325 items in the first live ingest
+# had no published_at, 1,665 of those from cisa-kev's date-less JSON feed)
+# falls back to fetched_at -- that decision is not a config knob, it is
+# fixed behaviour in src/score/decay.ts's effectivePublishedAt, because there
+# is exactly one defensible answer, not a tunable preference. Same for the
+# future-dated clamp (age floors at zero, capping the factor at 1.0) and the
+# absence of a decay floor (very old items are allowed to decay toward zero
+# with no artificial minimum). See that module's doc comment for the full
+# reasoning on all three.
+
+beats:
+  ai:
+    signal_half_life_hours: 48
+    read_half_life_hours: 504
+
+  cyber:
+    signal_half_life_hours: 6
+    read_half_life_hours: 336
+
+  aisec:
+    signal_half_life_hours: 8
+    read_half_life_hours: 336
+
+  repos:
+    signal_half_life_hours: 72
+    read_half_life_hours: 336
+
+  usnews:
+    signal_half_life_hours: 24
+    read_half_life_hours: 168
+
+markets_item_types:
+  event:
+    signal_half_life_hours: 4
+    read_half_life_hours: 168
+
+  analysis:
+    signal_half_life_hours: 240
+    read_half_life_hours: 720
+
+  press:
+    signal_half_life_hours: 6
+    read_half_life_hours: 168
