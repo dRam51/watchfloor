@@ -68,14 +68,15 @@ rows from it rather than invented fixtures — a fixture cannot prove a claim ab
 `.superpowers/` is gitignored, so it survives on this machine but **not in a fresh clone**.
 Anything that must outlive the machine belongs in `docs/`.
 
-### Open, as of M2 Wave 1
+### Open, as of M3
 
-**Two sources are `enabled: false`** in `config/sources.yaml` and their DISABLED comment
-blocks may be stale — check the code before believing them. `nvd-cve` is the live one: NVD's
-API 2.0 sorts **ascending by CVE ID**, not by `lastModified` as an earlier comment claimed,
-so paginating from `startIndex=0` returns 1988-era CVEs forever. Verified live: index 0 is
-`CVE-1999-0095` (published 1988-10-01) while the tail of the same window is a CVE published
-minutes ago. Any fix has to page from the tail.
+> [!note] Resolved during M2 — all 20 source entries are now `enabled: true`
+> This section previously said "two sources are `enabled: false`" (`nvd-cve`, `project-zero`).
+> Both were fixed and enabled during M2, and **zero sources are disabled today** — verified
+> against `config/sources.yaml`, and flagged by an M3 task that found this line stale. The NVD
+> defect it described (API 2.0 sorts ascending by CVE ID, so paginating from `startIndex=0`
+> returns 1988-era CVEs forever) is fixed by anchoring the walk at the tail; the sort trap
+> itself is recorded under "How to add a source" above, because it recurred in a second source.
 
 **Two hard-override categories have no reachable source.** Juniper SIRT publishes no feed,
 and `api.weather.gov` serves a blanket `Disallow: /`, which takes NWS hurricane alerts off
