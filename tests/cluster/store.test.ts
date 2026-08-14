@@ -288,4 +288,179 @@ describe('getClusterSizeAsOf', () => {
     const db = migratedDb();
     expect(() => getClusterSizeAsOf(db, 'a', '2026-08-14')).toThrow(InvalidTimestampError);
   });
+
+  it('two DIFFERENT clusters written in the SAME pass (identical fetched_at) are not conflated -- each item resolves to its OWN cluster within that run', () => {
+    const db = migratedDb();
+    const runAt = '2026-08-14T10:00:00.000Z';
+    writeClusters(
+      db,
+      [
+        ['a', 'b'],
+        ['x', 'y', 'z'],
+      ],
+      runAt,
+    );
+    expect(getClusterSizeAsOf(db, 'a', runAt)).toBe(2);
+    expect(getClusterSizeAsOf(db, 'b', runAt)).toBe(2);
+    expect(getClusterSizeAsOf(db, 'x', runAt)).toBe(3);
+    expect(getClusterSizeAsOf(db, 'y', runAt)).toBe(3);
+    expect(getClusterSizeAsOf(db, 'z', runAt)).toBe(3);
+  });
+});
+
+// =============================================================================
+// FIX ROUND 2 -- append-only membership + a shrinking cluster (an item that
+// stops being clustered) means "this item_key's most recent row" is no
+// longer the same thing as "this item_key's CURRENT size". Reported against
+// the real data/wf.db (never opened by this test -- see task-4-report.md's
+// fix-round-2 section for the exact queries and the full real-scale
+// validation): fix round 1's cross-source-only rule correctly excludes
+// every cisa-kev/cisa-kev pair, so a re-clustering pass writes NOTHING for
+// an item that was in the OLD 1,543-member cluster and is no longer in ANY
+// cluster. Before this fix, getClusterSizeAsOf resolved "the most recent
+// row for this item_key across all history" -- which for such an item is
+// still its stale 1,543-sized membership from the last pass that included
+// it, forever, because nothing ever gets written to supersede it.
+//
+// THE FIX: getClusterSizeAsOf now resolves in two steps instead of one --
+// first "what is the latest clustering RUN at or before asOf" (every
+// membership one call to writeClusters produces shares an identical
+// fetched_at, so the distinct fetched_at values in item_clusters ARE the
+// set of past runs), THEN "does this item_key have a membership WITHIN that
+// specific run". An item absent from the current run's memberships is a
+// singleton (1), full stop -- its stale membership from an OLDER run is
+// simply never consulted for a "current" read, though it remains fully
+// intact and correctly reconstructable for a HISTORICAL asOf inside that
+// older run's own window (the point-in-time property this whole mechanism
+// exists to guarantee, deliberately NOT "fixed" away -- see the dedicated
+// test below).
+//
+// ALTERNATIVE CONSIDERED AND REJECTED: writeClusters emitting an explicit
+// singleton row (its own single-member "cluster") for every unclustered
+// candidate every pass. Also correct, but rejected: the real corpus has
+// ~4,134 candidates and only ~10 real clusters, so this would write roughly
+// 4,100 new rows into an APPEND-ONLY table on every single pass, forever --
+// versus 22 under the chosen fix. It also directly contradicts this
+// project's own established convention (src/cluster/store.ts's writeClusters
+// doc comment, unchanged by this fix round): "a singleton earns no row" --
+// `clusters` exists to record genuine duplication, and thousands of
+// vacuous one-member "clusters" would violate that on every pass.
+// =============================================================================
+describe('getClusterSizeAsOf -- FIX ROUND 2: run-scoped resolution, not item-scoped', () => {
+  it('an item that drops OUT of a cluster between two passes reads as a singleton as of the later pass -- not the stale size from the pass it was last a member of', () => {
+    const db = migratedDb();
+    const pass1At = '2026-08-10T00:00:00.000Z';
+    writeClusters(db, [['a', 'b']], pass1At);
+    expect(getClusterSizeAsOf(db, 'a', pass1At)).toBe(2);
+
+    // Pass 2: 'a' is no longer grouped with anyone -- its near-duplicate 'b'
+    // is now grouped with a DIFFERENT item instead (exactly the shape a
+    // re-clustering pass produces once grouping behaviour changes).
+    // writeClusters writes NOTHING for 'a' here -- there is no singleton row
+    // to append.
+    const pass2At = '2026-08-14T00:00:00.000Z';
+    writeClusters(db, [['b', 'c']], pass2At);
+
+    // As of pass 2 (or later): 'a' must read as a singleton, size 1 -- NOT
+    // the stale size 2 from pass 1, which is still sitting in the table
+    // (append-only, never deleted) but is no longer the CURRENT truth. This
+    // is the exact assertion that failed against the pre-fix implementation
+    // (see the mutation test in task-4-report.md's fix-round-2 section).
+    expect(getClusterSizeAsOf(db, 'a', pass2At)).toBe(1);
+    expect(getClusterSizeAsOf(db, 'a', '2026-08-20T00:00:00.000Z')).toBe(1);
+
+    // 'b' correctly reads its NEW cluster's size (with 'c'), not pass 1's.
+    expect(getClusterSizeAsOf(db, 'b', pass2At)).toBe(2);
+
+    // POINT-IN-TIME PROPERTY, explicitly pinned (must NOT be "fixed" away):
+    // a query for a moment BETWEEN the two passes is historically truthful
+    // -- 'a' really was in a 2-member cluster then, and an as_of read must
+    // say so, not retroactively apply pass 2's knowledge backward.
+    expect(getClusterSizeAsOf(db, 'a', '2026-08-12T00:00:00.000Z')).toBe(2);
+  });
+
+  // ---------------------------------------------------------------------------
+  // REAL REGRESSION -- item_keys, titles, source_ids, and pass timestamps
+  // copied BY HAND from a read-only copy of the real, live data/wf.db
+  // (`sqlite3 data/wf.db "VACUUM INTO '<scratch>'"`; data/wf.db itself never
+  // opened by this test or by anything in this task -- see
+  // task-4-report.md's fix-round-2 section for the exact queries used and
+  // the full real-scale before/after validation, which is not repeated
+  // here at its true 1,543/107/1,890 scale for practicality).
+  //
+  // data/wf.db held THREE identical broken clustering passes (each a real,
+  // independent reproduction of fix round 1's bug: a 1,543-member, 100%
+  // cisa-kev cluster) followed by one real fixed pass. These three real
+  // cisa-kev items were members of the broken cluster in every broken pass
+  // and members of NOTHING in the fixed pass (fix round 1's cross-source-
+  // only rule correctly excludes every cisa-kev/cisa-kev pair) -- exactly
+  // the shape that exposed this bug.
+  // ---------------------------------------------------------------------------
+  describe('real data/wf.db regression', () => {
+    const CISCO_ASA =
+      '1e868cf7cef50c5834a6e8d333fe78476d9e8842c5630e847befdf786a8055b8'; // "Cisco Secure Firewall Adaptive Security Appliance (ASA) and Secure Firewall Threat Defense (FTD) Heap Inspection Vulnerability"
+    const MS_AFD =
+      'c4576e09f953662a847f54326edc7db564f28bbb3ab22e38d0607cec55eba7fc'; // "Microsoft Windows Ancillary Function Driver for WinSock Use-After-Free Vulnerability"
+    const METABASE =
+      'ad6ab3554da5e5cc03ca5531fa9d50c6ff74a07c08484a3862caf62f8d9d2c61'; // "Metabase SQL Injection Vulnerability"
+    // A real genuine SURVIVOR of the real fixed pass: whitehouse-actions and
+    // federal-register both carried the identical real title "Delivering
+    // Gold Standard Childhood Vaccine Recommendations for Americans" and
+    // correctly remained clustered together -- a real 2-source
+    // corroboration fix round 1's changes preserve correctly.
+    const WHITEHOUSE_VACCINE = '41ac6d8235ff7acb5de3a74a0bf35821a0130d5e48b2b0f4b69181ea220f2b7a';
+    const FEDREGISTER_VACCINE = 'ed8db510ed39ff2a7826724ca0d12483a4e3a1e8bdf463152d40eb1741c0096b';
+
+    // The real timestamp of the FIRST of the three broken passes, and of the
+    // real fixed pass, copied verbatim.
+    const BROKEN_RUN_AT = '2026-08-14T16:02:50.419Z';
+    const FIXED_RUN_AT = '2026-08-14T16:27:11.601Z';
+
+    function reproduceRealScenario(db: ReturnType<typeof migratedDb>) {
+      // The real broken pass clustered these 3 real items together (among
+      // 1,540 other real cisa-kev items not reproduced here for
+      // practicality -- this fixture proves the READ-PATH mechanism using
+      // real identities and real timestamps, not a claim that this
+      // in-test fixture itself is 1,543 members wide).
+      writeClusters(db, [[CISCO_ASA, MS_AFD, METABASE]], BROKEN_RUN_AT);
+      // The real fixed pass wrote nothing for any of the three -- they are
+      // absent from every one of its groups. It DID correctly cluster the
+      // real whitehouse-actions/federal-register vaccine-recommendations
+      // pair.
+      writeClusters(db, [[WHITEHOUSE_VACCINE, FEDREGISTER_VACCINE]], FIXED_RUN_AT);
+    }
+
+    it('the three real cisa-kev items read 1 (singleton), not their old broken-pass size, as of the fixed run', () => {
+      const db = migratedDb();
+      reproduceRealScenario(db);
+      expect(getClusterSizeAsOf(db, CISCO_ASA, FIXED_RUN_AT)).toBe(1);
+      expect(getClusterSizeAsOf(db, MS_AFD, FIXED_RUN_AT)).toBe(1);
+      expect(getClusterSizeAsOf(db, METABASE, FIXED_RUN_AT)).toBe(1);
+    });
+
+    it('the real surviving cross-source cluster still reads its true size as of the fixed run', () => {
+      const db = migratedDb();
+      reproduceRealScenario(db);
+      expect(getClusterSizeAsOf(db, WHITEHOUSE_VACCINE, FIXED_RUN_AT)).toBe(2);
+      expect(getClusterSizeAsOf(db, FEDREGISTER_VACCINE, FIXED_RUN_AT)).toBe(2);
+    });
+
+    it('POINT IN TIME: an asOf inside the broken run still reconstructs the broken run\'s (wrong, but historically real) size -- truthful, not something to "fix"', () => {
+      const db = migratedDb();
+      reproduceRealScenario(db);
+      // Exactly at the broken run's own timestamp, before the fixed run
+      // ever happened: the three items genuinely WERE grouped together
+      // then. An as_of read for that instant must say so -- this is the
+      // requirement stated explicitly in the fix-round-2 brief: "an asOf
+      // inside the broken run must still reconstruct the broken run's
+      // sizes... and must not be 'fixed'."
+      expect(getClusterSizeAsOf(db, CISCO_ASA, BROKEN_RUN_AT)).toBe(3);
+      expect(getClusterSizeAsOf(db, MS_AFD, BROKEN_RUN_AT)).toBe(3);
+      expect(getClusterSizeAsOf(db, METABASE, BROKEN_RUN_AT)).toBe(3);
+      // A moment strictly between the two real runs: same historical answer.
+      expect(getClusterSizeAsOf(db, CISCO_ASA, '2026-08-14T16:15:00.000Z')).toBe(3);
+      // Before the broken run ever happened: a true singleton.
+      expect(getClusterSizeAsOf(db, CISCO_ASA, '2026-08-14T00:00:00.000Z')).toBe(1);
+    });
+  });
 });

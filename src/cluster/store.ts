@@ -182,48 +182,104 @@ export function writeClusters(db: Db, groups: string[][], runAt: string): Cluste
 
 /**
  * The size of the cluster `itemKey` belonged to, as of `asOf` -- the
- * point-in-time proof the task requires. Two steps, both indexed:
+ * point-in-time proof the task requires.
  *
- * 1. Find `itemKey`'s membership row with the latest `fetched_at <= asOf`
- *    (there may be several across multiple passes over the item's history;
- *    only the most recent one at-or-before `asOf` is "current" as of that
- *    instant). `rowid desc` breaks a genuine `fetched_at` tie
- *    deterministically, mirroring `src/domain/item.ts`'s `getItemAsOf` --
- *    included for the same reason that module states explicitly: SQL
- *    guarantees no tiebreak among equal sort keys on its own.
- * 2. Count every `item_clusters` row sharing that SAME `cluster_id` with
- *    `fetched_at <= asOf`. Because `writeClusters` stamps every member of
- *    one pass with the identical `fetched_at`, this count is really an
- *    all-or-nothing gate (either `asOf` is at/after the pass that produced
- *    this `cluster_id`, revealing every member written in it, or `asOf` is
- *    before it and step 1 would already have picked an earlier/no row) --
- *    not a partial-membership scenario.
+ * FIX ROUND 2 (M2 task 4 fix-round-2): resolution is scoped to the latest
+ * clustering RUN at or before `asOf`, not to `itemKey`'s own most recent
+ * membership row. These are NOT the same question once a re-clustering pass
+ * can REMOVE an item from a cluster -- which fix round 1 made a real,
+ * common occurrence (its cross-source-only rule can, and in the real
+ * corpus did, exclude an item from every cluster it used to belong to).
+ * `writeClusters` never writes a row for a singleton (see its own doc
+ * comment: "a singleton earns no row"), so an item that stops being
+ * clustered gets NO new row in the next pass -- there is nothing to
+ * append. Under the pre-fix-round-2 resolution ("this item_key's own most
+ * recent row, full stop"), that item's stale membership from the LAST pass
+ * that still included it would keep being reported as current, forever,
+ * because nothing ever supersedes it. Real, not hypothetical: this is
+ * exactly what happened to the 1,543-member cisa-kev cluster fix round 1
+ * eliminated from the WRITE path -- three real cisa-kev items kept reading
+ * back as size 1,543 through this READ path minutes after the fix had
+ * already stopped writing anything for them (see
+ * store.test.ts's "FIX ROUND 2" real-data regression and
+ * task-4-report.md's fix-round-2 section for the full account).
  *
- * Returns 1, not 0, when `itemKey` has no membership row at or before
+ * Three steps, using the fact that one call to `writeClusters` stamps EVERY
+ * membership it writes with the identical `fetched_at` -- so the set of
+ * DISTINCT `fetched_at` values ever seen in `item_clusters` is exactly the
+ * set of past clustering runs, not an arbitrary per-row timestamp:
+ *
+ * 1. Find the latest RUN at or before `asOf` -- `max(fetched_at) where
+ *    fetched_at <= asOf`. `null` (no clustering pass has ever run at or
+ *    before `asOf`) means every item is a singleton; return 1 immediately.
+ * 2. Within THAT SPECIFIC run (`fetched_at` matching it exactly, not `<=`
+ *    -- a run is a single point, not a range), does `itemKey` have a
+ *    membership row at all? If not, `itemKey` was a singleton in the
+ *    current run (whether because it was never clustered, or because a
+ *    later run genuinely stopped clustering it) -- return 1. This is the
+ *    step fix round 2 changes: the pre-fix version searched `itemKey`'s
+ *    entire history for its own latest row, which could resolve to an
+ *    OLDER run than the one currently in effect.
+ * 3. Count every row sharing that membership's `cluster_id` (a cluster_id
+ *    is created fresh by every pass -- see `writeClusters` -- so it is
+ *    already unique to exactly one run; the `fetched_at` filter here is
+ *    retained as an explicit, self-documenting invariant check rather than
+ *    because it changes the result).
+ *
+ * POINT-IN-TIME PROPERTY, preserved exactly, not "fixed" away: an `asOf`
+ * that falls INSIDE an old (even a since-superseded, even a genuinely
+ * wrong) run's own window still finds and reconstructs THAT run's true
+ * historical membership -- step 1 picks whichever run was actually current
+ * as of that instant, bad data included. That is correct: a historical
+ * query answers "what did the system believe then", not "what do we now
+ * know was true". See store.test.ts's dedicated point-in-time test for the
+ * real-data proof.
+ *
+ * Returns 1, not 0, when `itemKey` has no membership anywhere at or before
  * `asOf` -- the item, considered alone, always exists as a "cluster of
- * itself"; the schema simply doesn't materialize a row for a singleton (see
- * `writeClusters`'s doc comment). This is the same convention the mechanical
- * scorer (M2 Task 5) will read directly as a magnitude: "1" means "no known
- * corroborating source", never "unknown"/`null`.
+ * itself"; the schema simply doesn't materialize a row for a singleton.
+ * This is the same convention the mechanical scorer (M2 Task 5) reads
+ * directly as a magnitude: "1" means "no known corroborating source",
+ * never "unknown"/`null`.
+ *
+ * ALTERNATIVE CONSIDERED AND REJECTED (fix round 2): have `writeClusters`
+ * emit an explicit singleton row for every candidate that ISN'T in a
+ * multi-member group, so every item always has a fresh row every pass and
+ * the pre-fix "most recent row" resolution would have kept working
+ * unmodified. Rejected: the real corpus has ~4,134 candidates and ~10 real
+ * clusters per pass, so this would write roughly 4,100 new rows into an
+ * APPEND-ONLY table on every single pass, forever -- versus the 22 the
+ * chosen fix actually writes. It would also directly contradict this
+ * module's own established "a singleton earns no row" convention
+ * (`writeClusters`'s doc comment, unchanged by this fix round): `clusters`
+ * exists to record genuine duplication, and thousands of vacuous
+ * one-member "clusters" every pass would violate that far more than a
+ * slightly more involved read query does.
  */
 export function getClusterSizeAsOf(db: Db, itemKey: string, asOf: string): number {
   assertCanonicalTimestamp('asOf', asOf);
 
-  const membership = db
-    .prepare(
-      `select cluster_id
-       from item_clusters
-       where item_key = ? and fetched_at <= ?
-       order by fetched_at desc, rowid desc
-       limit 1`,
-    )
-    .get(itemKey, asOf) as { cluster_id: string } | undefined;
+  // Step 1: which clustering RUN was current as of `asOf`? The distinct
+  // fetched_at values in item_clusters ARE the set of past runs (see this
+  // function's doc comment).
+  const run = db.prepare('select max(fetched_at) as run_at from item_clusters where fetched_at <= ?').get(asOf) as {
+    run_at: string | null;
+  };
+  if (run.run_at === null) return 1;
 
+  // Step 2: does itemKey have a membership WITHIN that specific run? An
+  // exact match on fetched_at, not <=, because a run is one instant, not a
+  // window -- this is the change from fix round 1's implementation, which
+  // searched itemKey's own history unconditionally instead of scoping to
+  // the run that's actually current as of `asOf`.
+  const membership = db
+    .prepare('select cluster_id from item_clusters where item_key = ? and fetched_at = ?')
+    .get(itemKey, run.run_at) as { cluster_id: string } | undefined;
   if (!membership) return 1;
 
+  // Step 3: how many members did that specific cluster have, in that run?
   const countRow = db
-    .prepare('select count(*) as n from item_clusters where cluster_id = ? and fetched_at <= ?')
-    .get(membership.cluster_id, asOf) as { n: number };
-
+    .prepare('select count(*) as n from item_clusters where cluster_id = ? and fetched_at = ?')
+    .get(membership.cluster_id, run.run_at) as { n: number };
   return countRow.n;
 }
