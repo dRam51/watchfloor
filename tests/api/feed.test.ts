@@ -31,6 +31,7 @@ import { computeDecayFactor, type DecayConfig } from '../../src/score/decay.ts';
 import { loadDecayConfig } from '../../src/score/decay.ts';
 import { loadOverridesConfig, type OverridesConfig, type OverrideRule } from '../../src/score/overrides.ts';
 import { loadMechanicalScoreConfig } from '../../src/score/mechanical.ts';
+import type { Source } from '../../src/sources/load.ts';
 
 const TOKEN = 'a-real-token-that-is-long-enough';
 
@@ -67,6 +68,27 @@ function testDecayConfig(): DecayConfig {
       analysis: { signal_half_life_hours: 240, read_half_life_hours: 720 },
       press: { signal_half_life_hours: 6, read_half_life_hours: 168 },
     },
+  };
+}
+
+/**
+ * A minimal, hand-built Source -- `kind` is the one field these tests ever
+ * vary; every other field is a plausible-but-unexamined filler, matching
+ * this file's own "hand-built config, independent of config/*.yaml"
+ * convention (see file header).
+ */
+function testSource(overrides: Partial<Source> = {}): Source {
+  return {
+    id: 'plain-source',
+    name: 'Plain Source',
+    type: 'rss',
+    url: 'https://example.test/feed',
+    beats: ['usnews'],
+    weight: 1,
+    poll_interval: '1h',
+    enabled: true,
+    enrichment: true,
+    ...overrides,
   };
 }
 
@@ -139,6 +161,11 @@ function buildTestServer(db: Db, depsOverrides: Partial<FeedDeps> = {}): Fastify
     db,
     decayConfig: testDecayConfig(),
     overridesConfig: testOverridesConfig(),
+    // Empty by default: most of this file's tests have no stake in `kind` at
+    // all, and an unmatched sourceId is meant to read as `kind: null` on the
+    // wire (see the "kind" describe block below) -- exactly what an empty
+    // source list produces for every fixture item here.
+    sources: [],
     ...depsOverrides,
   });
   return server;
@@ -465,6 +492,132 @@ describe('beat filter: one endpoint, merged by default, filterable to one beat',
 });
 
 // ---------------------------------------------------------------------------
+// 5b. `kind` -- the CONTENT axis (news/paper/blog/advisory/aggregator),
+//     orthogonal to `beat` (a TOPIC axis). Surfaced on every row (resolved
+//     from the item's sourceId via deps.sources, null when unresolvable) and
+//     filterable exactly like `beat`, including cursor stability.
+// ---------------------------------------------------------------------------
+
+describe('kind: surfaced on rows, filterable, cursor-stable', () => {
+  it("surfaces the row's source kind, resolved from deps.sources by sourceId", async () => {
+    const db = migratedDb();
+    const item = insertItem(db, baseItem({ sourceId: 'news-src', beats: ['usnews'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, item.item_id, 'usnews', 5, 5, T0);
+
+    const server = buildTestServer(db, { sources: [testSource({ id: 'news-src', kind: 'news' })] });
+    const res = await server.inject(authed(`/feed?now=${T0}`));
+    expect(res.json().items[0].kind).toBe('news');
+    await server.close();
+  });
+
+  it('reports kind: null, not an omitted field, when the sourceId matches nothing in deps.sources (nulls stay null)', async () => {
+    const db = migratedDb();
+    const item = insertItem(db, baseItem({ sourceId: 'unknown-src', beats: ['usnews'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, item.item_id, 'usnews', 5, 5, T0);
+
+    const server = buildTestServer(db); // default sources: []
+    const res = await server.inject(authed(`/feed?now=${T0}`));
+    const row = res.json().items[0];
+    expect(row).toHaveProperty('kind');
+    expect(row.kind).toBeNull();
+    await server.close();
+  });
+
+  it('reports kind: null when the matching source has no kind classification (kind is optional on Source)', async () => {
+    const db = migratedDb();
+    const item = insertItem(db, baseItem({ sourceId: 'unclassified-src', beats: ['usnews'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, item.item_id, 'usnews', 5, 5, T0);
+
+    const server = buildTestServer(db, { sources: [testSource({ id: 'unclassified-src' })] }); // no kind
+    const res = await server.inject(authed(`/feed?now=${T0}`));
+    expect(res.json().items[0].kind).toBeNull();
+    await server.close();
+  });
+
+  it('a kind filter restricts the merged stream to matching sources only', async () => {
+    const db = migratedDb();
+    const newsItem = insertItem(db, baseItem({ sourceId: 'news-src', beats: ['usnews'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, newsItem.item_id, 'usnews', 5, 5, T0);
+    const paperItem = insertItem(db, baseItem({ sourceId: 'paper-src', beats: ['aisec'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, paperItem.item_id, 'aisec', 5, 5, T0);
+
+    const server = buildTestServer(db, {
+      sources: [testSource({ id: 'news-src', kind: 'news' }), testSource({ id: 'paper-src', kind: 'paper' })],
+    });
+
+    const newsOnly = await server.inject(authed(`/feed?kind=news&now=${T0}`));
+    const newsKeys = newsOnly.json().items.map((i: { itemKey: string }) => i.itemKey);
+    expect(newsKeys).toEqual([newsItem.item_key]);
+
+    const paperOnly = await server.inject(authed(`/feed?kind=paper&now=${T0}`));
+    const paperKeys = paperOnly.json().items.map((i: { itemKey: string }) => i.itemKey);
+    expect(paperKeys).toEqual([paperItem.item_key]);
+
+    await server.close();
+  });
+
+  it('kind and beat filters compose -- "aisec, but only news" is exactly this query', async () => {
+    const db = migratedDb();
+    const aisecNews = insertItem(db, baseItem({ sourceId: 'aisec-news-src', beats: ['aisec'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, aisecNews.item_id, 'aisec', 5, 5, T0);
+    const aisecPaper = insertItem(db, baseItem({ sourceId: 'aisec-paper-src', beats: ['aisec'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, aisecPaper.item_id, 'aisec', 5, 5, T0);
+    const cyberNews = insertItem(db, baseItem({ sourceId: 'aisec-news-src', beats: ['cyber'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, cyberNews.item_id, 'cyber', 5, 5, T0);
+
+    const server = buildTestServer(db, {
+      sources: [testSource({ id: 'aisec-news-src', kind: 'news' }), testSource({ id: 'aisec-paper-src', kind: 'paper' })],
+    });
+
+    const res = await server.inject(authed(`/feed?beat=aisec&kind=news&now=${T0}`));
+    const keys = res.json().items.map((i: { itemKey: string }) => i.itemKey);
+    expect(keys).toEqual([aisecNews.item_key]);
+
+    await server.close();
+  });
+
+  it('rejects an unknown kind value', async () => {
+    const db = migratedDb();
+    const server = buildTestServer(db);
+    const res = await server.inject(authed('/feed?kind=vibes'));
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('invalid_query');
+    await server.close();
+  });
+
+  it('a cursor pins the kind filter across pages, and an explicit conflicting kind on page 2 fails loudly', async () => {
+    const db = migratedDb();
+    const server = buildTestServer(db, {
+      now: () => T0,
+      sources: [testSource({ id: 'news-src', kind: 'news' })],
+    });
+
+    const itemA = insertItem(db, baseItem({ sourceId: 'news-src', beats: ['usnews'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, itemA.item_id, 'usnews', 10, 10, T0);
+    const itemB = insertItem(db, baseItem({ sourceId: 'news-src', beats: ['usnews'], publishedAt: T0, fetchedAt: T0 }));
+    insertScoreRow(db, itemB.item_id, 'usnews', 5, 5, T0);
+
+    const p1 = await server.inject(authed('/feed?kind=news&limit=1'));
+    expect(p1.json().items).toHaveLength(1);
+    const cursor = p1.json().nextCursor;
+    expect(cursor).toBeTruthy();
+
+    // No explicit kind on page 2 -- the cursor alone keeps the filter applied.
+    const p2 = await server.inject(authed(`/feed?cursor=${encodeURIComponent(cursor)}`));
+    expect(p2.statusCode).toBe(200);
+    expect(p2.json().items.map((i: { itemKey: string }) => i.itemKey)).toEqual([itemB.item_key]);
+
+    // An explicit, CONFLICTING kind on page 2 fails loudly rather than
+    // silently picking one -- same contract as beat/profile/now above.
+    const mismatched = await server.inject(authed(`/feed?kind=paper&cursor=${encodeURIComponent(cursor)}`));
+    expect(mismatched.statusCode).toBe(400);
+    expect(mismatched.json().error).toBe('cursor_mismatch');
+
+    await server.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 6. Zod validation: hostile/absent params.
 // ---------------------------------------------------------------------------
 
@@ -650,7 +803,7 @@ describe('real corpus (data/wf.db)', () => {
 
     const server = Fastify({ logger: false });
     registerAuth(server, TOKEN);
-    registerFeed(server, { db, decayConfig, overridesConfig });
+    registerFeed(server, { db, decayConfig, overridesConfig, sources: [] });
 
     // Derived from the corpus rather than hardcoded. This was
     // `'2026-08-14T18:00:00.000Z'` ("a few hours after the real ingest"),

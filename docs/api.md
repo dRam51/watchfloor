@@ -40,7 +40,7 @@ carry a secret, and the body is operational status rather than item data.
 
 ```json
 { "status": "ok", "db": "ok", "migrations": 6, "tz": "America/New_York",
-  "sources": 19, "costGates": { … } }
+  "sources": 27, "costGates": { … } }
 ```
 
 ### `GET /api/feed`
@@ -49,21 +49,32 @@ The core read. Ranked items, merged across beats or filtered to one.
 
 | param | type | notes |
 | --- | --- | --- |
-| `beat` | one of `ai cyber aisec repos markets usnews` | omit for the merged stream |
+| `beat` | one of `ai cyber aisec repos markets usnews` | omit for the merged stream; a TOPIC filter |
+| `kind` | one of `news paper blog advisory aggregator` | omit for no filter; a CONTENT filter — composes with `beat` (`?beat=aisec&kind=news` is "aisec, but only news") |
 | `profile` | `signal` \| `read` | which score orders the result |
 | `limit` | 1–200, default 50 | |
 | `cursor` | opaque string | from a previous response's `nextCursor` — **pass it back verbatim** |
 | `now` | canonical timestamp | overrides the request instant; mostly for tests and point-in-time reads |
 
-Returns `{ items, beat, profile, now, total, nextCursor }`. Each item:
+Returns `{ items, beat, kind, profile, now, total, nextCursor }`. Each item:
 
 ```
-itemKey  title  canonicalUrl  summary  sourceId  publishedAt  itemType
+itemKey  title  canonicalUrl  summary  sourceId  publishedAt  itemType  kind
 beats[]  entities[]  representativeBeat  clusterSize
 signalScore  readScore  sortProfile
 override { signal:{pinned,priority,label}, read:{…} }
 state    { readAt, savedAt, dismissedAt }
 ```
+
+**`kind` is a source-level fact, not an item-level one — and it can be `null`.** `beat` is a
+*topic* (`aisec`); `kind` is a *content format* (news vs. paper vs. blog vs. advisory vs.
+aggregator), resolved from the item's source in `config/sources.yaml` (`src/sources/load.ts`'s
+`kind` field, itself optional — see that file's own doc comment for why source-level, and why
+optional, not required). An item whose source has no `kind` classification, or whose `sourceId`
+no longer matches any configured source, reports `kind: null` — never omitted, and never guessed.
+A request's own `?kind=` filter is pinned into the pagination cursor exactly like `beat` is: an
+explicit `kind` on a later page that disagrees with the cursor's is a `400 cursor_mismatch`,
+never silently applied or silently dropped.
 
 **Three things that look like bugs and are not:**
 

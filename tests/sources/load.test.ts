@@ -185,6 +185,64 @@ sources:
     });
   });
 
+  // fix-news-sources-and-kind task: `beat` is a TOPIC axis (aisec, ai, ...); `kind` is a
+  // CONTENT axis (news vs. paper vs. blog vs. advisory vs. aggregator) -- orthogonal to
+  // beat, and the thing that actually lets the owner ask for "aisec, but only news".
+  // `item_type` was tried for this and found effectively binary (M2: `press` matches 0 of
+  // 3,325 real items), so `kind` is a NEW, source-level field, not a repurposing of an
+  // existing one. Source-level (not item-level) deliberately -- see config/sources.yaml's
+  // header for why a per-item classifier is the mistake `item_type` already made.
+  //
+  // Optional, not required (unlike `beats`/`weight`/`type`) -- mirrors `tier`'s existing
+  // precedent exactly (also `z.enum(...).optional()`, also not every source needs one).
+  // Making `kind` REQUIRED would force every hand-built `Source` fixture across the test
+  // suite (tests/scheduler, tests/adapters, tests/score, tests/api/sources, tests/api/
+  // dashboard -- none of which this task owns) to grow a new mandatory field just to keep
+  // compiling, for a schema addition those tests have no stake in. `enrichment` accepted
+  // that cost deliberately, for a decision that affects every source's behavior; `kind` is
+  // narrower in scope (a read-side filter), so it follows `tier`'s lighter-weight pattern
+  // instead. Every REAL source in config/sources.yaml is still classified explicitly below
+  // (see "every configured source has a kind classification") -- the field being optional
+  // in the schema doesn't mean the classification work was skipped, only that it isn't
+  // mechanically forced on every incidental test fixture elsewhere in the repo.
+  describe('kind field', () => {
+    it('accepts each documented kind value', () => {
+      for (const kind of ['news', 'paper', 'blog', 'advisory', 'aggregator']) {
+        const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true, kind: ${kind} }
+`;
+        const sources = loadSources(yaml);
+        expect(sources[0]?.kind, kind).toBe(kind);
+      }
+    });
+
+    it('leaves kind undefined when omitted -- optional, matching tier', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true }
+`;
+      const sources = loadSources(yaml);
+      expect(sources[0]?.kind).toBeUndefined();
+    });
+
+    it('rejects a kind value outside the documented set', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true, kind: press-release }
+`;
+      expect(() => loadSources(yaml)).toThrow(SourceConfigError);
+    });
+
+    it('rejects a kind that only differs by case -- the set is lowercase, not case-insensitive', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true, kind: News }
+`;
+      expect(() => loadSources(yaml)).toThrow(SourceConfigError);
+    });
+  });
+
   // M1 task 11: the real config grew from one placeholder entry to the full verified
   // set. `loadSourcesFile` already rejects the whole file if a SINGLE entry is
   // malformed (FileSchema is `z.array(SourceSchema)`, parsed atomically), so the two
@@ -209,8 +267,16 @@ sources:
     //                    also opens `User-agent: * / Disallow: /`, so BOTH the direct
     //                    route and the indirect one are shut. This test caught that
     //                    removal, which is exactly what the exact count is for.
-    it('has exactly 19 configured sources', () => {
-      expect(sources.length).toBe(19);
+    //
+    // fix-news-sources-and-kind task (2026-08-14): 19 -> 27. Eight sources named as
+    // "verified during M1 planning" but never configured -- Ars Technica, VentureBeat,
+    // Import AI, OpenAI blog (ai); The Hacker News, Dark Reading, Rapid7, Cisco Talos
+    // (cyber/aisec) -- each independently re-verified live against the real robots gate
+    // and for fresh, parseable content, not trusted on the old claim. See
+    // fix-news-sources-and-kind-report.md (.superpowers/sdd/2026-08-14-m3-api-dashboard/,
+    // gitignored, local-only) for the full evidence.
+    it('has exactly 27 configured sources', () => {
+      expect(sources.length).toBe(27);
     });
 
     it('has no duplicate ids', () => {
@@ -269,6 +335,46 @@ sources:
       const apNews = sources.find((s) => s.id === 'ap-news');
       expect(apNews).toBeDefined();
       expect(apNews?.filters).toEqual({ languages: ['eng'] });
+    });
+
+    // fix-news-sources-and-kind task: `kind` is optional in the SCHEMA (see "kind field"
+    // above), but every REAL source in this file was deliberately classified -- this
+    // invariant is what keeps that true rather than aspirational. A future config edit
+    // that adds a source without a `kind` fails this, loudly, at the same review point as
+    // every other config-quality check here, rather than silently shipping an
+    // unclassified row that /api/feed?kind=... can never match.
+    it('every configured source has a kind classification', () => {
+      for (const s of sources) {
+        expect(s.kind, `${s.id} has no kind`).toBeDefined();
+      }
+    });
+
+    // The headline outcome of the fix-news-sources-and-kind task: aisec had ZERO
+    // kind:news sources before this (67 items -- 47 arXiv papers, 20 research-blog posts,
+    // newest 93 days old -- structurally a papers beat, not a news beat). Pinned so a
+    // future edit cannot silently regress the fix back to that state.
+    it('aisec has at least one enabled kind:news source', () => {
+      const aisecNews = sources.filter((s) => s.enabled && s.beats.includes('aisec') && s.kind === 'news');
+      expect(aisecNews.map((s) => s.id)).toEqual(expect.arrayContaining(['the-hacker-news', 'dark-reading']));
+    });
+
+    // Pinned regression: the venturebeat.com/category/ai/feed trap (live-verified stale --
+    // see config/sources.yaml's own comment on the venturebeat entry) is exactly the kind
+    // of "looks like the better URL" mistake a future edit could reintroduce. Pinning the
+    // actually-configured url guards against that.
+    it('venturebeat is configured against the site-wide feed, not the stale category feed', () => {
+      const vb = sources.find((s) => s.id === 'venturebeat');
+      expect(vb?.url).toBe('https://venturebeat.com/feed/');
+    });
+
+    // Pinned regression: ars-technica-ai and dark-reading both declared `enrichment: false`
+    // for the same AP-precedent reason (robots.txt names AI crawlers by name in a separate
+    // group, even though our own "watchfloor" token doesn't match it) -- fails loudly if a
+    // future edit drops that decision rather than the loss going unnoticed.
+    it.each(['ars-technica-ai', 'dark-reading'])('has enrichment: false on %s (robots.txt names AI crawlers by name)', (id) => {
+      const source = sources.find((s) => s.id === id);
+      expect(source).toBeDefined();
+      expect(source?.enrichment).toBe(false);
     });
   });
 });

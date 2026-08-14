@@ -66,6 +66,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         db: deps.db,
         decayConfig: deps.decayConfig,
         overridesConfig: deps.overridesConfig,
+        // `kind` (fix-news-sources-and-kind task) is resolved from source
+        // config by id, the same list registerSources/registerDashboard
+        // already receive below -- see FeedDeps.sources' own doc comment.
+        sources: deps.sources,
       });
 
       registerSources(api, { db: deps.db, sources: deps.sources });

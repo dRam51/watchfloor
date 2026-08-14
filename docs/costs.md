@@ -35,14 +35,30 @@ introductory price, and is disqualified from the default path.
 | `pbs-newshour` | PBS NewsHour RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
 | `federal-register` | Federal Register API | free-forever | — | none published (public GSA-style API) | requests fail; shown on source-health |
 | `whitehouse-actions` | White House Presidential Actions RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `ars-technica-ai` | Ars Technica — AI category RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `venturebeat` | VentureBeat RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `import-ai` | Import AI (Jack Clark, Substack) RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `openai-blog` | OpenAI Blog RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `the-hacker-news` | The Hacker News RSS (via feeds.feedburner.com) | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `dark-reading` | Dark Reading RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `rapid7` | Rapid7 Blog RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `cisco-talos` | Cisco Talos Intelligence Blog RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
 | `ollama-local` | Ollama local inference | free-forever | — | local hardware | queues locally; no charge possible |
 | `anthropic-api` | Anthropic API (enrichment) | paid | `WF_ALLOW_PAID_ANTHROPIC` | per account | hard-disabled without the flag |
 
-None of the 19 sources above require an account, an API key, or a card on file — every
+None of the 27 sources above require an account, an API key, or a card on file — every
 one is a public, unauthenticated RSS/Atom/JSON/sitemap endpoint. Some may be
 `enabled: false` in `config/sources.yaml` at any given time (check that file rather than
 this one — the two drift); they are registered here regardless, since the zero-dollar rule
 is about what the system is *capable* of touching, not only what is currently enabled.
+
+**The eight `fix-news-sources-and-kind` additions (2026-08-14)** are the same class as
+everything above: public RSS, no account, no key. `the-hacker-news` is configured directly
+against `feeds.feedburner.com` (FeedBurner, a Google-operated feed-hosting service) rather
+than `thehackernews.com` — this is the publisher's own sanctioned distribution path
+(`thehackernews.com/feeds/posts/default` 302-redirects there by design), not a paid or
+authenticated relationship with Google; feeds.feedburner.com serves the content
+unauthenticated, same as every other entry in this table.
 
 > [!important] NVD's rate limit is load-bearing on a constant in the adapter
 > The `5 req/30s` figure above is not just documentation. `NVD_MAX_PAGES_PER_POLL` in

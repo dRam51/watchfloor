@@ -38,6 +38,45 @@
 #                 on hn-algolia) is still NOT YET CONSUMED by any adapter — present only as
 #                 forward documentation of intent for later M2 filtering work.
 #   tier          markets sources only: event | analysis
+#   kind          news | paper | blog | advisory | aggregator -- a CONTENT axis, orthogonal
+#                 to `beats` (a TOPIC axis). `beat` alone cannot express "aisec, but only
+#                 news": aisec is structurally a papers beat today (arxiv-cs-cr + two
+#                 research blogs, zero news), and `item_type` was tried as the filter for
+#                 exactly this job and found effectively binary in practice (M2: `press`
+#                 matches 0 of 3,325 real items) -- so this is a NEW field, not a
+#                 repurposing of the old one. Optional (like `tier`), validated by
+#                 src/sources/load.ts's Zod schema when present -- an unrecognized value
+#                 fails config load, same as every other field here.
+#
+#                 SOURCE-LEVEL, deliberately, not item-level. A source's kind is stable and
+#                 honest -- arXiv is always papers, CISA's feeds are always advisories -- so
+#                 classifying it once, here, is cheap and correct. An item-level classifier
+#                 is what `item_type` already tried and failed at (see above): individual
+#                 articles vary in form in ways a per-source label cannot capture, but a
+#                 SOURCE'S overall editorial format does not vary. This is deliberately the
+#                 cheap axis, not the clever one -- the point is a filter the owner can use
+#                 (`?kind=news` on `/api/feed`), not taxonomic elegance.
+#
+#                 The five values, and why these five:
+#                   news        third-party journalism/wire reporting -- AP, NPR, PBS,
+#                               Ars Technica, VentureBeat, The Hacker News, Dark Reading.
+#                               What the owner means by "news articles" in "I want news
+#                               articles, not white papers."
+#                   paper       academic preprints -- arXiv. The other half of that complaint.
+#                   blog        practitioner/company/independent blogs and newsletters --
+#                               Simon Willison, Latent Space, Krebs, Project Zero, OWASP,
+#                               deepmind-blog, huggingface-blog, Import AI, OpenAI's own
+#                               blog, vendor research blogs (Rapid7, Cisco Talos). Distinct
+#                               from `news`: first-person/vendor voice rather than
+#                               third-party reporting, even when (Krebs, Project Zero) the
+#                               content itself is investigative or breaking.
+#                   advisory    official, structured primary-source publications -- CISA
+#                               KEV, CISA advisories, NVD, Federal Register, White House
+#                               Presidential Actions. Not journalism about an event; the
+#                               government or vendor's own declaration OF the event.
+#                   aggregator  a feed whose items originate elsewhere and are merely
+#                               surfaced/ranked here -- hn-algolia (Hacker News via Algolia)
+#                               is the only one today.
 #   enrichment    true | false, default true (AP-only in M1, set false below). Validated by
 #                 src/sources/load.ts's Zod schema — a non-boolean value fails config load,
 #                 not just a comment's say-so. Still NOT YET CONSUMED by any M1 code (the
@@ -75,6 +114,7 @@ sources:
     beats: [cyber]
     weight: 2.0
     poll_interval: 30m
+    kind: advisory
     enabled: true
 
   - id: cisa-advisories
@@ -84,6 +124,7 @@ sources:
     beats: [cyber]
     weight: 1.7
     poll_interval: 1h
+    kind: advisory
     enabled: true
 
   # ENABLED (fix round 2, tail pagination) — live-verified 2026-08-14. NVD API 2.0
@@ -119,8 +160,13 @@ sources:
     beats: [cyber]
     weight: 1.6
     poll_interval: 3h
+    kind: advisory
     enabled: true
 
+  # kind: news, not blog -- Krebs is investigative/breaking-news reporting on breaches and
+  # vulnerabilities (what the owner means by "news"), even though the weight-band note above
+  # groups it with the practitioner-blog tier on TRUST/EDITORIAL-VOICE grounds. Trust and
+  # content-kind are different axes; this file's own weight band is not a kind label.
   - id: krebs
     name: Krebs on Security
     type: rss
@@ -128,6 +174,7 @@ sources:
     beats: [cyber]
     weight: 1.3
     poll_interval: 6h
+    kind: news
     enabled: true
 
   - id: bleepingcomputer
@@ -137,6 +184,7 @@ sources:
     beats: [cyber]
     weight: 1.3
     poll_interval: 3h
+    kind: news
     enabled: true
 
   # ENABLED — the plan's verified URL (googleprojectzero.blogspot.com, which needed
@@ -174,6 +222,7 @@ sources:
     beats: [cyber, aisec]
     weight: 1.6
     poll_interval: 12h
+    kind: blog
     enabled: true
 
   # ---------------------------------------------------------------------------
@@ -187,6 +236,7 @@ sources:
     beats: [aisec]
     weight: 0.9
     poll_interval: 1d
+    kind: paper
     filters:
       # Not yet consumed by src/adapters/rss.ts (M1) — forward documentation for M2,
       # matching this source's plan note ("filter for LLM/agent/prompt-injection
@@ -202,6 +252,108 @@ sources:
     beats: [aisec]
     weight: 1.3
     poll_interval: 12h
+    kind: blog
+    enabled: true
+
+  # fix-news-sources-and-kind task (2026-08-14). Closes the headline gap this task exists
+  # for: aisec had ZERO kind:news sources before this (67 items — 47 arXiv papers, 20
+  # research-blog posts, newest 93 days old). The four sources below are general
+  # cybersecurity trade press/vendor-research outlets, dual-tagged [cyber, aisec] on the
+  # same precedent as project-zero above: they are not AI-security-exclusive publications,
+  # but AI-security content (prompt injection, LLM/agent vulnerabilities, model-provider
+  # incidents) is a real, regularly-recurring subset of what each one covers — see the
+  # live samples quoted per source below. Every one of the four was live-verified against
+  # the real robots gate (src/fetch/robots.ts's fetchRobots/isAllowed, not judgment) and
+  # for genuinely fresh, parseable content (dates printed) — see
+  # fix-news-sources-and-kind-report.md (.superpowers/sdd/2026-08-14-m3-api-dashboard/,
+  # gitignored, local-only) for the full evidence, including the robots.txt text for
+  # every host in each chain.
+
+  # kind: news — cybersecurity trade press (breaking vulnerability/breach reporting), not a
+  # vendor or personal blog. thehackernews.com's own feed 302-redirects to this exact URL
+  # (feeds.feedburner.com/TheHackersNews) by the publisher's own design — this is the
+  # sanctioned distribution path, not a Reuters-style indirect workaround, and both hosts in
+  # that redirect chain were checked independently: thehackernews.com's robots.txt is
+  # allow-all (bare "Disallow:" under "User-agent: *"), and feeds.feedburner.com's
+  # /robots.txt returns 200 with a generic app-shell HTML body (RaichuFeedServer's catch-all
+  # "lander" page, not a real robots.txt — content-length 0 on a HEAD request, a 114-byte
+  # HTML redirect stub on GET) that contains no "User-agent:" field at all — src/fetch/
+  # robots.ts's isAllowed correctly reads that as silence (RFC 9309: a file that never
+  # mentions an agent says nothing about us), not ambiguity, per that module's own documented
+  # reasoning. Configured directly against feeds.feedburner.com to skip the redirect hop.
+  # Live-verified 2026-08-14, 50 entries, newest 37.8h old at verification time (e.g.
+  # "Attackers Exploit SharePoint Authentication Bypass After Public PoC Re…"), several
+  # AI-security-relevant (e.g. "OpenAI, Anthropic, Google API Flaw Let Weaker AI Models
+  # Decode Stronger…").
+  - id: the-hacker-news
+    name: The Hacker News
+    type: rss
+    url: https://feeds.feedburner.com/TheHackersNews
+    beats: [cyber, aisec]
+    weight: 1.3
+    poll_interval: 2h
+    kind: news
+    enabled: true
+
+  # kind: news — long-established enterprise/cybersecurity trade publication. robots.txt
+  # (www.darkreading.com) allows the general `*` group everywhere except a handful of
+  # operational paths (/search, /api/health, ...), but carries a SEPARATE named group
+  # listing ClaudeBot/Claude-Web/Anthropic-ai/GPTBot/CCBot/etc. with `Disallow: /` — the
+  # same shape as AP's own robots.txt (config/sources.yaml's ap-news entry, and the
+  # `enrichment` field's own doc comment in src/sources/load.ts). Our product token
+  # ("watchfloor") does not match any of those named agents, so the named group never
+  # applies to us and fetching stays permitted — but the SAME "the operator has an opinion
+  # about AI crawlers even though it isn't literally about us" reasoning that put
+  # `enrichment: false` on ap-news applies here too. Set below, not left at the default.
+  # Live-verified 2026-08-14, 50 entries, newest 0.6h old (e.g. "Mission-Driven Security:
+  # Inside a Global Bank's Defense"), AI-security-relevant coverage present (e.g.
+  # "Amid AI-Driven Bug-Hunt Tsunami, NIST Looks to … AI").
+  - id: dark-reading
+    name: Dark Reading
+    type: rss
+    url: https://www.darkreading.com/rss.xml
+    beats: [cyber, aisec]
+    weight: 1.4
+    poll_interval: 2h
+    kind: news
+    enrichment: false
+    enabled: true
+
+  # kind: blog — Rapid7's own security-research team, not third-party reporting (matches
+  # this file's weight-band header, which already groups "vendor research blogs" at
+  # 1.2–1.4). robots.txt (www.rapid7.com) is a plain `*` group disallowing only a handful
+  # of operational paths (no AI-crawler-specific block found). Configured against the
+  # post-redirect URL (the bare /blog/rss/ path 301s here) to avoid an unnecessary hop.
+  # Live-verified 2026-08-14, 20 entries, newest 55.0h old (e.g. "AI is Working in the SOC.
+  # So Why are Security Executives More Worried…" and CVE-2026-63520/SharePoint RCE
+  # analysis — genuinely AI-security-adjacent as well as general vulnerability research).
+  - id: rapid7
+    name: Rapid7 Blog
+    type: rss
+    url: https://www.rapid7.com/rss.xml
+    beats: [cyber, aisec]
+    weight: 1.2
+    poll_interval: 6h
+    kind: blog
+    enabled: true
+
+  # kind: blog — Cisco Talos's own threat-research team, same category as project-zero
+  # above (vendor/company security research, not third-party news). robots.txt
+  # (blog.talosintelligence.com) is the simplest possible allow-all: `User-Agent: * /
+  # Allow: /`, no exceptions of any kind. Configured against the direct feed
+  # (/rss/ — discovered via the site's own <link rel=alternate> tag), not the feedburner
+  # mirror also found live (feeds.feedburner.com/feedburner/Talos also 200s with the same
+  # content) — simpler chain, one host, already fully open.
+  # Live-verified 2026-08-14, 15 entries, newest 26.0h old (e.g. "Curiouser and
+  # Curiouser"), general threat-research cadence (~1 post every 2–3 days).
+  - id: cisco-talos
+    name: Cisco Talos Intelligence Blog
+    type: rss
+    url: https://blog.talosintelligence.com/rss/
+    beats: [cyber, aisec]
+    weight: 1.3
+    poll_interval: 12h
+    kind: blog
     enabled: true
 
   # ---------------------------------------------------------------------------
@@ -215,6 +367,7 @@ sources:
     beats: [ai]
     weight: 0.9
     poll_interval: 1d
+    kind: paper
     enabled: true
 
   - id: simonwillison
@@ -224,6 +377,7 @@ sources:
     beats: [ai]
     weight: 1.4
     poll_interval: 6h
+    kind: blog
     enabled: true
 
   - id: latent-space
@@ -233,6 +387,7 @@ sources:
     beats: [ai]
     weight: 1.2
     poll_interval: 12h
+    kind: blog
     enabled: true
 
   - id: deepmind-blog
@@ -242,6 +397,7 @@ sources:
     beats: [ai]
     weight: 1.4
     poll_interval: 6h
+    kind: blog
     enabled: true
 
   - id: huggingface-blog
@@ -251,6 +407,7 @@ sources:
     beats: [ai]
     weight: 1.2
     poll_interval: 6h
+    kind: blog
     enabled: true
 
   # FIXED 2026-08-14 (fix-hn-algolia-sort task) — Algolia's plain /search endpoint sorts by
@@ -284,6 +441,7 @@ sources:
     beats: [ai]
     weight: 0.9
     poll_interval: 1h
+    kind: aggregator
     filters:
       # min_points is now CONSUMED — via numericFilters=points>50 in the url above, not by
       # any adapter code (src/adapters/json.ts still reads no filter keys for this source;
@@ -293,6 +451,111 @@ sources:
       # later M2 filtering work, matching this source's plan note.
       min_points: 50
       keywords: [ai, llm, "large language model", agent, anthropic, openai, gemini, claude, gpt]
+    enabled: true
+
+  # fix-news-sources-and-kind task (2026-08-14). ai's existing coverage is 5% actual
+  # news/commentary (70 of 1,318 items) — the rest is huggingface-blog tutorials/model
+  # cards (median age 767 days) and arXiv papers. The four sources below were the ones
+  # named as "verified during M1 planning" but never configured; each was re-verified live
+  # against the real robots gate, not the old claim — see fix-news-sources-and-kind-report.md
+  # (.superpowers/sdd/2026-08-14-m3-api-dashboard/, gitignored, local-only) for the full
+  # evidence.
+
+  # kind: news — Ars Technica's AI-category feed, NOT its site-wide /feed/ (verified live:
+  # the site-wide feed mixes in unrelated sections — an all-electric aircraft test flight, a
+  # sports-betting court order — the same beat-pollution risk a merged feed always carries).
+  # robots.txt (arstechnica.com) allows the general `*` group broadly (only wp-admin/
+  # trackback/search-style paths excluded), but — same shape as ap-news and dark-reading
+  # above — carries a separate named group listing ClaudeBot/Claude-SearchBot/Claude-User/
+  # Claude-Web/anthropic-ai/CCBot/PerplexityBot/etc. with `Disallow: /`. Our token doesn't
+  # match those names, so fetching stays permitted, but `enrichment: false` is set for the
+  # same reason it is on ap-news and dark-reading: the operator has a declared opinion about
+  # AI crawlers even though it isn't literally naming ours.
+  # Live-verified 2026-08-14 against /ai/feed/ specifically: newest entry 1.4h old
+  # ("Vulnerability giving attackers full control of Macs is under active ex…"), every
+  # sampled title genuinely AI-related.
+  - id: ars-technica-ai
+    name: Ars Technica — AI
+    type: rss
+    url: https://arstechnica.com/ai/feed/
+    beats: [ai]
+    weight: 1.4
+    poll_interval: 2h
+    kind: news
+    enrichment: false
+    enabled: true
+
+  # kind: news. robots.txt (venturebeat.com) explicitly ALLOWS AI crawlers by name
+  # (Google-Extended, GPTBot, ClaudeBot, Claude-Web, anthropic-ai, PerplexityBot each get
+  # `Allow: /`) — the opposite policy from Ars Technica/Dark Reading/ap-news above, so
+  # `enrichment` is left at its true default.
+  #
+  # IMPORTANT rejected URL, kept here so a future edit doesn't "fix" this back to something
+  # broken: venturebeat.com/category/ai/feed LOOKS like the more precisely-scoped choice and
+  # 200s, but live-verified 2026-08-14 to be STALE — served from a Vercel edge cache
+  # (`x-vercel-cache: HIT`, `age: 277`) frozen at a newest entry of 2026-05-19, three months
+  # stale, reproduced on repeated fetches. This is the exact trap CLAUDE.md's "How to add a
+  # source" warns about: a 200, real, parseable feed that is not sorted/updating the way it
+  # looks. The plain site-wide url below is used instead, verified fresh (newest 23.7h old)
+  # and — VentureBeat's current editorial focus being what it is — every sampled title in it
+  # was already AI content with no keyword filtering needed (e.g. "Three Claude agents given
+  # conflicting orders sabotaged each other on a shared server…", "Google's Gemini 3.7 Flash
+  # targets coding and agents…").
+  - id: venturebeat
+    name: VentureBeat
+    type: rss
+    url: https://venturebeat.com/feed/
+    beats: [ai]
+    weight: 1.3
+    poll_interval: 2h
+    kind: news
+    enabled: true
+
+  # kind: blog — Jack Clark's independent AI-policy/research newsletter (Substack), analysis
+  # and commentary in the author's own voice rather than third-party reporting — same
+  # category as simonwillison/latent-space, not `news`. robots.txt
+  # (importai.substack.com) disallows Substack's own account/session/embed machinery for
+  # the `*` group (nothing that touches /feed) and fully blocks one SEO-scraper bot
+  # (BLEXBot) by name; no AI-crawler-specific restriction found, so `enrichment` stays at
+  # its true default. Actual publishing cadence is roughly weekly (verified entries at
+  # 2026-08-10, 08-03, 07-27, 07-20, 07-06); poll_interval set to 1d to match, generously,
+  # rather than polling many times between real updates.
+  # Live-verified 2026-08-14, 20 entries, newest 103.4h old ("Import AI 468: 23 RSI ideas;
+  # PostTrainBench+; and how trust and transp…").
+  - id: import-ai
+    name: Import AI (Jack Clark)
+    type: rss
+    url: https://importai.substack.com/feed
+    beats: [ai]
+    weight: 1.3
+    poll_interval: 1d
+    kind: blog
+    enabled: true
+
+  # kind: blog — OpenAI's own blog, official first-party announcements, same category as
+  # deepmind-blog/huggingface-blog above, not third-party `news`. robots.txt (openai.com)
+  # is allow-all (`Allow: /`, one unrelated Disallow for /microsoft-for-startups/) — no
+  # AI-crawler restriction, unsurprising for a company whose own products depend on being
+  # crawled; `enrichment` stays at its true default.
+  #
+  # NOTE, not disqualifying: this is a FULL ARCHIVE dump, not a rolling window — 1,129
+  # entries live-verified 2026-08-14, oldest observed pubDate 2015-12-11, and neither ETag
+  # nor Last-Modified is sent (no conditional-GET support observed), so every poll re-reads
+  # the whole ~669 KB body. Comfortably under politeFetch's 5 MiB default ceiling regardless
+  # (no MAX_BYTES_OVERRIDES entry needed), and the same "first ingest pulls in a large
+  # historical batch" shape CISA KEV's 1,665-entry catalog already established as acceptable
+  # — decay handles the old entries at read time, nothing else needs to change.
+  # /blog/rss.xml (the URL named in the plan) 307-redirects to the news/rss.xml url below;
+  # configured directly to skip the hop.
+  # Newest entry at verification time: 33.0h old ("The builder's guide to GPT‑5.6").
+  - id: openai-blog
+    name: OpenAI Blog
+    type: rss
+    url: https://openai.com/news/rss.xml
+    beats: [ai]
+    weight: 1.2
+    poll_interval: 6h
+    kind: blog
     enabled: true
 
   # ---------------------------------------------------------------------------
@@ -306,6 +569,7 @@ sources:
     beats: [usnews]
     weight: 1.8
     poll_interval: 30m
+    kind: news
     # AP's robots.txt blocks AI crawlers by name — AP items must never be sent to an
     # LLM. Validated by the schema now (see fix-enrichment-field-report.md); still not
     # consumed by anything until the enrichment pass ships. See the header comment above.
@@ -340,6 +604,7 @@ sources:
     beats: [usnews]
     weight: 1.6
     poll_interval: 1h
+    kind: news
     enabled: true
 
   - id: pbs-newshour
@@ -349,8 +614,11 @@ sources:
     beats: [usnews]
     weight: 1.6
     poll_interval: 2h
+    kind: news
     enabled: true
 
+  # kind: advisory, not news — a primary-source document feed (the regulation/notice ITSELF,
+  # not journalism about it), the same bucket as CISA/NVD above rather than AP/NPR/PBS.
   - id: federal-register
     name: Federal Register
     type: json
@@ -358,6 +626,7 @@ sources:
     beats: [usnews]
     weight: 2.0
     poll_interval: 3h
+    kind: advisory
     enabled: true
 
   - id: whitehouse-actions
@@ -372,4 +641,7 @@ sources:
     beats: [usnews]
     weight: 2.0
     poll_interval: 1h
+    # kind: advisory, same reasoning as federal-register above — the action ITSELF, not
+    # reporting about it.
+    kind: advisory
     enabled: true

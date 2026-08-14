@@ -181,6 +181,7 @@ import { getClusterSizeAsOf } from '../../cluster/store.ts';
 import { getLatestItemScore, type ItemScoreRow } from '../../score/mechanical.ts';
 import { computeDecayFactor, type DecayConfig } from '../../score/decay.ts';
 import { evaluateOverrides, type OverrideResult, type OverridesConfig } from '../../score/overrides.ts';
+import { KINDS, type Kind, type Source } from '../../sources/load.ts';
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -190,6 +191,17 @@ export interface FeedDeps {
   db: Db;
   decayConfig: DecayConfig;
   overridesConfig: OverridesConfig;
+  /**
+   * The validated source list (normally `config/sources.yaml`, loaded once
+   * at boot via `loadSourcesFile` -- same shape src/api/server.ts already
+   * threads into registerSources/registerDashboard). The ONLY thing this
+   * route reads off it is `kind`, keyed by `id` against each row's
+   * `sourceId` -- everything else about a source (weight, poll_interval,
+   * ...) is irrelevant here. A sourceId with no matching entry (a test
+   * fixture, or a source since removed from config) resolves to `kind:
+   * null` on the wire, never an error -- see `sourceKindById` below.
+   */
+  sources: Source[];
   /**
    * Injectable clock, matching every pure module in this codebase's "now is
    * always a parameter, never read from the system clock internally"
@@ -237,6 +249,11 @@ const FeedCursorPayloadSchema = z
     // 'all' represents the merged (no beat filter) view -- see the module
     // doc comment, "Merged vs. per-beat: ONE endpoint, deliberately".
     beat: z.union([z.enum(BEATS), z.literal('all')]),
+    // Same 'all' convention as `beat` immediately above, for the same
+    // reason: a cursor must pin EVERY filter that shapes the candidate set,
+    // not just some of them, or page 2 could silently widen or narrow the
+    // set page 1 was drawn from.
+    kind: z.union([z.enum(KINDS), z.literal('all')]),
     profile: z.enum(SORT_PROFILES),
     after: CursorAfterSchema,
   })
@@ -363,6 +380,13 @@ interface FeedRow {
   sourceId: string;
   publishedAt: string | null;
   itemType: ItemType;
+  /**
+   * The CONTENT axis, resolved from `sourceId` via `sourceKindById` --
+   * `null` when the source has no `kind` classification or no longer
+   * appears in `deps.sources` at all (nulls stay null, per the wire
+   * convention -- never omitted, never coerced to a guessed value).
+   */
+  kind: Kind | null;
   beats: Beat[];
   entities: string[];
   representativeBeat: Beat;
@@ -435,6 +459,8 @@ function pickBestBeat(
 function buildCandidateRows(
   db: Db,
   beatFilter: Beat | undefined,
+  kindFilter: Kind | undefined,
+  sourceKindById: Map<string, Kind | null>,
   now: string,
   profile: SortProfile,
   decayConfig: DecayConfig,
@@ -462,6 +488,15 @@ function buildCandidateRows(
     const item = getItemAsOf(db, itemKey, now);
     if (!item) continue; // unreachable in practice: the candidate query already bounds fetched_at <= now
 
+    // Resolved once per item, before any scoring work, mirroring beatFilter's
+    // own early-exclusion shape -- an item whose source doesn't match the
+    // requested kind never reaches pickBestBeat/getClusterSizeAsOf at all.
+    // `?? null`, not left undefined: a sourceId absent from sourceKindById
+    // (an unclassified or since-removed source) resolves to `null`, the same
+    // "no classification" answer an unclassified-but-present source gives.
+    const kind = sourceKindById.get(item.sourceId) ?? null;
+    if (kindFilter && kind !== kindFilter) continue;
+
     const firstFetchedAt = getItemFirstFetchedAt(db, itemKey) ?? item.fetchedAt;
 
     const best = pickBestBeat(db, itemKey, item, firstFetchedAt, scoringBeats, now, profile, decayConfig);
@@ -483,6 +518,7 @@ function buildCandidateRows(
       sourceId: item.sourceId,
       publishedAt: item.publishedAt,
       itemType: item.itemType,
+      kind,
       beats: allBeats,
       entities: getItemEntities(db, itemKey),
       representativeBeat: best.beat,
@@ -528,6 +564,10 @@ function toFeedItemJson(row: FeedRow, profile: SortProfile) {
     sourceId: row.sourceId,
     publishedAt: row.publishedAt,
     itemType: row.itemType,
+    // The content-kind axis (news/paper/blog/advisory/aggregator), resolved
+    // from the source's config -- see FeedRow.kind's own doc comment for why
+    // this is `null`, not omitted, when unresolvable.
+    kind: row.kind,
     beats: row.beats,
     entities: row.entities,
     representativeBeat: row.representativeBeat,
@@ -561,6 +601,10 @@ function toFeedItemJson(row: FeedRow, profile: SortProfile) {
 const FeedQuerySchema = z
   .object({
     beat: z.enum(BEATS).optional(),
+    // Composes with `beat` -- "aisec, but only news" is `?beat=aisec&kind=news`, the exact
+    // filter this field exists to make expressible (see config/sources.yaml's header and
+    // src/sources/load.ts's KINDS doc comment for the full "why a new axis" reasoning).
+    kind: z.enum(KINDS).optional(),
     profile: z.enum(SORT_PROFILES).optional(),
     limit: z.coerce.number().int().positive().max(200).optional(),
     cursor: z.string().min(1).optional(),
@@ -578,6 +622,14 @@ const DEFAULT_LIMIT = 50;
 
 export function registerFeed(server: FastifyInstance, deps: FeedDeps): void {
   const nowFn = deps.now ?? (() => new Date().toISOString());
+
+  // Built once at registration, not per-request: `deps.sources` is the
+  // boot-time-loaded config list (server.ts loads it once from
+  // config/sources.yaml), so there is nothing request-scoped to recompute.
+  // `?? null` at read time (see buildCandidateRows) is what actually handles
+  // "no kind classification" -- this map only ever holds the classifications
+  // that DO exist.
+  const sourceKindById = new Map<string, Kind | null>(deps.sources.map((s) => [s.id, s.kind ?? null]));
 
   server.get('/feed', async (request, reply) => {
     const parsedQuery = FeedQuerySchema.safeParse(request.query);
@@ -627,6 +679,10 @@ export function registerFeed(server: FastifyInstance, deps: FeedDeps): void {
         await reply.code(400).send({ error: 'cursor_mismatch', message: '`profile` does not match the cursor' });
         return;
       }
+      if (query.kind !== undefined && query.kind !== cursorPayload.kind) {
+        await reply.code(400).send({ error: 'cursor_mismatch', message: '`kind` does not match the cursor' });
+        return;
+      }
     }
 
     const now = cursorPayload ? cursorPayload.now : (query.now ?? nowFn());
@@ -635,11 +691,25 @@ export function registerFeed(server: FastifyInstance, deps: FeedDeps): void {
         ? undefined
         : cursorPayload.beat
       : query.beat;
+    const kindFilter: Kind | undefined = cursorPayload
+      ? cursorPayload.kind === 'all'
+        ? undefined
+        : cursorPayload.kind
+      : query.kind;
     const profile: SortProfile = cursorPayload ? cursorPayload.profile : (query.profile ?? 'signal');
     const limit = query.limit ?? DEFAULT_LIMIT;
 
     try {
-      const rows = buildCandidateRows(deps.db, beatFilter, now, profile, deps.decayConfig, deps.overridesConfig);
+      const rows = buildCandidateRows(
+        deps.db,
+        beatFilter,
+        kindFilter,
+        sourceKindById,
+        now,
+        profile,
+        deps.decayConfig,
+        deps.overridesConfig,
+      );
       const sorted = [...rows].sort((a, b) => compareRankKey(rankKeyFor(a, profile), rankKeyFor(b, profile)));
 
       const windowRows = cursorPayload
@@ -656,6 +726,7 @@ export function registerFeed(server: FastifyInstance, deps: FeedDeps): void {
           v: 1,
           now,
           beat: beatFilter ?? 'all',
+          kind: kindFilter ?? 'all',
           profile,
           after: lastKey,
         });
@@ -664,6 +735,7 @@ export function registerFeed(server: FastifyInstance, deps: FeedDeps): void {
       await reply.send({
         items: page.map((row) => toFeedItemJson(row, profile)),
         beat: beatFilter ?? null,
+        kind: kindFilter ?? null,
         profile,
         now,
         total: sorted.length,

@@ -173,6 +173,28 @@ on quality. It returns zero articles for an exact-domain AP query, rate-limits t
 five seconds, and its default domain filter is substring-based: a first query appeared to find AP
 articles that were actually from `kelownacapnews.com`.
 
+**All eight `fix-news-sources-and-kind` candidates (2026-08-14) were permitted and are
+configured** — Ars Technica, VentureBeat, Import AI, OpenAI blog (`ai` beat); The Hacker
+News, Dark Reading, Rapid7, Cisco Talos (`cyber`+`aisec`). Every one was re-verified live
+against the real gate (`src/fetch/robots.ts`'s `fetchRobots`/`isAllowed`, not the old "verified
+during M1 planning" claim) and for genuinely fresh, parseable content — full evidence,
+robots.txt text, and printed dates in `fix-news-sources-and-kind-report.md`
+(`.superpowers/sdd/2026-08-14-m3-api-dashboard/`, gitignored, local-only). Nothing here was
+rejected outright; the one URL-level trap below is recorded so a future edit doesn't
+reintroduce it.
+
+**`venturebeat.com/category/ai/feed` — a stale URL, not a rejected source.** This looks like
+the more precisely-scoped choice for the `ai` beat (VentureBeat's site-wide `/feed/` isn't
+topic-restricted), and it 200s with well-formed RSS. Live-verified 2026-08-14 to be frozen
+stale, though: served from a Vercel edge cache (`x-vercel-cache: HIT`, `age: 277`) with a
+newest entry of `2026-05-19T17:45:00Z` — three months old at verification time — reproduced
+on repeated fetches, both with and without the trailing slash. This is the exact trap
+`CLAUDE.md`'s "How to add a source" warning names: a 200, real, parseable feed that is not
+serving newest-first current content. `venturebeat` is configured against the plain
+`https://venturebeat.com/feed/` instead (live-verified fresh, newest entry 23.7h old at
+verification time, and — VentureBeat's current editorial focus being what it is — every
+sampled title was already AI content with no keyword filtering needed).
+
 ---
 
 # Wanted beats — features, not blocked sources

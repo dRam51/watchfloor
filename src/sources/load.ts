@@ -45,6 +45,16 @@ const SourceFiltersSchema = z
   })
   .catchall(z.unknown());
 
+// Source-level CONTENT axis, orthogonal to `beats` (a TOPIC axis). Added by the
+// fix-news-sources-and-kind task: `beat` alone can't express "aisec, but only news" --
+// `item_type` was tried for exactly that job and found effectively binary in practice (M2:
+// `press` matches 0 of 3,325 real items), so this is a new field rather than a repurposing
+// of the old one. See config/sources.yaml's header for the full "why source-level, not
+// item-level" reasoning (short version: a source's kind is stable and honest -- arXiv is
+// always papers -- while an item-level classifier is the exact thing that already failed).
+export const KINDS = ['news', 'paper', 'blog', 'advisory', 'aggregator'] as const;
+export type Kind = (typeof KINDS)[number];
+
 const SourceSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'must be kebab-case'),
   name: z.string().min(1),
@@ -79,6 +89,16 @@ const SourceSchema = z.object({
   filters: SourceFiltersSchema.optional(),
   /** Markets sources only. Drives decay and which consumer sees the item (§5.1). */
   tier: z.enum(['event', 'analysis']).optional(),
+  /**
+   * The content-kind filter -- see KINDS' own doc comment above. Optional, matching
+   * `tier`'s existing precedent (not every source needs one), rather than required like
+   * `enrichment`: this is a read-side filter, not a decision that changes a source's
+   * behavior, so there is no correctness reason to force it onto every hand-built `Source`
+   * fixture across the test suite the way `enrichment`'s universally-applicable default
+   * did. Every REAL entry in config/sources.yaml is still classified explicitly --
+   * "optional in the schema" is not the same claim as "left unclassified in practice".
+   */
+  kind: z.enum(KINDS).optional(),
   // Gates whether this source's items may enter the LLM enrichment pass -- a later
   // milestone. NOTHING reads this field yet (there is no enrichment pass to gate); its
   // job today is narrower: be recorded and validated so a real decision doesn't quietly
