@@ -474,3 +474,137 @@ describe('rate-limit exhaustion', () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 });
+
+describe('conditional requests', () => {
+  it('sends If-None-Match and If-Modified-Since when prior state is supplied', async () => {
+    let received: IncomingHttpHeaders = {};
+    const baseUrl = await serve((req, res) => {
+      received = req.headers;
+      res.writeHead(200, { ...headersOf('repo_200'), 'content-type': 'application/json' });
+      res.end('{}');
+    });
+
+    await new GitHubClient({ baseUrl }).request('/repos/a/b', {
+      etag: captured.repo_200!.etag,
+      lastModified: captured.repo_200!['last-modified'],
+    });
+
+    expect(received['if-none-match']).toBe(captured.repo_200!.etag);
+    expect(received['if-modified-since']).toBe(captured.repo_200!['last-modified']);
+  });
+
+  it('sends no conditional headers when there is no prior state', async () => {
+    let received: IncomingHttpHeaders = {};
+    const baseUrl = await serve((req, res) => {
+      received = req.headers;
+      res.writeHead(200, { ...headersOf('repo_200'), 'content-type': 'application/json' });
+      res.end('{}');
+    });
+
+    await new GitHubClient({ baseUrl }).request('/repos/a/b');
+
+    expect(received['if-none-match']).toBeUndefined();
+    expect(received['if-modified-since']).toBeUndefined();
+  });
+
+  it('resolves a 304 as notModified with a null body rather than throwing', async () => {
+    const baseUrl = await serve((_req, res) => {
+      res.writeHead(304, headersOf('repo_304'));
+      res.end();
+    });
+
+    const response = await new GitHubClient({ baseUrl }).request('/repos/a/b', {
+      etag: captured.repo_200!.etag,
+    });
+
+    expect(response.status).toBe(304);
+    expect(response.notModified).toBe(true);
+    expect(response.data).toBeNull();
+    expect(response.etag).toBe(captured.repo_200!.etag);
+  });
+
+  it('records the budget a 304 consumed — GitHub documents 304s as exempt, but they were not', async () => {
+    // The finding this pins, measured live 2026-08-14: replaying a valid ETag
+    // four times unauthenticated drove x-ratelimit-used 1 -> 2 -> 3 -> 4.
+    // repo_200 was captured at used=1, repo_304 at used=2, on consecutive
+    // requests. Code that assumes a 304 is free will overrun the 60/hour
+    // ceiling, so the client must record what the 304 actually reported.
+    const baseUrl = await serve((_req, res) => {
+      res.writeHead(304, headersOf('repo_304'));
+      res.end();
+    });
+
+    const client = new GitHubClient({ baseUrl });
+    const response = await client.request('/repos/a/b', { etag: captured.repo_200!.etag });
+
+    expect(response.rateLimit).toMatchObject({ used: 2, remaining: 58 });
+    expect(client.budget('core')).toMatchObject({ used: 2, remaining: 58 });
+    // Strictly one lower than the 200 that preceded it — the 304 was billed.
+    expect(Number(captured.repo_200!['x-ratelimit-remaining'])).toBe(59);
+  });
+
+  it('reports a null etag for the Search API, which sends none', async () => {
+    // Not an oversight in the fixture: the Search API answers with
+    // `cache-control: no-cache` and no validator at all, so there is nothing
+    // to store and a later conditional request is impossible. Task 4's search
+    // adapter must not expect to save budget this way.
+    const baseUrl = await serve((_req, res) => {
+      res.writeHead(200, { ...headersOf('search_repositories_200'), 'content-type': 'application/json' });
+      res.end('{}');
+    });
+
+    const response = await new GitHubClient({ baseUrl }).request('/search/repositories?q=topic:mcp');
+
+    expect(response.etag).toBeNull();
+    expect(response.lastModified).toBeNull();
+    expect(captured.search_repositories_200!['cache-control']).toBe('no-cache');
+  });
+});
+
+describe('response parsing', () => {
+  it('returns the parsed JSON body for a 200', async () => {
+    const baseUrl = await serve((_req, res) => {
+      res.writeHead(200, { ...headersOf('repo_200'), 'content-type': 'application/json' });
+      res.end(JSON.stringify(capturedBodies.repo_body));
+    });
+
+    const response = await new GitHubClient({ baseUrl }).request<{ full_name: string; stargazers_count: number }>(
+      '/repos/modelcontextprotocol/servers',
+    );
+
+    expect(response.data?.full_name).toBe('modelcontextprotocol/servers');
+    expect(typeof response.data?.stargazers_count).toBe('number');
+  });
+
+  it('rejects a body that exceeds the byte ceiling instead of buffering it', async () => {
+    const baseUrl = await serve((_req, res) => {
+      res.writeHead(200, { ...headersOf('repo_200'), 'content-type': 'application/json' });
+      res.end('x'.repeat(64 * 1024));
+    });
+
+    await expect(new GitHubClient({ baseUrl }).request('/repos/a/b', { maxBytes: 1024 })).rejects.toThrow(
+      /exceeded the 1024-byte ceiling/,
+    );
+  });
+
+  it('classifies a 5xx as retryable and a 404 as permanent', async () => {
+    const serverError = await serve((_req, res) => {
+      res.writeHead(503, headersOf('repo_200'));
+      res.end('{}');
+    });
+    const notFound = await serve((_req, res) => {
+      res.writeHead(404, headersOf('repo_200'));
+      res.end('{}');
+    });
+
+    const five = await new GitHubClient({ baseUrl: serverError })
+      .request('/repos/a/b')
+      .catch((e: unknown) => e as GitHubApiError);
+    const four = await new GitHubClient({ baseUrl: notFound })
+      .request('/repos/a/b')
+      .catch((e: unknown) => e as GitHubApiError);
+
+    expect(five.retryable).toBe(true);
+    expect(four.retryable).toBe(false);
+  });
+});
