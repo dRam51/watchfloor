@@ -36,15 +36,38 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // src/api/auth.ts for the exemption list and the reasoning behind it.
   registerAuth(server, deps.env.WF_API_TOKEN);
 
+  // `/health` stays at the root, unprefixed and unauthenticated: it is a
+  // liveness probe for process supervision (§12), and a supervisor should not
+  // have to know about an API namespace to ask whether the process is alive.
   registerHealth(server, deps);
 
-  registerFeed(server, {
-    db: deps.db,
-    decayConfig: deps.decayConfig,
-    overridesConfig: deps.overridesConfig,
-  });
+  // Everything else lives under `/api`. Wave 2's three route modules each
+  // registered bare paths (`/feed`, `/dashboard/header`) except sources,
+  // which hardcoded `/api/sources` — an inconsistency that only became
+  // visible once all of them were wired into one server. Applying the prefix
+  // HERE rather than editing each module keeps that decision in one place,
+  // and leaves every route test working against bare paths on its own local
+  // server, since the prefix is a property of this composition rather than of
+  // the routes themselves.
+  //
+  // The namespace is not cosmetic. Task 7 serves the built frontend from this
+  // same origin, so without it a client-side route (`/search` as a UI view)
+  // would collide with an API route of the same name, and the Vite dev proxy
+  // would have no clean pattern to forward.
+  //
+  // The auth hook is registered above at the ROOT instance, so it still
+  // covers everything inside this encapsulated context — Fastify propagates
+  // root hooks down into child scopes, which is why prefixing cannot
+  // accidentally create an unauthenticated namespace.
+  server.register(
+    async (api) => {
+      registerFeed(api, {
+        db: deps.db,
+        decayConfig: deps.decayConfig,
+        overridesConfig: deps.overridesConfig,
+      });
 
-  registerSources(server, { db: deps.db, sources: deps.sources });
+      registerSources(api, { db: deps.db, sources: deps.sources });
 
   // `countFailingSources` is task 5's definition of failing — enabled, and
   // either in an explicit error streak or stale against its OWN configured
@@ -55,13 +78,16 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // would miss the silent-stale case §7 cares most about — a feed that has
   // not succeeded in weeks while reporting zero failures because nothing is
   // polling it.
-  registerDashboard(server, {
-    db: deps.db,
-    sources: deps.sources,
-    countFailingSources,
-  });
+      registerDashboard(api, {
+        db: deps.db,
+        sources: deps.sources,
+        countFailingSources,
+      });
 
-  registerSearch(server, { db: deps.db });
+      registerSearch(api, { db: deps.db });
+    },
+    { prefix: '/api' },
+  );
 
   return server;
 }

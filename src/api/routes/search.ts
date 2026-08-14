@@ -16,17 +16,29 @@ import { searchItems, toSafeMatchQuery } from '../../search/query.ts';
  *
  * `searchItems` already calls it internally and returns `[]` when it yields
  * `null`, which collapses two genuinely different outcomes into one empty
- * array: "your query contained nothing searchable" (someone typed `"` or
- * `AND` or `++`) versus "your query was fine and matched nothing". The UI
- * should say different things in those cases — the first is a malformed
- * query, the second is a real answer.
+ * array: "your query contained nothing to search for" versus "your query was
+ * fine and matched nothing". The UI should say different things there — the
+ * first is unanswerable, the second is a real answer.
  *
- * `toSafeMatchQuery` returning `string | null` is a deliberate signal from its
- * author, so this route calls it first and reports `unsearchable: true` for
- * the null case rather than throwing the distinction away. It is called twice
- * per request in that path (once here, once inside `searchItems`); the second
- * call is skipped because we return early, so there is no wasted work in the
- * common case.
+ * **How narrow that first case actually is.** `toSafeMatchQuery` quotes every
+ * token, which turns FTS5 operators into ordinary literals rather than
+ * rejecting them — verified against the real implementation:
+ *
+ *     'Mangione' -> '"Mangione"'      'AND'    -> '"AND"'
+ *     'AT&T'     -> '"AT&T"'          '***'    -> '"***"'
+ *     'C++'      -> '"C++"'           '   '    -> null
+ *
+ * So `?q=AND` is not malformed at all; it searches for the literal word "AND"
+ * and returns real hits. **Only input that tokenises to nothing — whitespace —
+ * yields `null`.** (An earlier version of this comment claimed `"`, `AND` and
+ * `++` triggered it. They do not; that was wrong, and checking it is what
+ * found the error.) Zod's `.min(1)` does not catch this, because `'   '` has
+ * length 3.
+ *
+ * The branch is therefore rare but real, and confirmed live: `?q=%20%20%20`
+ * returns `unsearchable: true`. `toSafeMatchQuery`'s `string | null` return is
+ * a deliberate signal from its author, so this route preserves it rather than
+ * throwing it away.
  */
 export interface SearchRouteDeps {
   db: Db;

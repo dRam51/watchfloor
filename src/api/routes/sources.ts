@@ -366,7 +366,7 @@ export interface SourcesRouteDeps {
  * note: `server.ts` is being edited by other tasks in parallel.
  */
 export function registerSources(server: FastifyInstance, deps: SourcesRouteDeps): void {
-  server.get('/api/sources', () => {
+  server.get('/sources', () => {
     const now = new Date().toISOString();
     return { sources: getSourcesHealth(deps.db, deps.sources, now) };
   });

@@ -346,20 +346,20 @@ afterEach(() => {
   while (open.length) closeDb(open.pop()!);
 });
 
-describe('GET /api/sources', () => {
+describe('GET /sources', () => {
   it('requires a bearer token, like every other route on this server', async () => {
     const server = buildTestServer(migratedDb(), [buildSource()]);
-    const res = await server.inject({ method: 'GET', url: '/api/sources' });
+    const res = await server.inject({ method: 'GET', url: '/sources' });
     expect(res.statusCode).toBe(401);
     await server.close();
   });
 
   it('does not collide with the public /health path', async () => {
-    // /api/sources must never accidentally match the PUBLIC_PATHS allowlist
+    // /sources must never accidentally match the PUBLIC_PATHS allowlist
     // in src/api/auth.ts, which is an exact-match set containing only
     // '/health'.
     const server = buildTestServer(migratedDb(), [buildSource()]);
-    const res = await server.inject({ method: 'GET', url: '/api/sources' });
+    const res = await server.inject({ method: 'GET', url: '/sources' });
     expect(res.statusCode).toBe(401); // proves it is NOT treated as public
     await server.close();
   });
@@ -377,7 +377,7 @@ describe('GET /api/sources', () => {
     const server = buildTestServer(db, sources);
     const res = await server.inject({
       method: 'GET',
-      url: '/api/sources',
+      url: '/sources',
       headers: { authorization: `Bearer ${TOKEN}` },
     });
 
@@ -405,7 +405,7 @@ describe('GET /api/sources', () => {
 
     const res = await server.inject({
       method: 'GET',
-      url: '/api/sources',
+      url: '/sources',
       headers: { authorization: `Bearer ${TOKEN}` },
     });
 
@@ -426,7 +426,7 @@ describe('GET /api/sources', () => {
 
     const res = await server.inject({
       method: 'GET',
-      url: '/api/sources',
+      url: '/sources',
       headers: { authorization: `Bearer ${TOKEN}` },
     });
 
@@ -450,7 +450,7 @@ describe('GET /api/sources', () => {
 
     const res = await server.inject({
       method: 'GET',
-      url: '/api/sources',
+      url: '/sources',
       headers: { authorization: `Bearer ${TOKEN}` },
     });
 
@@ -474,7 +474,7 @@ describe('GET /api/sources', () => {
 
     const res = await server.inject({
       method: 'GET',
-      url: '/api/sources',
+      url: '/sources',
       headers: { authorization: `Bearer ${TOKEN}` },
     });
 
@@ -497,7 +497,7 @@ describe('GET /api/sources', () => {
 
     const res = await server.inject({
       method: 'GET',
-      url: '/api/sources',
+      url: '/sources',
       headers: { authorization: `Bearer ${TOKEN}` },
     });
 
@@ -517,7 +517,7 @@ describe('GET /api/sources', () => {
 
     const res = await server.inject({
       method: 'GET',
-      url: '/api/sources',
+      url: '/sources',
       headers: { authorization: `Bearer ${TOKEN}` },
     });
 
