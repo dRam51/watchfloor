@@ -185,6 +185,74 @@ sources:
     });
   });
 
+  // M4a task 4: `github_search` has been in the `type` union since M1 with no adapter
+  // behind it. `src/adapters/github.ts` fills that hole, and the topics it searches come
+  // from config, never from code -- so the schema has to be able to express them. Two new
+  // validated `filters` keys, following `languages`' precedent exactly: a key the schema
+  // knows about is checked for real, so a malformed value fails at config load rather than
+  // producing a query that silently matches nothing.
+  describe('filters.topics / filters.min_stars (github_search)', () => {
+    const gh = (filters: string) => `
+sources:
+  - { id: gh, name: GH, type: github_search, url: 'https://api.github.com/search/repositories', beats: [repos], weight: 1, poll_interval: 6h, enabled: true, filters: ${filters} }
+`;
+
+    it('accepts a github_search source whose topics are configured', () => {
+      const sources = loadSources(gh('{ topics: [llm, agents, mcp, ai-security, prompt-injection, netdevops] }'));
+      expect(sources[0]?.filters?.topics).toEqual(['llm', 'agents', 'mcp', 'ai-security', 'prompt-injection', 'netdevops']);
+    });
+
+    it('accepts an optional min_stars quality floor alongside the topics', () => {
+      const sources = loadSources(gh('{ topics: [llm], min_stars: 25 }'));
+      expect(sources[0]?.filters?.min_stars).toBe(25);
+    });
+
+    // A github_search source with no topics has nothing to search: it would poll, spend
+    // rate-limit budget, and return zero repos forever -- indistinguishable from a quiet
+    // source. Loud at config load instead, which is the same standard `languages: []` is
+    // held to just above.
+    it('rejects a github_search source with no topics at all', () => {
+      const yaml = `
+sources:
+  - { id: gh, name: GH, type: github_search, url: 'https://api.github.com/search/repositories', beats: [repos], weight: 1, poll_interval: 6h, enabled: true }
+`;
+      expect(() => loadSources(yaml)).toThrow(/topics/);
+    });
+
+    it('rejects a github_search source whose filters map omits topics', () => {
+      expect(() => loadSources(gh('{ min_stars: 25 }'))).toThrow(/topics/);
+    });
+
+    it('rejects an empty topics list -- searching no topics is what `enabled: false` is for', () => {
+      expect(() => loadSources(gh('{ topics: [] }'))).toThrow(SourceConfigError);
+    });
+
+    // GitHub lowercases every topic it stores, so `LLM` or `Prompt Injection` in config
+    // would build a query that returns nothing at all, with no error anywhere. Same class
+    // of silent-nothing failure the uppercase language-code check above prevents.
+    it.each(['LLM', 'Prompt Injection', 'prompt_injection', '-leading-hyphen', 'trailing/slash'])(
+      'rejects the malformed topic slug %j',
+      (topic) => {
+        expect(() => loadSources(gh(`{ topics: ['${topic}'] }`))).toThrow(SourceConfigError);
+      },
+    );
+
+    it.each([-1, 0.5, '"ten"'])('rejects a min_stars of %s', (minStars) => {
+      expect(() => loadSources(gh(`{ topics: [llm], min_stars: ${minStars} }`))).toThrow(SourceConfigError);
+    });
+
+    // The requirement is scoped to github_search alone: every other source type is
+    // untouched by it, including one that carries a `filters` map for another purpose.
+    it('does not require topics on any other source type', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true }
+  - { id: b, name: B, type: news_sitemap, url: 'https://b.test/s.xml', beats: [usnews], weight: 1, poll_interval: 30m, enabled: true, filters: { languages: [eng] } }
+`;
+      expect(loadSources(yaml)).toHaveLength(2);
+    });
+  });
+
   // fix-news-sources-and-kind task: `beat` is a TOPIC axis (aisec, ai, ...); `kind` is a
   // CONTENT axis (news vs. paper vs. blog vs. advisory vs. aggregator) -- orthogonal to
   // beat, and the thing that actually lets the owner ask for "aisec, but only news".

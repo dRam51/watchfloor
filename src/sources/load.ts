@@ -20,6 +20,18 @@ export class SourceConfigError extends Error {
 // evidence AP (or the schema) ever emits another case to accommodate.
 const LANGUAGE_CODE_RE = /^[a-z]{3}$/;
 
+// GitHub's own topic-slug rule, quoted rather than invented: a topic name is at most 50
+// characters and "can only contain lowercase letters, numbers, and hyphens, and must start
+// with a letter or number." Deliberately the same shape as the `id` regex below, for the
+// same reason it is validated at all: GitHub LOWERCASES every topic it stores, so a config
+// entry of `LLM` or `Prompt Injection` builds a search query that returns zero repos, with
+// no error, no null, and no malformed row anywhere -- the identical silent-nothing failure
+// the uppercase check on `languages` above exists to prevent, and a close cousin of the
+// sort trap CLAUDE.md records for nvd-cve and hn-algolia. Failing at config load is the
+// only place this is visible.
+const GITHUB_TOPIC_RE = /^[a-z0-9][a-z0-9-]*$/;
+const GITHUB_TOPIC_MAX_LENGTH = 50;
+
 // `filters` stays the free-form, per-source-type map the header comment always promised
 // (`keywords` for arxiv-cs-cr, `min_points`+`keywords` for hn-algolia -- neither consumed
 // yet, both still forward documentation) -- `.catchall(z.unknown())` keeps every OTHER key
@@ -41,6 +53,35 @@ const SourceFiltersSchema = z
           ),
       )
       .min(1, 'languages, if present, must list at least one language code -- an empty allow-list would silently drop every entry (use enabled: false to stop polling a source entirely)')
+      .optional(),
+    // M4a task 4. `github_search` only. The GitHub topics `src/adapters/github.ts` builds
+    // one search query pair per, so §4's topic list ("llm, agents, mcp, rag, ai-security,
+    // prompt-injection, llmops, network-automation, netdevops") lives in config, never in
+    // adapter code -- adding or dropping a topic is a config edit, exactly like adding a
+    // source. Required for `github_search` (enforced by the superRefine on SourceSchema
+    // below, not here, since this schema cannot see the source's `type`).
+    topics: z
+      .array(
+        z
+          .string()
+          .max(GITHUB_TOPIC_MAX_LENGTH, `a GitHub topic is at most ${GITHUB_TOPIC_MAX_LENGTH} characters`)
+          .regex(
+            GITHUB_TOPIC_RE,
+            'must be a GitHub topic slug: lowercase letters, numbers and hyphens only, starting with a letter or number (GitHub lowercases every topic it stores, so "LLM" or "Prompt Injection" would query for something that cannot exist)',
+          ),
+      )
+      .min(1, 'topics, if present, must list at least one topic -- a github_search source with no topics polls, spends rate-limit budget, and returns nothing forever (use enabled: false to stop polling a source entirely)')
+      .optional(),
+    // M4a task 4. `github_search` only: the star floor applied SERVER-SIDE, as a
+    // `stars:>=N` qualifier in the search query -- the same enforcement route hn-algolia's
+    // own `min_points` takes (via `numericFilters=points>50` in its url, not adapter code),
+    // and the reason neither reports anything through `AdapterResult.filtered`: nothing is
+    // fetched and then discarded, so there is nothing to count. Optional; the adapter owns
+    // the default and documents the evidence behind it.
+    min_stars: z
+      .number()
+      .int('min_stars must be a whole number of stars')
+      .min(0, 'min_stars must not be negative')
       .optional(),
   })
   .catchall(z.unknown());
@@ -120,7 +161,30 @@ const SourceSchema = z.object({
   // encoded had zero effect. Defaults to `true` so every existing source stays
   // enrichment-eligible unless explicitly opted out.
   enrichment: z.boolean().default(true),
-});
+})
+  // M4a task 4. The only cross-field rule in this schema, and it earns its place: a
+  // `github_search` source's ENTIRE input is its topic list (the url is one fixed search
+  // endpoint), so one with no `filters.topics` is not a misconfiguration that degrades --
+  // it polls on schedule, spends rate-limit budget from a 10-request-per-minute
+  // unauthenticated ceiling, and yields zero repos forever, which on a source-health page
+  // is indistinguishable from a quiet source. Every other source type carries its own
+  // query in its url and is completely unaffected by this.
+  //
+  // Deliberately NOT expressed as a discriminated union on `type`: that would restructure
+  // a schema six other modules' fixtures are built against, to state one requirement that
+  // applies to one value of one field.
+  .superRefine((source, ctx) => {
+    if (source.type === 'github_search' && source.filters?.topics === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['filters', 'topics'],
+        message:
+          'a github_search source must configure filters.topics -- the topic list is the ' +
+          'only input its search query has, so without one it would poll, spend rate-limit ' +
+          'budget, and return nothing forever',
+      });
+    }
+  });
 
 const FileSchema = z.object({ sources: z.array(SourceSchema).min(1) });
 
