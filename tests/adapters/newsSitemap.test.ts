@@ -195,6 +195,47 @@ function makeMixedCapBody(datedCount: number): string {
   </urlset>`;
 }
 
+/**
+ * Builds a synthetic body for the language-filter/cap ordering test: `spaCount`
+ * Spanish-language entries dated NEWER than every one of `engCount` English-language
+ * entries (English entries descend one day apart starting at `base`, same convention as
+ * makeManyEntriesBody; Spanish entries are dated `base + (i+1) days`, ahead of the whole
+ * English range rather than just ahead of one or two entries). Spanish entries are
+ * spliced near the front of the file (index 3), same "don't just append at the end"
+ * discipline as makeMixedCapBody above, so a regression that happened to process entries
+ * in file order would not accidentally get the right answer.
+ */
+function makeLanguageOrderingBody(engCount: number, spaCount: number): string {
+  const base = Date.UTC(2026, 7, 13, 0, 0, 0); // 2026-08-13T00:00:00Z
+  const spanish = Array.from({ length: spaCount }, (_, i) => {
+    const date = new Date(base + (i + 1) * 24 * 60 * 60 * 1000).toISOString();
+    return `<url>
+      <loc>https://example.test/article/spa-${i}</loc>
+      <news:news>
+        <news:publication><news:name>Associated Press</news:name><news:language>spa</news:language></news:publication>
+        <news:publication_date>${date}</news:publication_date>
+        <news:title>Spa ${i}</news:title>
+      </news:news>
+    </url>`;
+  });
+  const english = Array.from({ length: engCount }, (_, i) => {
+    const date = new Date(base - i * 24 * 60 * 60 * 1000).toISOString();
+    return `<url>
+      <loc>https://example.test/article/eng-${i}</loc>
+      <news:news>
+        <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+        <news:publication_date>${date}</news:publication_date>
+        <news:title>Eng ${i}</news:title>
+      </news:news>
+    </url>`;
+  });
+  const entries = english.slice();
+  entries.splice(3, 0, ...spanish);
+  return `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+    ${entries.join('\n')}
+  </urlset>`;
+}
+
 // ---------------------------------------------------------------------------
 
 describe('newsSitemapAdapter', () => {
@@ -420,6 +461,180 @@ describe('newsSitemapAdapter', () => {
       // undated entries always lose.
       for (let i = MAX_ITEMS_PER_FETCH; i < datedCount; i++) {
         expect(titles.has(`Dated ${i}`)).toBe(false);
+      }
+    });
+  });
+
+  // fix-ap-language-filter task: the owner decided Spanish AP entries must be dropped at
+  // ingest and never stored, driven by config/sources.yaml's `filters.languages` allow-list
+  // -- never a hardcoded language check. See src/sources/load.ts for the Zod validation of
+  // that field and src/adapters/types.ts for why the exclusion count is reported through a
+  // new `filtered` field on AdapterResult, deliberately distinct from `skipped` (defective
+  // entries) and `capped` (volume policy).
+  describe('language filtering (filters.languages)', () => {
+    it('drops entries whose declared language is not in filters.languages, and reports the exact count via `filtered`', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/xml; charset=UTF-8' });
+        res.end(fixture('apnews-news-sitemap.xml'));
+      });
+
+      const result = await newsSitemapAdapter.fetch(
+        makeSource({ url: `${baseUrl}/sitemap`, filters: { languages: ['eng'] } }),
+        null,
+      );
+
+      // Real, captured fixture: 55 entries total, 32 declared eng, 23 declared spa, 0
+      // missing a declared language (see this task's report for the count derivation).
+      // A filter that silently passed everything through would report items: 55 here --
+      // this is the assertion that would catch that regression.
+      expect(result.items).toHaveLength(32);
+      expect(result.filtered).toBe(23);
+      // Structural validity (skipped) is a completely separate axis -- every one of these
+      // 55 entries parsed fine, language-excluded or not.
+      expect(result.skipped).toBe(0);
+
+      // A known Spanish entry, asserted present-and-Spanish by the real-fixture test
+      // above, must be gone.
+      expect(result.items.some((i) => i.url.includes('mali-soldados-secuestrados'))).toBe(false);
+      // A known English entry from the same fixture must survive untouched.
+      const survivor = result.items.find((i) =>
+        i.url.includes('trump-news-midterms-primaries-updates-08-12-2026'),
+      );
+      expect(survivor).toBeDefined();
+      expect(survivor?.title).toBe("White House press secretary Karoline Leavitt will leave at month's end");
+    });
+
+    it('keeps every entry and leaves `filtered` undefined when the source has no language filter configured (permissive default)', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/xml; charset=UTF-8' });
+        res.end(fixture('apnews-news-sitemap.xml'));
+      });
+
+      // makeSource()'s default carries no `filters` at all -- absence of config, not an
+      // implicit "English only" default.
+      const result = await newsSitemapAdapter.fetch(makeSource({ url: `${baseUrl}/sitemap` }), null);
+
+      expect(result.items).toHaveLength(55);
+      expect(result.filtered).toBeUndefined();
+      // The 23 real Spanish entries are still present -- proving this is genuinely "no
+      // filtering happened", not a filter that happens to allow everything through by
+      // coincidence.
+      expect(result.items.some((i) => i.url.includes('mali-soldados-secuestrados'))).toBe(true);
+    });
+
+    it('keeps an entry whose language cannot be determined (missing or blank <news:language>) rather than dropping it -- and does not count it as filtered', async () => {
+      const baseUrl = await serveBody(
+        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+          <url>
+            <loc>https://example.test/article/eng</loc>
+            <news:news>
+              <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+              <news:title>Entry Eng</news:title>
+            </news:news>
+          </url>
+          <url>
+            <loc>https://example.test/article/spa</loc>
+            <news:news>
+              <news:publication><news:name>Associated Press</news:name><news:language>spa</news:language></news:publication>
+              <news:title>Entry Spa</news:title>
+            </news:news>
+          </url>
+          <url>
+            <loc>https://example.test/article/no-language-element</loc>
+            <news:news>
+              <news:publication><news:name>Associated Press</news:name></news:publication>
+              <news:title>Entry No Language Element</news:title>
+            </news:news>
+          </url>
+          <url>
+            <loc>https://example.test/article/blank-language</loc>
+            <news:news>
+              <news:publication><news:name>Associated Press</news:name><news:language></news:language></news:publication>
+              <news:title>Entry Blank Language</news:title>
+            </news:news>
+          </url>
+        </urlset>`,
+        { headers: { 'Content-Type': 'text/xml' } },
+      );
+
+      const result = await newsSitemapAdapter.fetch(
+        makeSource({ url: `${baseUrl}/sitemap`, filters: { languages: ['eng'] } }),
+        null,
+      );
+
+      // Only the one entry with a POSITIVELY DECLARED, disallowed language is excluded.
+      // Not knowing a language is a harsher failure to get wrong than keeping an entry
+      // that turns out to be undesired -- so both the missing-element and blank-element
+      // entries survive alongside the declared-English one.
+      expect(result.items).toHaveLength(3);
+      const titles = new Set(result.items.map((i) => i.title));
+      expect(titles.has('Entry Eng')).toBe(true);
+      expect(titles.has('Entry No Language Element')).toBe(true);
+      expect(titles.has('Entry Blank Language')).toBe(true);
+      expect(titles.has('Entry Spa')).toBe(false);
+
+      // Exactly the one positively-Spanish entry counts as filtered -- the two
+      // undetermined-language entries must not inflate this count.
+      expect(result.filtered).toBe(1);
+      expect(result.skipped).toBe(0);
+    });
+
+    it('leaves `filtered` undefined rather than a fabricated 0 when a language filter is configured but nothing needed excluding this fetch', async () => {
+      const baseUrl = await serveBody(
+        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+          <url>
+            <loc>https://example.test/article/one</loc>
+            <news:news>
+              <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+              <news:title>Entry One</news:title>
+            </news:news>
+          </url>
+          <url>
+            <loc>https://example.test/article/two</loc>
+            <news:news>
+              <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+              <news:title>Entry Two</news:title>
+            </news:news>
+          </url>
+        </urlset>`,
+        { headers: { 'Content-Type': 'text/xml' } },
+      );
+
+      const result = await newsSitemapAdapter.fetch(
+        makeSource({ url: `${baseUrl}/sitemap`, filters: { languages: ['eng'] } }),
+        null,
+      );
+
+      expect(result.items).toHaveLength(2);
+      expect(result.filtered).toBeUndefined();
+    });
+
+    it('excludes disallowed-language entries BEFORE the recency cap runs, so they never occupy cap headroom that a valid entry could use', async () => {
+      // 10 Spanish entries dated NEWER than every one of 155 English entries -- a
+      // recency-only ranking that ignored language would rank all 10 above every single
+      // English entry. If this adapter capped first and filtered language second, those
+      // 10 would win cap slots, get filtered out afterward, and leave only 140 items
+      // -- fewer than MAX_ITEMS_PER_FETCH even though 155 valid English entries exist to
+      // fill it. Filtering language first is the only way to land on exactly 150.
+      const engCount = MAX_ITEMS_PER_FETCH + 5;
+      const spaCount = 10;
+      const body = makeLanguageOrderingBody(engCount, spaCount);
+      const baseUrl = await serveBody(body, { headers: { 'Content-Type': 'text/xml' } });
+
+      const result = await newsSitemapAdapter.fetch(
+        makeSource({ url: `${baseUrl}/sitemap`, filters: { languages: ['eng'] } }),
+        null,
+      );
+
+      expect(result.items).toHaveLength(MAX_ITEMS_PER_FETCH);
+      expect(result.skipped).toBe(0);
+      expect(result.filtered).toBe(spaCount);
+      expect(result.capped).toBe(engCount - MAX_ITEMS_PER_FETCH);
+
+      const titles = result.items.map((i) => i.title);
+      expect(titles.every((t) => t.startsWith('Eng '))).toBe(true);
+      for (let i = 0; i < MAX_ITEMS_PER_FETCH; i++) {
+        expect(titles).toContain(`Eng ${i}`);
       }
     });
   });

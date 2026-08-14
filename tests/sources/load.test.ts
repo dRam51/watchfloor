@@ -118,6 +118,73 @@ sources:
     });
   });
 
+  // fix-ap-language-filter task: `filters` was already legal, free-form YAML (the header
+  // comment called it "NOT YET CONSUMED by any M1 adapter"). This task makes news_sitemap
+  // the first real consumer, via `filters.languages` -- an allow-list of ISO 639-2/B
+  // three-letter codes an entry's declared <news:language> must appear in to survive.
+  // Malformed here must fail at load, exactly like every other source-config error (weight,
+  // poll_interval, beats, enrichment) -- never discovered later at fetch time.
+  describe('filters.languages', () => {
+    it('accepts a languages allow-list of valid ISO 639-2/B codes', () => {
+      const yaml = `
+sources:
+  - { id: ap-news, name: AP News, type: news_sitemap, url: 'https://apnews.test/sitemap.xml', beats: [usnews], weight: 1, poll_interval: 30m, enabled: true, filters: { languages: [eng] } }
+`;
+      const sources = loadSources(yaml);
+      expect(sources[0]?.filters).toEqual({ languages: ['eng'] });
+    });
+
+    it('accepts more than one language code in the allow-list', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: news_sitemap, url: 'https://a.test/f', beats: [usnews], weight: 1, poll_interval: 30m, enabled: true, filters: { languages: [eng, spa] } }
+`;
+      const sources = loadSources(yaml);
+      expect(sources[0]?.filters).toEqual({ languages: ['eng', 'spa'] });
+    });
+
+    it('still accepts a filters map with no languages key at all (e.g. arxiv-cs-cr\'s keywords-only filter)', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [aisec], weight: 1, poll_interval: 1d, enabled: true, filters: { keywords: [jailbreak, agent] } }
+`;
+      const sources = loadSources(yaml);
+      expect(sources[0]?.filters).toEqual({ keywords: ['jailbreak', 'agent'] });
+    });
+
+    it('rejects a two-letter language code -- the sitemap declares ISO 639-2/B (three-letter), not ISO 639-1', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: news_sitemap, url: 'https://a.test/f', beats: [usnews], weight: 1, poll_interval: 30m, enabled: true, filters: { languages: [en] } }
+`;
+      expect(() => loadSources(yaml)).toThrow(SourceConfigError);
+    });
+
+    it('rejects an uppercase language code -- the sitemap always emits lowercase', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: news_sitemap, url: 'https://a.test/f', beats: [usnews], weight: 1, poll_interval: 30m, enabled: true, filters: { languages: [ENG] } }
+`;
+      expect(() => loadSources(yaml)).toThrow(SourceConfigError);
+    });
+
+    it('rejects an empty languages array -- an allow-list of nothing silently drops every entry, which is what `enabled: false` is for', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: news_sitemap, url: 'https://a.test/f', beats: [usnews], weight: 1, poll_interval: 30m, enabled: true, filters: { languages: [] } }
+`;
+      expect(() => loadSources(yaml)).toThrow(SourceConfigError);
+    });
+
+    it('rejects a non-array languages value', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: news_sitemap, url: 'https://a.test/f', beats: [usnews], weight: 1, poll_interval: 30m, enabled: true, filters: { languages: eng } }
+`;
+      expect(() => loadSources(yaml)).toThrow(SourceConfigError);
+    });
+  });
+
   // M1 task 11: the real config grew from one placeholder entry to the full verified
   // set. `loadSourcesFile` already rejects the whole file if a SINGLE entry is
   // malformed (FileSchema is `z.array(SourceSchema)`, parsed atomically), so the two
@@ -191,6 +258,17 @@ sources:
       const apNews = sources.find((s) => s.id === 'ap-news');
       expect(apNews).toBeDefined();
       expect(apNews?.enrichment).toBe(false);
+    });
+
+    // Pinned regression for the fix-ap-language-filter task, same shape as the enrichment
+    // pin above: this is the exact field that makes AP's Spanish wire copy never reach
+    // storage. A `z.record(z.unknown())` filters schema would have silently accepted this
+    // key without validating it at all -- this fails loudly if a future config edit ever
+    // drops or malforms it, instead of AP quietly going back to ingesting Spanish articles.
+    it('has filters.languages: [eng] on ap-news', () => {
+      const apNews = sources.find((s) => s.id === 'ap-news');
+      expect(apNews).toBeDefined();
+      expect(apNews?.filters).toEqual({ languages: ['eng'] });
     });
   });
 });

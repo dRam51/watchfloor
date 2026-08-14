@@ -75,6 +75,41 @@
  * recoverAbsorbedEntries below detects it and re-parses the recovered
  * siblings as their own entries, so nothing is lost.
  * ---------------------------------------------------------------------------
+ *
+ * ---------------------------------------------------------------------------
+ * Language filtering -- dropped at ingest, never stored (fix-ap-language-filter task)
+ * ---------------------------------------------------------------------------
+ * Each <url> entry's <news:news><news:publication> block carries a
+ * <news:language> ISO 639-2/B three-letter code -- "eng", "spa" -- alongside
+ * <news:name>. Live-verified: roughly a third of AP's sitemap output is
+ * Spanish, much of it a same-day duplicate of an English story under a
+ * different URL, which word-level trigram clustering (src/cluster/) cannot
+ * associate and the interest profile (src/interests/) cannot suppress (it
+ * matches English keyword terms).
+ *
+ * The owner's decision, explicit and irreversible by design: config's
+ * `filters.languages` (`config/sources.yaml`, an allow-list validated by
+ * src/sources/load.ts) drops any entry whose declared language is not in the
+ * list, here, before the entry is ever normalized or stored -- never stored
+ * with a language tag for later read-time suppression. Absence of
+ * `filters.languages` on a source means no filtering at all, never an
+ * implicit English-only default (see filterByLanguage's own doc comment for
+ * the exact mechanics, and its permissive-default tests).
+ *
+ * An entry whose language cannot be determined -- no <news:publication>, no
+ * <news:language>, or a blank one -- is always KEPT regardless of the
+ * allow-list, never dropped: see languageOf and filterByLanguage's doc
+ * comments for why that asymmetry (undetermined is safer to keep than to
+ * guess-and-drop) is deliberate. Real AP entries always declare a language in
+ * practice, so this path is a defensive fallback, not the common case.
+ *
+ * Runs BEFORE the item cap (MAX_ITEMS_PER_FETCH below), and the excluded
+ * count is reported through AdapterResult.filtered, never `skipped` (which
+ * means "defective," not "excluded by policy") or `capped` (which is pinned
+ * to a volume-only, OLD-end-of-range meaning a content decision would
+ * violate) -- see that field's doc comment in types.ts for the full
+ * reasoning on both.
+ * ---------------------------------------------------------------------------
  */
 
 import { XMLParser } from 'fast-xml-parser';
@@ -227,6 +262,29 @@ function parseUrlEntry(entry: unknown): RawItem | null {
   };
 }
 
+/**
+ * Extracts a <url> entry's declared <news:language> (nested under
+ * <news:news><news:publication>, e.g. "eng" or "spa" -- see the module doc comment's
+ * real-entry example), or `null` when it cannot be determined: no <news:news> block, no
+ * <news:publication> block, no <news:language> element at all, or a present-but-blank
+ * one. `null` deliberately means "undetermined," not "excluded" -- see
+ * `filterByLanguage` below for why those two are never treated the same.
+ *
+ * Takes `unknown` (not `XmlNode`) so it can be called directly on a `RawItem.raw` value
+ * from `filterByLanguage` -- `RawItem.raw` is typed `unknown` by `src/normalize/item.ts`
+ * (off-limits to this task), so re-narrowing here is this adapter's own job, exactly as
+ * `parseUrlEntry` above does for the same value one step earlier.
+ */
+function languageOf(entry: unknown): string | null {
+  if (!isXmlNode(entry)) return null;
+  const news = entry['news:news'];
+  if (!isXmlNode(news)) return null;
+  const publication = news['news:publication'];
+  if (!isXmlNode(publication)) return null;
+  const language = textOf(publication['news:language']);
+  return isBlank(language) ? null : language;
+}
+
 // ---------------------------------------------------------------------------
 // Recovering entries absorbed by a genuinely unclosed element -- see the
 // module doc comment's final section. Generalized from rss.ts's
@@ -307,6 +365,63 @@ function parseSitemapBody(body: string, url: string): ParseEntriesResult {
 }
 
 // ---------------------------------------------------------------------------
+// Language filtering -- config/sources.yaml's `filters.languages` allow-list
+// (validated by src/sources/load.ts). The owner's explicit decision: AP's
+// Spanish-language entries are dropped here, at ingest, and never stored --
+// not tagged and suppressed later at read time. Runs BEFORE the item cap
+// below (see fetch()'s call order), so a disallowed-language entry can never
+// occupy a cap slot a valid entry could have used -- see the ordering test in
+// tests/adapters/newsSitemap.test.ts for the concrete failure mode that
+// ordering avoids.
+// ---------------------------------------------------------------------------
+
+/** `filterByLanguage`'s return shape -- see AdapterResult.filtered (types.ts) for why the count travels separately from `items` rather than being reconstructed by the caller as `before.length - after.length`. */
+interface LanguageFilterResult {
+  items: RawItem[];
+  filtered: number;
+}
+
+/**
+ * Keeps only items whose declared language (see `languageOf` above) is in
+ * `allowedLanguages`, EXCEPT an item whose language cannot be determined at
+ * all -- `languageOf` returning `null` -- which always survives regardless of
+ * the allow-list. That asymmetry is deliberate, not an oversight: dropping an
+ * entry because this adapter could not tell what language it was written in
+ * is a harsher, less recoverable failure than keeping one whose language
+ * simply couldn't be confirmed, since a dropped entry is gone for good (see
+ * `items`' append-only storage) while a kept one is merely a false negative
+ * for this one filter. Real AP entries always declare a language (see the
+ * module doc comment), so this path is a defensive fallback for a field the
+ * Google News sitemap spec requires but this adapter does not blindly trust
+ * every document to actually carry, not the common case.
+ *
+ * `allowedLanguages` absent, or present but empty (unreachable through
+ * src/sources/load.ts's Zod validation, which rejects an empty array at
+ * config load -- guarded here anyway since a test can construct a `Source`
+ * directly without going through the loader), both mean "no restriction":
+ * every item survives and `filtered` is `0`, matching `config/sources.yaml`
+ * carrying no `filters.languages` key at all for every source but `ap-news`
+ * as of this task.
+ */
+function filterByLanguage(items: RawItem[], allowedLanguages: readonly string[] | undefined): LanguageFilterResult {
+  if (allowedLanguages === undefined || allowedLanguages.length === 0) {
+    return { items, filtered: 0 };
+  }
+  const allowed = new Set(allowedLanguages);
+  const kept: RawItem[] = [];
+  let filtered = 0;
+  for (const item of items) {
+    const language = languageOf(item.raw);
+    if (language === null || allowed.has(language)) {
+      kept.push(item);
+    } else {
+      filtered++;
+    }
+  }
+  return { items: kept, filtered };
+}
+
+// ---------------------------------------------------------------------------
 // The item cap -- see MAX_ITEMS_PER_FETCH's doc comment for the chosen value
 // and rationale.
 // ---------------------------------------------------------------------------
@@ -368,22 +483,41 @@ export const newsSitemapAdapter: Adapter = {
     }
 
     const parsed = parseSitemapBody(fetchResult.body, source.url);
-    // The cap is applied to `items` only -- `skipped` reports genuine
-    // per-entry defects (see parseUrlEntry) and an EntryParser-throw
-    // backstop (see parseEntries in types.ts), NEVER entries trimmed by the
-    // cap. Conflating the two would make source health read a healthy,
-    // working-as-designed AP poll as "the parser is broken" every single
-    // run, since 585 real entries against a 150 cap would otherwise report
-    // skipped: ~435 forever.
-    const cappedItems = capToMostRecent(parsed.items, MAX_ITEMS_PER_FETCH);
-    const trimmedByCap = parsed.items.length - cappedItems.length;
 
-    const result = fetchedResult(fetchResult, { items: cappedItems, skipped: parsed.skipped });
-    // `capped` stays undefined (not a fabricated 0) whenever the cap didn't
-    // actually remove anything this fetch -- same "undefined means nothing
-    // to report" convention AdapterResult.skipped already uses. See that
-    // field's doc comment in types.ts for why this must never be folded
-    // into `skipped` itself.
-    return trimmedByCap > 0 ? { ...result, capped: trimmedByCap } : result;
+    // Language filtering runs BEFORE the cap, deliberately -- see this
+    // section's own header comment above filterByLanguage for why the order
+    // matters (a disallowed-language entry must never be able to occupy cap
+    // headroom a valid entry could have used). `source.filters?.languages` is
+    // `undefined` for every source that configures no `filters.languages` key
+    // (permissive default: nothing is filtered, never an implicit
+    // English-only assumption) -- see src/sources/load.ts for the Zod
+    // validation that guarantees this is either absent or a nonempty array of
+    // three-letter codes by the time it reaches here.
+    const languageFiltered = filterByLanguage(parsed.items, source.filters?.languages);
+
+    // The cap is applied to the language-filtered `items` only -- `skipped`
+    // reports genuine per-entry defects (see parseUrlEntry) and an
+    // EntryParser-throw backstop (see parseEntries in types.ts), NEVER
+    // entries trimmed by the cap OR excluded by the language filter.
+    // Conflating skipped with the cap would make source health read a
+    // healthy, working-as-designed AP poll as "the parser is broken" every
+    // single run, since 585 real entries against a 150 cap would otherwise
+    // report skipped: ~435 forever; conflating it with the language filter
+    // would do the same to a poll that is correctly filtering exactly as
+    // configured. See AdapterResult.filtered's doc comment (types.ts) for the
+    // full reasoning on why that exclusion gets its own field rather than
+    // reusing either existing one.
+    const cappedItems = capToMostRecent(languageFiltered.items, MAX_ITEMS_PER_FETCH);
+    const trimmedByCap = languageFiltered.items.length - cappedItems.length;
+
+    let result = fetchedResult(fetchResult, { items: cappedItems, skipped: parsed.skipped });
+    // `capped` and `filtered` both stay undefined (not a fabricated 0)
+    // whenever their respective mechanism didn't actually remove anything
+    // this fetch -- same "undefined means nothing to report" convention
+    // AdapterResult.skipped already uses. See each field's own doc comment in
+    // types.ts for why this must never be folded into `skipped` itself.
+    if (trimmedByCap > 0) result = { ...result, capped: trimmedByCap };
+    if (languageFiltered.filtered > 0) result = { ...result, filtered: languageFiltered.filtered };
+    return result;
   },
 };

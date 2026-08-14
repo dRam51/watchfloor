@@ -17,9 +17,26 @@
 #
 # Optional:
 #
-#   filters       free-form map, interpreted per source type. NOT YET CONSUMED by any
-#                 M1 adapter (src/adapters/*.ts always fetch `url` verbatim) — present here
-#                 only as forward documentation of intent for M2 scoring/filtering.
+#   filters       free-form map, interpreted per source type. Validated by
+#                 src/sources/load.ts's Zod schema on a per-key basis — a key the schema
+#                 knows about is checked for real (a malformed value fails config load, not
+#                 just fetch-time silence); every other key stays free-form and is passed
+#                 through unvalidated. As of fix-ap-language-filter, ONE key is actually
+#                 consumed:
+#                   languages   news_sitemap only. Allow-list of ISO 639-2/B three-letter
+#                               codes (e.g. [eng]) — an entry whose declared
+#                               <news:language> is not in this list is dropped at ingest
+#                               and never stored (src/adapters/newsSitemap.ts). No
+#                               `filters.languages` on a source means no language
+#                               filtering at all — never an implicit English-only default.
+#                               An entry whose language cannot be determined is always
+#                               kept, regardless of this list. See
+#                               fix-ap-language-filter-report.md
+#                               (.superpowers/sdd/2026-08-14-m2-scoring/, gitignored,
+#                               local-only) for the full reasoning.
+#                 Every other key below (`keywords` on arxiv-cs-cr, `min_points`+`keywords`
+#                 on hn-algolia) is still NOT YET CONSUMED by any adapter — present only as
+#                 forward documentation of intent for later M2 filtering work.
 #   tier          markets sources only: event | analysis
 #   enrichment    true | false, default true (AP-only in M1, set false below). Validated by
 #                 src/sources/load.ts's Zod schema — a non-boolean value fails config load,
@@ -266,6 +283,16 @@ sources:
     # LLM. Validated by the schema now (see fix-enrichment-field-report.md); still not
     # consumed by anything until the enrichment pass ships. See the header comment above.
     enrichment: false
+    # Owner decision (fix-ap-language-filter task): AP's Spanish-language wire copy is
+    # dropped at ingest and never stored — not tagged and suppressed later at read time.
+    # Roughly a third of AP's sitemap output is Spanish, much of it a same-day duplicate
+    # of an English story that trigram clustering and the (English-only) interest profile
+    # both miss. Consumed by src/adapters/newsSitemap.ts; validated by src/sources/load.ts
+    # (must be ISO 639-2/B three-letter codes — "eng", not "en"). See the header comment
+    # above and fix-ap-language-filter-report.md for the full reasoning, including why an
+    # entry with no declared language is kept rather than dropped.
+    filters:
+      languages: [eng]
     enabled: true
 
   # Reuters was here. Removed 2026-08-14 — there is no route we are permitted to use.

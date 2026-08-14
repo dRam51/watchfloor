@@ -10,6 +10,41 @@ export class SourceConfigError extends Error {
   }
 }
 
+// ISO 639-2/B, not ISO 639-1: the Google News sitemap schema (see
+// src/adapters/newsSitemap.ts's module doc) declares each entry's language as a
+// three-letter code -- "eng", "spa" -- verified against the real, live AP sitemap. A
+// two-letter code like "en" is a different standard (ISO 639-1) that this document never
+// emits, so silently accepting it here would validate a value that can never actually
+// match anything at fetch time -- a config typo that "loads fine" and quietly filters
+// nothing. Lowercase only: every live-observed value is lowercase, and there is no
+// evidence AP (or the schema) ever emits another case to accommodate.
+const LANGUAGE_CODE_RE = /^[a-z]{3}$/;
+
+// `filters` stays the free-form, per-source-type map the header comment always promised
+// (`keywords` for arxiv-cs-cr, `min_points`+`keywords` for hn-algolia -- neither consumed
+// yet, both still forward documentation) -- `.catchall(z.unknown())` keeps every OTHER key
+// accepted without validation, exactly as before. `languages` is the one key this task
+// makes real: src/adapters/newsSitemap.ts reads it as an allow-list of declared
+// <news:language> values to keep. Validated here, not left to `z.unknown()`, so a
+// malformed value fails at config load like every other source-config error (weight,
+// poll_interval, beats, enrichment) -- never silently accepted and discovered later as
+// "the filter isn't doing anything."
+const SourceFiltersSchema = z
+  .object({
+    languages: z
+      .array(
+        z
+          .string()
+          .regex(
+            LANGUAGE_CODE_RE,
+            'must be a three-letter ISO 639-2/B language code (e.g. "eng", "spa"), lowercase -- not a two-letter ISO 639-1 code like "en"',
+          ),
+      )
+      .min(1, 'languages, if present, must list at least one language code -- an empty allow-list would silently drop every entry (use enabled: false to stop polling a source entirely)')
+      .optional(),
+  })
+  .catchall(z.unknown());
+
 const SourceSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'must be kebab-case'),
   name: z.string().min(1),
@@ -41,7 +76,7 @@ const SourceSchema = z.object({
   // module's doc comment for the full defense-in-depth reasoning.
   poll_interval: z.string().regex(/^[1-9]\d*[mhd]$/, 'must look like 15m, 6h, or 1d (a nonzero leading digit)'),
   enabled: z.boolean(),
-  filters: z.record(z.unknown()).optional(),
+  filters: SourceFiltersSchema.optional(),
   /** Markets sources only. Drives decay and which consumer sees the item (§5.1). */
   tier: z.enum(['event', 'analysis']).optional(),
   // Gates whether this source's items may enter the LLM enrichment pass -- a later

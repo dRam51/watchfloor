@@ -206,6 +206,62 @@ export interface AdapterResult {
    *   drawing any conclusion about a source's health.
    */
   capped?: number;
+  /**
+   * How many otherwise-valid, structurally-fine entries were excluded this fetch by a
+   * source's own CONTENT policy -- `config/sources.yaml`'s `filters` map (validated by
+   * `src/sources/load.ts`), not a parsing defect and not a volume ceiling. Added
+   * fix-ap-language-filter task, whose concrete (and, as of that task, only) producer is
+   * `news_sitemap`'s `filters.languages` allow-list: an AP entry whose declared
+   * `<news:language>` is not in that list is dropped here, at ingest, and never stored --
+   * an entirely deliberate exclusion, not a failure of any kind.
+   *
+   * ## Why neither `skipped` nor `capped` could carry this instead
+   *
+   * Both were considered and rejected, not overlooked:
+   *
+   * - **`skipped` means "defective."** Its own doc comment above frames every entry it
+   *   counts as either a per-entry parse failure or an `EntryParser` bug -- exactly the
+   *   signal a source-health page should treat as "something is broken." A well-formed
+   *   Spanish-language article is not broken; it parses perfectly and would be stored
+   *   verbatim if the operator's config allowed it. Folding a content decision into
+   *   `skipped` would make a healthy AP poll -- correctly filtering exactly as configured
+   *   -- indistinguishable from a parser that started failing on a third of its entries,
+   *   which is precisely the false alarm `skipped`'s own doc comment already warns against
+   *   for a different mechanism (the item cap) that has the same shape of problem.
+   * - **`capped` means "volume policy," with a direction invariant this would violate.**
+   *   `capped`'s doc comment above pins, deliberately and explicitly (after that meaning
+   *   inverted once already), that it counts entries at the OLD end of a source's range,
+   *   never the new end -- because both of its real producers are anchored to recency
+   *   (`news_sitemap` keeps the newest N; `nvd-cve` walks from the tail of an ascending id
+   *   order). A language exclusion has no relationship to recency at all: a brand-new,
+   *   this-minute Spanish article is excluded exactly as readily as a week-old one, so
+   *   folding it into `capped` would make that field sometimes count the NEW end of the
+   *   range too, corrupting the one cross-source invariant it was just pinned to have
+   *   before M3's source-health page -- the first real consumer of either field -- even
+   *   exists to read it.
+   *
+   * `filtered` is deliberately named after the `filters` config key that drives it, so a
+   * reader of a source-health page can trace a nonzero count straight back to
+   * `config/sources.yaml`'s `filters` section for that source. Named generically (not
+   * `filteredLanguage`) on purpose, mirroring how `capped` itself already generalizes two
+   * mechanically different producers under one field (see that field's doc comment): a
+   * future `keywords` or `min_points` filter (both already forward-documented,
+   * unconsumed, in `config/sources.yaml`'s header) should report through this SAME field
+   * rather than adding a fourth exclusion-reporting field per filter type -- a
+   * source-health consumer needs to know "how many entries did this source's own config
+   * choose not to store," not which filter key mechanically produced that number.
+   *
+   * Optional, same "undefined rather than a fabricated 0" convention `skipped` and
+   * `capped` already use: stays `undefined` both when a source has no content filter
+   * configured at all (the overwhelming common case -- every source except `ap-news` as
+   * of this task) AND when one is configured but happened to exclude nothing this fetch.
+   * Consequently `filtered: undefined` cannot by itself distinguish "no filter configured"
+   * from "filter configured, nothing to exclude this cycle" -- accepted here because
+   * `capped` already carries the identical ambiguity (see its own doc comment) and a
+   * source-health page can always resolve it by reading `config/sources.yaml` directly,
+   * the same way it would have to for `capped`.
+   */
+  filtered?: number;
 }
 
 // ---------------------------------------------------------------------------
