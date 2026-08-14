@@ -40,10 +40,12 @@
 #             BleepingComputer, vendor research blogs, OWASP.
 #   0.8–1.1   high-volume/high-noise: arXiv feeds, Hacker News.
 #
-# Two sources are configured but enabled: false — real, reachable feeds that cannot be
-# usefully polled with M1's adapters as they stand today (not a src/ file this task may
-# touch). Re-enable only after the noted gap is closed. See task-11-report.md for the full
-# investigation.
+# Every source below is currently enabled: true. Two — nvd-cve and project-zero — spent
+# time disabled during M1/early M2 while their adapter-level blockers (an unfiltered/
+# unpaginated NVD query; project-zero's unbounded response with no per-source byte
+# ceiling) were fixed; see each entry's own comment for what changed and
+# fix-disabled-sources-report.md (.superpowers/sdd/2026-08-13-m1-ingest/, gitignored,
+# local-only) for the full investigation and both fix rounds.
 sources:
   # ---------------------------------------------------------------------------
   # cyber
@@ -67,19 +69,32 @@ sources:
     poll_interval: 1h
     enabled: true
 
-  # DISABLED — verified live (2026-08-13) but structurally unusable as configured.
-  # The unfiltered/default query (no date-range params) returns the OLDEST CVEs in
-  # NVD's catalog (confirmed: CVE-1999-0095, published 1988-10-01, was entry 1 of the
-  # live default response) — the API sorts ascending from the start of the catalog when
-  # no date filter is given, not by recency. A recency filter (lastModStartDate/
-  # lastModEndDate) DOES work (verified: a 12-day window returned 8,950 current
-  # results) but NVD rejects a wide/static range (verified: a >120-day span 404s) and
-  # requires the window to be computed relative to "now" at request time. The M1 JSON
-  # adapter (src/adapters/json.ts) fetches `url` verbatim with no per-poll templating,
-  # so there is no way to express "the last N days" in a static config value — every
-  # poll would return the identical 1988-era handful forever. Needs either adapter-level
-  # dynamic date-window support or a different approach; out of this task's file scope
-  # (src/ is off-limits). URL below is the exact one verified live, unchanged.
+  # ENABLED (fix round 2, tail pagination) — live-verified 2026-08-14. NVD API 2.0
+  # exposes no sort parameter; its stable order is ascending by CVE id/publication
+  # (NOT by lastModified, as an earlier round of this fix wrongly assumed), so the
+  # newest entries sit at the HIGHEST indices, not the lowest. A forward walk from
+  # startIndex=0 — the design this source was originally re-enabled with — retrieved
+  # the OLDEST ~1,000 entries in the date window on every single poll (CVE-1999-0095
+  # first, always: entry 1 of the unfiltered catalog) and never a current one, which
+  # was the exact defect this comment used to name as the reason for disabling the
+  # source in the first place, just relocated one layer down.
+  #
+  # src/adapters/json.ts now spends the first request of every poll on a cheap
+  # total-discovery probe (resultsPerPage=1), then anchors near the reported
+  # `totalResults` and walks forward from there — see nvdAnchorPageUrl's doc comment
+  # for the full mechanism (the moving-total race between requests, and the
+  # negative-startIndex clamp for once the date window's own total shrinks back to a
+  # normal size). Live-verified against this exact, real source: one poll retrieves
+  # 800 of the newest entries (head CVE-2026-72799, published 2026-08-12; tail
+  # CVE-2026-73633, published 2026-08-14 — the day this was verified); a full
+  # 200-entry real page measured ~554 KB live, comfortably under politeFetch's 5 MiB
+  # default ceiling (no MAX_BYTES_OVERRIDES entry needed for this source).
+  # AdapterResult.capped on this source now reports entries missed off the OLD end of
+  # the window — already-seen history — not the new end, a materially less alarming
+  # gap than what the same field name reported before this fix. resultsPerPage/
+  # startIndex are not in the url below: both are entirely code-owned (see
+  # NVD_RESULTS_PER_PAGE's own doc comment, src/adapters/json.ts, for why a
+  # config-owned page size was Finding 1's original root cause).
   - id: nvd-cve
     name: NVD CVE Database (API 2.0)
     type: json
@@ -87,7 +102,7 @@ sources:
     beats: [cyber]
     weight: 1.6
     poll_interval: 3h
-    enabled: false
+    enabled: true
 
   - id: krebs
     name: Krebs on Security
@@ -107,20 +122,24 @@ sources:
     poll_interval: 3h
     enabled: true
 
-  # DISABLED — the plan's verified URL (googleprojectzero.blogspot.com, which needed
+  # ENABLED — the plan's verified URL (googleprojectzero.blogspot.com, which needed
   # ?max-results=25 to stay under ~13 MB) now permanently 302-redirects to a new site,
-  # https://projectzero.google/feed.xml (confirmed live 2026-08-13: Blogger has been
-  # retired in favor of a static Jekyll site). The new feed.xml is a complete,
-  # ever-growing history dump with NO pagination/bounding mechanism of any kind —
-  # verified live that ?max-results=25 has zero effect on it (still 13,212,453 bytes
-  # with the param attached). src/fetch/http.ts's politeFetch has a hardcoded 5 MiB
-  # DEFAULT_MAX_BYTES ceiling with no per-source override reachable from config (no
-  # adapter forwards `filters` or any other config field into politeFetch's maxBytes
-  # option) — every poll of this URL would throw ResponseTooLargeError, permanently,
-  # after downloading ~13 MB it then discards. Needs a source-configurable byte ceiling
-  # (a src/ change, out of this task's scope) before this can run. URL below is the
-  # real, current location (not the stale blogspot one, to avoid an unnecessary
-  # redirect hop once this is re-enabled) — no query param, since none has any effect.
+  # https://projectzero.google/feed.xml (Blogger has been retired in favor of a static
+  # Jekyll site). The new feed.xml is a complete, ever-growing history dump with NO
+  # pagination/bounding mechanism of any kind — verified live that ?max-results=25,
+  # ?start-index=N, and &alt=rss are all inert on it (Jekyll serves one static file
+  # regardless of query string), and no alternate bounded path exists
+  # (/feeds/posts/default, /rss.xml, /atom.xml, /feed.json, /sitemap.xml all 404).
+  #
+  # src/fetch/http.ts's politeFetch now carries a per-source byte-ceiling override
+  # (MAX_BYTES_OVERRIDES, keyed by this url's exact string) rather than a bounded url,
+  # since none exists — DEFAULT_MAX_BYTES stays 5 MiB for every other source; only this
+  # one url's ceiling is raised, to 20 MiB. The ongoing cost is far rarer than the raw
+  # byte count suggests: this feed genuinely honors conditional GET (live-verified: a
+  # real 304, 0 bytes downloaded), and src/adapters/rss.ts already sends state's own
+  # etag/lastModified on every poll — the full ~12.6 MB body is only ever paid on a
+  # cold start or a poll where the feed's content genuinely changed, not every 12h. See
+  # MAX_BYTES_OVERRIDES's own doc comment for the full investigation and byte figures.
   - id: project-zero
     name: Google Project Zero
     type: rss
@@ -128,7 +147,7 @@ sources:
     beats: [cyber, aisec]
     weight: 1.6
     poll_interval: 12h
-    enabled: false
+    enabled: true
 
   # ---------------------------------------------------------------------------
   # aisec

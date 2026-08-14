@@ -116,6 +116,23 @@
  * source-controlled total -- `AdapterResult.capped` (src/adapters/types.ts)
  * is what makes the remainder visible rather than hidden, not a guarantee
  * of complete coverage every poll.
+ *
+ * Fix round 2 (disabled sources, tail pagination): fix round 1 paginated
+ * forward from `startIndex=0` on the belief that NVD's default sort was
+ * ascending by `lastModified`. Verified live (2026-08-14) that this is
+ * false -- the sort is ascending by CVE id / publication, non-monotonic in
+ * `lastModified` -- and the practical consequence was that walking forward
+ * from 0, bounded to a handful of pages, retrieved the OLDEST ~1,000
+ * entries in the 90-day window on EVERY poll (CVE-1999-0095 first, always)
+ * and never a current one: the newest entries sit at the HIGHEST indices,
+ * verified live to be entries published that same day. Fix round 1's
+ * pagination mechanics (bounded requests, honest `capped`) were sound; only
+ * which END of the result set they walked was wrong. `paginate` now fetches
+ * a cheap total-discovery probe first (`resultsPerPage=1`), then walks
+ * forward from an explicit anchor near `totalResults` instead of from 0 --
+ * see `nvdAnchorPageUrl`'s doc comment (nvd-cve's section, below) for the
+ * full mechanism, the probe-vs-discard-a-full-page trade-off, the
+ * moving-total race, and the negative-`startIndex` guard.
  */
 
 import { politeFetch, type FetchResult } from '../fetch/http.ts';
@@ -260,39 +277,61 @@ interface JsonSourceMapper {
    */
   buildUrl?(configuredUrl: string, now: Date): string;
   /**
-   * Optional pagination policy (M1 follow-up, fix round 1, Finding 1
-   * CRITICAL) -- a source with this field is fetched by `jsonAdapter.fetch`
-   * via a BOUNDED loop of `politeFetch` calls instead of the ordinary
-   * single call every other mapper still gets. Absent for four of the five
-   * sources; nvd-cve is the one registered user today (see
-   * `nvdNextPageUrl`/`nvdTotalAvailable`/`NVD_MAX_PAGES_PER_POLL` below).
+   * Optional pagination policy (M1 follow-up, fix round 1 Finding 1
+   * CRITICAL; reshaped in fix round 2 for tail pagination) -- a source with
+   * this field is fetched by `jsonAdapter.fetch` via a BOUNDED sequence of
+   * `politeFetch` calls instead of the ordinary single call every other
+   * mapper still gets. Absent for four of the five sources; nvd-cve is the
+   * one registered user today (see `nvdAnchorPageUrl`/`nvdNextPageUrl`/
+   * `nvdTotalAvailable`/`NVD_MAX_PAGES_PER_POLL` below).
    *
-   * - `maxPages`: a hard ceiling on how many pages ONE `fetch()` call will
-   *   ever request, independent of `nextPageUrl`'s or `totalAvailable`'s
-   *   own opinion -- the reason a source whose real backlog is enormous
-   *   (see nvd-cve's own doc comment for a concrete, live-verified case)
-   *   still costs a small, fixed, predictable number of requests per poll,
-   *   never "however many pages the backlog happens to have."
-   * - `nextPageUrl(currentPageUrl, entriesOnThisPage)`: given the page
-   *   just fetched and how many RAW entries it contained (before
-   *   `parseEntry` dropped any malformed ones -- a malformed entry still
-   *   occupied a slot in that page), returns the next page's url, or
-   *   `null` to stop early (this page was short -- fewer entries than a
-   *   full page -- meaning there is nothing more to fetch, independent of
-   *   `maxPages`). Never receives the parsed envelope: everything it needs
-   *   to construct the next request is either the page count it already
-   *   knows about or already present on the CURRENT page's own url.
+   * The FIRST page of any poll is always whatever `mapper.buildUrl` (or,
+   * absent that, `source.url` itself) resolves to -- fetched by
+   * `jsonAdapter.fetch` BEFORE this field is even consulted, complete with
+   * the ordinary conditional-request validators and 304 short-circuit every
+   * source gets. When `paginate` is present, that first page is ALWAYS
+   * treated as a probe: it is parsed only far enough to read
+   * `totalAvailable` off its envelope, and its own entries are never added
+   * to `AdapterResult.items`. See `anchorPageUrl` below for why nvd-cve
+   * needs this (NVD exposes no sort parameter, so reaching the newest
+   * entries requires knowing `totalResults` before a real content page can
+   * even be positioned) and `nvdAnchorPageUrl`'s own doc comment for why
+   * discarding the probe's one entry is deliberate, not incidental.
+   *
+   * - `maxPages`: a hard ceiling on how many requests ONE `fetch()` call
+   *   will make IN TOTAL for this poll -- including the first-page probe --
+   *   independent of what `anchorPageUrl`, `nextPageUrl`, or
+   *   `totalAvailable` would otherwise choose. The reason a source whose
+   *   real backlog is enormous (see nvd-cve's own doc comment for a
+   *   concrete, live-verified case) still costs a small, fixed, predictable
+   *   number of requests per poll, never "however many pages the backlog
+   *   happens to have."
+   * - `anchorPageUrl(firstPageUrl, firstPageTotalAvailable)`: given the
+   *   probe's own url and its own `totalAvailable(...)` reading (`null` if
+   *   unreadable), returns the SECOND request's url -- the first REAL
+   *   content page -- or `null` if there is nothing more to fetch this poll
+   *   (the total is unreadable, so no safe target can be computed, or it is
+   *   `<= 0`, so there is genuinely nothing to fetch).
+   * - `nextPageUrl(currentPageUrl, entriesOnThisPage)`: given a REAL
+   *   content page just fetched (never the probe) and how many RAW entries
+   *   it contained (before `parseEntry` dropped any malformed ones -- a
+   *   malformed entry still occupied a slot in that page), returns the next
+   *   real page's url, or `null` to stop (this page was short -- fewer
+   *   entries than a full page -- meaning there is nothing more to fetch
+   *   this poll, independent of `maxPages`).
    * - `totalAvailable(parsedEnvelope)`: reads the source's own reported
-   *   total-available count off one page's ALREADY-parsed envelope (so
-   *   this never re-parses a body `parseJsonBody` already parsed), or
-   *   `null` if that field is absent or the wrong type. Feeds
-   *   `AdapterResult.capped` ONLY -- never loop control (`nextPageUrl`
-   *   alone decides when to stop), so a missing or malformed total-count
-   *   field degrades to "capped is not reported" rather than to a broken
-   *   or infinite loop.
+   *   total-available count off one page's ALREADY-parsed envelope (so this
+   *   never re-parses a body `parseJsonBody` already parsed), or `null` if
+   *   that field is absent or the wrong type. Feeds `AdapterResult.capped`
+   *   and `anchorPageUrl` itself -- never loop control on its own
+   *   (`nextPageUrl` alone decides when the real-page walk stops), so a
+   *   missing or malformed total-count field degrades to "capped is not
+   *   reported" / "no anchor could be computed" rather than a broken or
+   *   infinite loop.
    */
   paginate?: {
     maxPages: number;
+    anchorPageUrl(firstPageUrl: string, firstPageTotalAvailable: number | null): string | null;
     nextPageUrl(currentPageUrl: string, entriesOnThisPage: number): string | null;
     totalAvailable(parsedEnvelope: unknown): number | null;
   };
@@ -460,18 +499,33 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * but never checked whether a single, still-unpaginated page could
  * retrieve a meaningful fraction of it. It could not: the configured url's
  * `resultsPerPage=5` capped every response at 5 entries regardless of the
- * window, and NVD's stable default sort (ascending by `lastModified`, tied
- * entries breaking in an unspecified but repeatable order) meant the SAME
- * 5-entry tied block recurred across many consecutive polls -- reviewer
- * live-verified, the exact url this code built returned 5 of 6,090 total
- * results (0.08%), all 5 sharing one exact-millisecond `lastModified` from
- * an NVD bulk-rescore batch. Technically working (real CVE ids, recent
- * timestamps, `skipped: 0`, no errors) and permanently near-useless --
- * indistinguishable, in `AdapterResult`, from a complete poll. The two
- * constants below, and `nvdNextPageUrl`/`nvdTotalAvailable`'s registration
- * in `JsonSourceMapper.paginate` further down, are the fix: retrieve more
- * than one page per poll, bounded, and report what's left uncovered via
- * `AdapterResult.capped` rather than leaving it silent.
+ * window -- reviewer live-verified, the exact url this code built returned
+ * 5 of 6,090 total results (0.08%), all 5 sharing one exact-millisecond
+ * `lastModified` from an NVD bulk-rescore batch. Technically working (real
+ * CVE ids, recent timestamps, `skipped: 0`, no errors) and permanently
+ * near-useless -- indistinguishable, in `AdapterResult`, from a complete
+ * poll. The two constants below, and `nvdNextPageUrl`/`nvdTotalAvailable`'s
+ * registration in `JsonSourceMapper.paginate` further down, were fix round
+ * 1's answer: retrieve more than one page per poll, bounded, and report
+ * what's left uncovered via `AdapterResult.capped` rather than leaving it
+ * silent.
+ *
+ * CORRECTED (fix round 2): fix round 1's own reasoning, immediately above,
+ * asserted NVD's "stable default sort (ascending by `lastModified`, tied
+ * entries breaking in an unspecified but repeatable order)". That claim was
+ * never independently verified and is false. Verified live (2026-08-14),
+ * same 90-day window this code builds: the first five entries at
+ * `startIndex=0` have `lastModified` values `...34.460`, `...32.300`,
+ * `...30.747`, `...46.027`, `...30.147` -- NOT monotonic -- while their
+ * `published` values (1988-10-01, 1988-11-11, 1989-01-01, 1989-07-26,
+ * 1989-10-26) climb strictly. The actual sort is ascending by CVE id /
+ * publication. This mattered beyond a wrong sentence: fix round 1's
+ * pagination walked FORWARD from `startIndex=0`, which under this actual
+ * sort means every poll retrieved the OLDEST ~1,000 entries in the window
+ * -- 1988 through the late 1990s -- and NEVER a current one, the exact
+ * symptom that got this source disabled in the first place. See
+ * `nvdAnchorPageUrl` below for the fix: paginate from the TAIL
+ * (`totalResults` and downward), not the head.
  *
  * `NVD_RESULTS_PER_PAGE = 200`: live-verified (2026-08-14) against the
  * exact window/query this code builds -- 200 entries measured 467,442
@@ -487,27 +541,64 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * average. `resultsPerPage=2000` was not chosen at any size specifically
  * to chase maximum throughput -- see `NVD_MAX_PAGES_PER_POLL` below for why
  * a bigger page size would not meaningfully change the actual coverage
- * problem anyway.
+ * problem anyway. Used for every REAL content page; the probe uses
+ * `NVD_PROBE_RESULTS_PER_PAGE` instead (see that constant and
+ * `nvdAnchorPageUrl` below).
  *
  * `NVD_MAX_PAGES_PER_POLL = 5`: chosen to equal, not exceed, NVD's own
  * publicly documented unauthenticated rate guidance (5 requests per 30s;
- * see docs/costs.md) -- a full-throttle poll (5 pages, each spaced by
+ * see docs/costs.md) -- a full-throttle poll (5 requests, each spaced by
  * politeFetch's own default 2s per-host minimum interval) completes its
  * whole burst within about 8-10 seconds, safely inside a single 30s
  * window, by construction rather than by tuning a custom interval. This
- * bounds one poll to 5 requests / up to 1,000 entries, REGARDLESS of
- * `totalResults` -- on a quiet day (a few thousand modified, see
- * NVD_WINDOW_DAYS's own doc comment for real measured totals well under
- * this) that is strong, often complete, coverage; during a bulk-rescore
+ * bounds one poll to 5 requests TOTAL, REGARDLESS of `totalResults` --
+ * fix round 1 spent that whole budget on real content (5 pages / up to
+ * 1,000 entries); fix round 2's tail pagination spends the FIRST of the 5
+ * on the cheap total-discovery probe `anchorPageUrl` needs (see its own
+ * doc comment for why that trade was chosen over the alternative -- fetch
+ * and discard a full page 1), leaving 4 real pages / up to 800 entries per
+ * poll. On a quiet day (a few thousand modified, see NVD_WINDOW_DAYS's own
+ * doc comment for real measured totals well under this) that is strong,
+ * often complete, coverage of the NEWEST entries; during a bulk-rescore
  * anomaly like the one discovered widening the window above (hundreds of
- * thousands), it is a small fraction. Both are correct, expected
+ * thousands), it is a small fraction of the total -- but, critically, still
+ * the newest fraction, not an arbitrary one. Both are correct, expected
  * behavior for a fixed per-poll budget against an unbounded, source-
  * controlled total -- `capped` (jsonAdapter.fetch below) is what makes
  * either case visible on a source-health page rather than indistinguishable
- * from each other or from a fully complete poll.
+ * from each other or from a fully complete poll. Its own MEANING also
+ * changed in fix round 2: see `jsonAdapter.fetch`'s paginated branch, where
+ * it is computed, for the before/after contrast.
  */
 const NVD_RESULTS_PER_PAGE = 200;
 const NVD_MAX_PAGES_PER_POLL = 5;
+
+/**
+ * `resultsPerPage` for the FIRST request of every nvd-cve poll -- the
+ * total-discovery probe `nvdAnchorPageUrl` consumes to learn `totalResults`
+ * before any real content page can be positioned. Deliberately the
+ * cheapest legal value (NVD's API does not accept 0), not
+ * `NVD_RESULTS_PER_PAGE`: the probe's own entry is never used (see
+ * `nvdAnchorPageUrl`'s doc comment for why discarding it is deliberate),
+ * so requesting 200 of them would cost real bytes and a slice of the
+ * 5 MiB ceiling headroom for zero benefit. This is the OTHER deliberate
+ * choice named in `NVD_MAX_PAGES_PER_POLL`'s doc comment above: a probe
+ * this cheap, vs. fetching and discarding a full `NVD_RESULTS_PER_PAGE`
+ * page 1, wastes a small, fixed number of extra bytes instead of up to
+ * ~456 KB every poll, for the identical request-count cost against the
+ * 5-requests-per-poll budget either way.
+ */
+const NVD_PROBE_RESULTS_PER_PAGE = 1;
+
+/**
+ * How many REAL content pages one poll fetches after the probe --
+ * `NVD_MAX_PAGES_PER_POLL` minus the one request the probe itself spends.
+ * `nvdAnchorPageUrl` uses this to size the anchor (the tail window is this
+ * many pages wide); `jsonAdapter.fetch`'s paginated branch uses it as the
+ * real-page loop's own bound, on top of (not instead of) the overall
+ * `maxPages` ceiling `JsonSourceMapper.paginate` already enforces.
+ */
+const NVD_REAL_PAGES_PER_POLL = NVD_MAX_PAGES_PER_POLL - 1;
 
 /**
  * NVD's CVE API 2.0, with no date filter, sorts ascending from the very
@@ -528,17 +619,25 @@ const NVD_MAX_PAGES_PER_POLL = 5;
  * Also sets `resultsPerPage`/`startIndex` explicitly, UNCONDITIONALLY
  * overwriting whatever the configured url carries (fix round 1: the
  * configured url previously carried its own `?resultsPerPage=5`, which is
- * exactly Finding 1's defect -- see NVD_RESULTS_PER_PAGE's own doc comment
- * just above). These two values are now entirely code-owned rather than
- * config-owned, on purpose: `nvdNextPageUrl` below increments `startIndex`
- * by exactly `NVD_RESULTS_PER_PAGE` and decides "was this page short" by
- * comparing an entry count against that SAME constant -- if the actual
- * requested page size could silently drift out of sync with what
- * `nvdNextPageUrl` assumes (e.g. someone editing `config/sources.yaml`'s
- * url without knowing this code hardcodes a page size), pagination would
- * misbehave in a way neither file's own diff would make obvious. Fixing
- * both at this one call site, always applied regardless of what the
- * configured url happens to contain, removes that whole class of drift.
+ * exactly Finding 1's defect). These are now entirely code-owned rather
+ * than config-owned, on purpose -- see NVD_RESULTS_PER_PAGE's own doc
+ * comment for why silent drift between a config value and code's own
+ * pagination assumptions is exactly the failure mode fix round 1 fixed.
+ *
+ * CHANGED (fix round 2): this url is now ALWAYS the cheap total-discovery
+ * PROBE, never a real content page -- `resultsPerPage=NVD_PROBE_RESULTS_PER_PAGE`
+ * (1), always `startIndex=0`. Fix round 1 had this function build a full
+ * `NVD_RESULTS_PER_PAGE`-sized (200) first content page directly, which was
+ * fine under a FORWARD walk from a known, fixed offset (0) -- but tail
+ * pagination needs `totalResults` before it can compute WHERE the tail even
+ * is, and that is a genuinely different request shape than any real content
+ * page (see `NVD_PROBE_RESULTS_PER_PAGE`'s own doc comment for the
+ * probe-vs-discard-a-full-page trade-off, and `nvdAnchorPageUrl` below for
+ * what happens with the `totalResults` this probe reads). `jsonAdapter.fetch`
+ * treats whatever `buildUrl` returns as this probe unconditionally whenever
+ * `paginate` is present on the mapper -- its own entries are read only far
+ * enough to extract `totalAvailable` and are never added to `AdapterResult.
+ * items`.
  *
  * Built with `URL`/`searchParams.set` -- the same reason `cisaKevUrl` above
  * uses it over string interpolation -- so any OTHER query param already on
@@ -561,8 +660,78 @@ function nvdCveUrl(configuredUrl: string, now: Date): string {
   const windowStart = new Date(now.getTime() - NVD_WINDOW_DAYS * MS_PER_DAY);
   url.searchParams.set('lastModStartDate', windowStart.toISOString());
   url.searchParams.set('lastModEndDate', now.toISOString());
-  url.searchParams.set('resultsPerPage', String(NVD_RESULTS_PER_PAGE));
+  url.searchParams.set('resultsPerPage', String(NVD_PROBE_RESULTS_PER_PAGE));
   url.searchParams.set('startIndex', '0');
+  return url.href;
+}
+
+/**
+ * `JsonSourceMapper.paginate.anchorPageUrl` for nvd-cve -- the mechanism
+ * that makes tail pagination possible at all, given NVD API 2.0 exposes NO
+ * sort parameter (verified: no documented or discovered query param changes
+ * result order) and the ascending-by-CVE-id/publication order it does use
+ * puts the newest entries at the HIGHEST indices, not the lowest. "Paginate
+ * from the tail" therefore cannot mean "ask the server for the last page" --
+ * there is no such request -- it means computing an explicit `startIndex`
+ * near `totalResults` and walking FORWARD from there, exactly like fix round
+ * 1's forward walk, just anchored near the end instead of at 0.
+ *
+ * `firstPageTotalAvailable` is the PROBE's own `totalAvailable(...)` reading
+ * (`null` if its envelope didn't carry a legible `totalResults`). Two ways
+ * this returns `null` itself, both meaning "fetch nothing further this
+ * poll," not an error -- the probe's own fetch already succeeded either way:
+ *   - the total was unreadable -- guessing an anchor from no information
+ *     could request an arbitrary, meaningless slice; degrading to "nothing
+ *     fetched" is safer than that, and is exactly as visible on a
+ *     source-health page as any other empty-but-successful poll.
+ *   - the total is `<= 0` -- a genuinely empty window (every entry already
+ *     aged out, or none published yet) has no tail to anchor to.
+ *
+ * Otherwise: `anchorStartIndex = max(0, totalResults - NVD_REAL_PAGES_PER_POLL
+ * * NVD_RESULTS_PER_PAGE)` -- position exactly far enough back that the full
+ * real-page budget, walked forward via `nvdNextPageUrl`, lands ON
+ * `totalResults` (verified live: 50,000 total, budget 800, anchor 49,200,
+ * four full 200-entry pages forward reaches exactly index 50,000). The
+ * `max(0, ...)` guard is not cosmetic: once the historical bulk-rescore
+ * anomaly (`NVD_WINDOW_DAYS`'s own doc comment) ages out of the window,
+ * `totalResults` will ordinarily be far SMALLER than the real-page budget --
+ * the NORMAL case, not an edge case -- and the raw subtraction goes
+ * negative. NVD's API 400s on a negative `startIndex`; clamping to 0
+ * instead means the tiny/normal-sized window is walked forward from its own
+ * start (identical to fix round 1's original behavior) and fully covered,
+ * not a broken request.
+ *
+ * Deliberately computed ONCE, from the probe's single reading, never
+ * recomputed against a later, fresher `totalAvailable` seen on a real page
+ * mid-walk (NVD's `totalResults` is not static -- verified live that it
+ * grows as new CVEs land continuously). Recomputing on every page would
+ * shift where LATER pages start relative to where EARLIER pages already
+ * looked, which can open a gap between two real pages that were never
+ * fetched -- silently dropping a middle slice of the walk. Anchoring once
+ * and letting `nextPageUrl` walk forward from a fixed starting point instead
+ * means the walked range is always CONTIGUOUS, even if the true tail has
+ * moved a little further out by the time the last page is requested; those
+ * newest few entries are not lost, only deferred -- guaranteed to be at or
+ * near the front of the NEXT poll's own anchor computation, since this
+ * source's own item storage is keyed by url/CVE id, not by poll, and a CVE
+ * re-seen across polls is expected, harmless behavior (see the module doc
+ * comment's "skip vs throw" section). `jsonAdapter.fetch`'s own `capped`
+ * computation still uses the FRESHEST total observed across every page
+ * fetched this poll, not the stale probe-time snapshot the anchor itself was
+ * computed from -- see that computation's own comment for why those two
+ * choices (fixed anchor, moving capped) are not a contradiction.
+ *
+ * Overwrites `resultsPerPage` from the probe's `NVD_PROBE_RESULTS_PER_PAGE`
+ * (1) up to the real page size, `NVD_RESULTS_PER_PAGE` (200) -- this url is
+ * the first REAL content page, not a second probe.
+ */
+function nvdAnchorPageUrl(firstPageUrl: string, firstPageTotalAvailable: number | null): string | null {
+  if (firstPageTotalAvailable === null || firstPageTotalAvailable <= 0) return null;
+
+  const anchorStartIndex = Math.max(0, firstPageTotalAvailable - NVD_REAL_PAGES_PER_POLL * NVD_RESULTS_PER_PAGE);
+  const url = new URL(firstPageUrl);
+  url.searchParams.set('resultsPerPage', String(NVD_RESULTS_PER_PAGE));
+  url.searchParams.set('startIndex', String(anchorStartIndex));
   return url.href;
 }
 
@@ -792,6 +961,7 @@ const JSON_SOURCE_MAPPERS: Record<string, JsonSourceMapper> = {
     buildUrl: nvdCveUrl,
     paginate: {
       maxPages: NVD_MAX_PAGES_PER_POLL,
+      anchorPageUrl: nvdAnchorPageUrl,
       nextPageUrl: nvdNextPageUrl,
       totalAvailable: nvdTotalAvailable,
     },
@@ -887,30 +1057,73 @@ export const jsonAdapter: Adapter = {
 
     // ---------------------------------------------------------------------
     // Paginated path -- nvd-cve today (see JsonSourceMapper.paginate's doc
-    // comment above for the general mechanism, and nvdNextPageUrl/
-    // nvdTotalAvailable/NVD_MAX_PAGES_PER_POLL below for nvd-cve's own
-    // policy). Bounded strictly by maxPages regardless of what nextPageUrl
-    // or the source's own reported total says -- one poll can never turn
-    // into more than that many requests or run past that many round-trips,
-    // no matter how large the backlog behind it is.
+    // comment above for the general mechanism, and nvdAnchorPageUrl/
+    // nvdNextPageUrl/nvdTotalAvailable/NVD_MAX_PAGES_PER_POLL below for
+    // nvd-cve's own policy). Bounded strictly by maxPages regardless of what
+    // anchorPageUrl, nextPageUrl, or the source's own reported total says --
+    // one poll can never turn into more than that many requests or run past
+    // that many round-trips, no matter how large the backlog behind it is.
+    //
+    // Fix round 2: `firstUrl`/`firstFetch` (already fetched above, complete
+    // with the ordinary conditional-request validators and 304
+    // short-circuit -- both already handled before this branch is even
+    // reached) is now ALWAYS treated as a PROBE, never a real content page.
+    // Its body is parsed only far enough to read `totalAvailable` off its
+    // envelope; `probePage.items`/`probePage.skipped` are deliberately never
+    // touched again -- the probe's own entry (or entries) never reaches
+    // `AdapterResult.items` or counts toward `skipped`. See
+    // `JsonSourceMapper.paginate`'s doc comment for why nvd-cve needs a
+    // probe at all (no sort parameter; the tail's location isn't knowable
+    // without first learning `totalResults`).
     // ---------------------------------------------------------------------
-    const { maxPages, nextPageUrl, totalAvailable } = mapper.paginate;
+    const { maxPages, anchorPageUrl, nextPageUrl, totalAvailable } = mapper.paginate;
+
+    const probePage = parseJsonBody(firstFetch.body, firstUrl, source.id, mapper);
+    let available: number | null = totalAvailable(probePage.parsedBody);
+
+    // Budget for REAL content pages: maxPages counts the probe as one of
+    // its requests (see paginate.maxPages's own doc comment), so a source
+    // with no budget left over for even one real page (maxPages <= 1) must
+    // stop here, same as anchorPageUrl itself returning null -- both mean
+    // "nothing more to fetch this poll," never an error, since the probe's
+    // own fetch already succeeded.
+    const realPageBudget = maxPages - 1;
+    const anchorUrl = realPageBudget > 0 ? anchorPageUrl(firstUrl, available) : null;
+
+    if (anchorUrl === null) {
+      return {
+        items: [],
+        etag: firstFetch.etag,
+        lastModified: firstFetch.lastModified,
+        notModified: false,
+        skipped: 0,
+        // Nothing was retrieved and nothing is KNOWN to have been excluded
+        // (an unreadable total means there is nothing to compare against;
+        // a genuinely empty window has nothing to be excluded) -- undefined,
+        // never a fabricated 0, same rule as every other capped computation.
+        capped: undefined,
+      };
+    }
 
     const items: RawItem[] = [];
     let skipped = 0;
     let entriesSeen = 0;
-    let available: number | null = null;
-    // `url`/`fetchResult` always describe the SAME page as each other --
-    // reassigned together, at the bottom of the loop, before the next
-    // iteration processes them. Explicit `: string` (not `string | null`)
-    // on `url` deliberately: the loop's own `break`s are what end iteration
-    // when there is no next page, never a null sentinel threaded back
-    // through this variable -- simpler for the type checker to follow
-    // across loop iterations, and simpler to read.
-    let url: string = firstUrl;
-    let fetchResult: FetchResult = firstFetch;
+    // `url`/`fetchResult` always describe the SAME real content page as
+    // each other -- reassigned together, at the bottom of the loop, before
+    // the next iteration processes them. Explicit `: string` (not
+    // `string | null`) on `url` deliberately: the loop's own `break`s are
+    // what end iteration when there is no next page, never a null sentinel
+    // threaded back through this variable -- simpler for the type checker
+    // to follow across loop iterations, and simpler to read.
+    let url: string = anchorUrl;
+    // The anchor -- the first REAL content page -- is an unconditional GET,
+    // same reasoning as every subsequent real page below: `state`'s
+    // validators describe the PROBE's identity (a differently-shaped,
+    // resultsPerPage=1 request), never a real content page that was never
+    // separately validated on any prior poll.
+    let fetchResult: FetchResult = await politeFetch(url, {});
 
-    for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+    for (let realPageNum = 1; realPageNum <= realPageBudget; realPageNum++) {
       if (fetchResult.body === null) {
         throw new JsonParseError(url, source.id, 'politeFetch returned a null body for a non-304 response');
       }
@@ -919,25 +1132,26 @@ export const jsonAdapter: Adapter = {
       items.push(...page.items);
       skipped += page.skipped;
       entriesSeen += page.entriesOnThisPage;
-      // Later pages of the SAME query report the same total in practice
-      // (verified live), but if one page's envelope is missing/malformed
-      // where an earlier one wasn't, keep the last known-good reading
-      // rather than losing it to a single page's absence.
+      // The FRESHEST reading always wins, overwriting the probe's own
+      // (necessarily staler) one and every earlier real page's -- verified
+      // live that totalResults keeps growing as new CVEs land continuously,
+      // so the true count by the time the LAST page of this poll lands is
+      // never earlier than what the probe saw. This is deliberately
+      // DIFFERENT from anchorPageUrl's own choice to anchor ONCE from the
+      // probe's reading and never recompute -- see that function's doc
+      // comment for why a fixed anchor (no gaps in what gets walked) and a
+      // moving capped (an honest count of what's now known to exist) are
+      // complementary, not contradictory.
       available = totalAvailable(page.parsedBody) ?? available;
 
-      if (pageNum >= maxPages) break; // hard ceiling reached -- stop regardless of nextPageUrl's own opinion
+      if (realPageNum >= realPageBudget) break; // hard ceiling reached -- stop regardless of nextPageUrl's own opinion
 
       const next: string | null = nextPageUrl(url, page.entriesOnThisPage);
       if (next === null) break; // a short page -- nothing left to fetch
 
       url = next;
-      // Page 2+ carries no conditional-request validators. `state`'s
-      // etag/lastModified describes a prior poll's PAGE-1-EQUIVALENT
-      // identity (the same url this poll's own page 1 was conditionally
-      // requested against) -- it was never issued for, and has no
-      // "unchanged since" meaning against, a DIFFERENT page. An
-      // unconditional GET here is the only correct request, not a
-      // politeness shortcut being skipped.
+      // Same reasoning as the anchor fetch above: never conditionally
+      // requested.
       fetchResult = await politeFetch(url, {});
     }
 
@@ -947,12 +1161,24 @@ export const jsonAdapter: Adapter = {
       lastModified: firstFetch.lastModified,
       notModified: false,
       skipped,
-      // Never fabricated: undefined unless the source's own reported total
-      // was legible AND genuinely exceeds what this poll actually
-      // retrieved (parsed or not) -- see AdapterResult.capped's own doc
-      // comment (types.ts) for why "undefined, not 0, when there is
-      // nothing to report" is the shared rule across every adapter that
-      // sets this field.
+      // Never fabricated: undefined unless the total was legible AND
+      // genuinely exceeds what this poll actually retrieved (parsed or
+      // not) -- see AdapterResult.capped's own doc comment (types.ts) for
+      // why "undefined, not 0, when there is nothing to report" is the
+      // shared rule across every adapter that sets this field.
+      //
+      // MEANING CHANGED, fix round 2: fix round 1's capped counted entries
+      // beyond what a forward walk from startIndex=0 reached -- under that
+      // walk direction, that meant the NEWEST entries, the ones a security
+      // feed most needs, were exactly what "capped" reported as missing.
+      // Tail pagination inverts the walk direction, so capped now counts
+      // entries BELOW the anchor -- the OLDEST entries still inside the
+      // window, ones this source has had many prior (and, ordinarily,
+      // successful) polls to have already surfaced. Same field, same "a
+      // real gap exists, not a fabricated number" contract, but a
+      // categorically less alarming shape of gap: this fix exists to
+      // guarantee coverage of what's NEW, not coverage of the entire
+      // historical window every single poll.
       capped: available !== null && available > entriesSeen ? available - entriesSeen : undefined,
     };
   },
