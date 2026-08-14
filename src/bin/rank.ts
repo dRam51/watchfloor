@@ -22,7 +22,7 @@ import { parseArgs } from 'node:util';
 import { join } from 'node:path';
 import { loadEnv } from '../config/env.ts';
 import { openDatabase } from '../db/openDatabase.ts';
-import { runMigrations } from '../db/migrate.ts';
+import { assertMigrationsUpToDate } from '../db/migrate.ts';
 import { closeDb } from '../db/connection.ts';
 import { BEATS, type Beat } from '../domain/item.ts';
 import { rankBeat, loadRankDepsFromConfigFiles, type BeatRanking, type SortProfile } from '../score/rank.ts';
@@ -100,7 +100,18 @@ try {
   const env = loadEnv();
   const db = openDatabase(env.WF_DB_PATH);
   try {
-    runMigrations(db, join(repoRoot, 'db', 'migrations'));
+    // Entrypoints no longer auto-apply migrations -- run `npm run migrate`
+    // first. See src/db/migrate.ts's doc comment on assertMigrationsUpToDate.
+    // rank is read-only against the ranking itself, but this check can
+    // still backfill a missing checksum, which is bookkeeping repair, not a
+    // schema change.
+    const { backfilledChecksums } = assertMigrationsUpToDate(db, join(repoRoot, 'db', 'migrations'));
+    if (backfilledChecksums.length > 0) {
+      console.log(
+        `backfilled checksum for previously-applied migration(s) with no recorded checksum: ` +
+          `${backfilledChecksums.join(', ')}`,
+      );
+    }
     const deps = loadRankDepsFromConfigFiles(join(repoRoot, 'config', 'decay.yaml'), join(repoRoot, 'config', 'overrides.yaml'));
 
     const now = new Date().toISOString();

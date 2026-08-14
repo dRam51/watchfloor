@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { loadEnv } from '../config/env.ts';
 import { openDatabase } from '../db/openDatabase.ts';
-import { runMigrations } from '../db/migrate.ts';
+import { assertMigrationsUpToDate } from '../db/migrate.ts';
 import { loadSourcesFile } from '../sources/load.ts';
 import { loadDecayConfig } from '../score/decay.ts';
 import { loadOverridesConfig } from '../score/overrides.ts';
@@ -17,8 +17,19 @@ try {
   const env = loadEnv();
   const db = openDatabase(env.WF_DB_PATH);
 
-  const applied = runMigrations(db, join(repoRoot, 'db', 'migrations'));
-  if (applied.length > 0) console.log(`applied migrations: ${applied.join(', ')}`);
+  // Entrypoints no longer auto-apply migrations (see src/db/migrate.ts's
+  // doc comment on assertMigrationsUpToDate) — a routine boot must not be
+  // the thing that silently applies whatever *.sql happens to be sitting in
+  // db/migrations/, including a colleague's uncommitted work in progress.
+  // Run `npm run migrate` first; this throws a clear message naming what is
+  // pending if that has not happened yet.
+  const { backfilledChecksums } = assertMigrationsUpToDate(db, join(repoRoot, 'db', 'migrations'));
+  if (backfilledChecksums.length > 0) {
+    console.log(
+      `backfilled checksum for previously-applied migration(s) with no recorded checksum: ` +
+        `${backfilledChecksums.join(', ')}`,
+    );
+  }
 
   // Validate the feed config at boot. Nothing polls these yet, but a
   // malformed sources.yaml that is only read at first poll fails at the

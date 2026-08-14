@@ -12,6 +12,7 @@
     "build:all": "npm run build && npm run build:web",
     "preview:web": "node --env-file=.env node_modules/vite/bin/vite.js preview",
     "start": "node --env-file=.env dist/bin/api.js",
+    "migrate": "node --env-file=.env src/bin/migrate.ts",
     "ingest": "node --env-file=.env src/bin/ingest.ts",
     "score": "node --env-file=.env src/bin/score.ts",
     "score:force": "node --env-file=.env src/bin/score.ts --force",

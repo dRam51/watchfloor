@@ -138,6 +138,7 @@ is the specific mistake that cost this one.
 | Repository | **Public**, at `https://github.com/dRam51/watchfloor` | Overrides the brief's never-push rule, on the owner's explicit instruction. See the warning below for what must never be committed. |
 | Recency decay | **Applied at read time, never stored** | `item_scores` is append-only and a decaying score changes continuously, so storing it would append a row per item per beat forever to record nothing but the clock. Store the decay-invariant components; multiply by a decay factor at query time. Also makes historical ranking truthful — "what ranked top last Tuesday" applies Tuesday's decay to what was known then. |
 | Beats belong to the item | **Unioned across every version sharing an `item_key`** | An arXiv paper cross-listed in `cs.AI` and `cs.CR` is two rows with one key; the current-item read returned only the tie-break winner's beat. `src/domain/itemBeats.ts` is the corrected read path — `Item.beats` still returns the single-version answer. |
+| Migration application | **Explicit `npm run migrate`. Every other entrypoint refuses to boot with pending migrations** instead of auto-applying them. | `src/bin/{api,ingest,score,rank,scheduler}.ts` used to call `runMigrations` on every boot, so a routine `npm run rank` silently applied whatever `*.sql` happened to sit in `db/migrations/` — confirmed to be how an in-flight, still-being-edited migration got applied to `data/wf.db` prematurely during M3. `assertMigrationsUpToDate` (`src/db/migrate.ts`) now also checksums every applied migration and fails loudly, naming the file, if one was edited after being applied — and refuses a migration that would apply out of order. See `.superpowers/sdd/2026-08-14-m3-api-dashboard/fix-migration-runner-report.md`. **§12's runbook needs a new step:** run `npm run migrate` after every `git pull` (or fresh clone) and before `npm run dev` / restarting the scheduler — `docs/brief.md` is gitignored and not present on this machine to edit directly, so this is recorded here until someone with the brief can fold it in. |
 
 ## The `node:sqlite` cast quirk — three modules have now hit this
 
@@ -212,6 +213,7 @@ and reintroduces the error.
 
     npm install
     cp .env.example .env      # then edit — no absolute paths
+    npm run migrate           # required before first boot -- see "Settled decisions" above
     npm run dev               # api on 127.0.0.1:$WF_API_PORT
     npm test
     npm run check:portability

@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { copyFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, closeDb } from '../../src/db/connection.ts';
-import { runMigrations } from '../../src/db/migrate.ts';
+import { openDb, closeDb, type Db } from '../../src/db/connection.ts';
+import { runMigrations, assertMigrationsUpToDate } from '../../src/db/migrate.ts';
 import { BEATS } from '../../src/domain/item.ts';
 
 const open: Array<ReturnType<typeof openDb>> = [];
@@ -27,7 +27,10 @@ describe('runMigrations', () => {
     writeFileSync(join(dir, '0001_first.sql'), 'create table a (x integer);');
 
     const db = freshDb();
-    expect(runMigrations(db, dir)).toEqual(['0001_first', '0002_second']);
+    expect(runMigrations(db, dir)).toEqual({
+      applied: ['0001_first', '0002_second'],
+      backfilledChecksums: [],
+    });
 
     const versions = db.prepare('select version from schema_migrations order by version').all();
     expect(versions).toEqual([{ version: '0001_first' }, { version: '0002_second' }]);
@@ -38,7 +41,7 @@ describe('runMigrations', () => {
     writeFileSync(join(dir, '0001_first.sql'), 'create table a (x integer);');
     const db = freshDb();
     runMigrations(db, dir);
-    expect(runMigrations(db, dir)).toEqual([]);
+    expect(runMigrations(db, dir)).toEqual({ applied: [], backfilledChecksums: [] });
   });
 
   it('rolls back a failing migration and records nothing', () => {
@@ -316,7 +319,7 @@ describe('0002_constraints', () => {
     copyFileSync(join(MIGRATIONS, '0001_init.sql'), join(dir, '0001_init.sql'));
 
     const db = freshDb();
-    expect(runMigrations(db, dir)).toEqual(['0001_init']);
+    expect(runMigrations(db, dir)).toEqual({ applied: ['0001_init'], backfilledChecksums: [] });
 
     db.exec(`
       insert into items (item_id, item_key, url, canonical_url, title, source_id,
@@ -336,7 +339,7 @@ describe('0002_constraints', () => {
     const scoresBefore = db.prepare('select * from item_scores order by score_id').all();
 
     copyFileSync(join(MIGRATIONS, '0002_constraints.sql'), join(dir, '0002_constraints.sql'));
-    expect(runMigrations(db, dir)).toEqual(['0002_constraints']);
+    expect(runMigrations(db, dir)).toEqual({ applied: ['0002_constraints'], backfilledChecksums: [] });
 
     // Every row survived the rebuild, byte for byte.
     expect(db.prepare('select item_id, beat from item_beats order by 1, 2').all()).toEqual(
@@ -413,5 +416,255 @@ describe('0002_constraints', () => {
       version: string;
     }>;
     expect(applied.map((r) => r.version)).toEqual(['0001_init']);
+  });
+});
+
+// Fixes the finding recorded in
+// .superpowers/sdd/2026-08-14-m3-api-dashboard/progress.md, "Finding: the
+// migration runner has no drift detection" + the follow-up "CORRECTION +
+// escalation": schema_migrations recorded only (version, applied_at), so a
+// migration file edited after being applied was silently skipped forever.
+// Confirmed live: 0005_fts_search.sql was applied, then split one trigger
+// into two; data/wf.db kept the old, unoptimised single-trigger version and
+// the runner never noticed. These tests reproduce that shape directly.
+describe('runMigrations checksum verification', () => {
+  it('records a sha256 checksum for every migration it applies', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '0001_first.sql'), 'create table a (x integer);');
+    const db = freshDb();
+    runMigrations(db, dir);
+
+    const row = db
+      .prepare('select checksum from schema_migrations where version = ?')
+      .get('0001_first') as { checksum: string | null };
+    expect(row.checksum).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('REGRESSION (the original incident): re-running with the file untouched is a silent no-op, but re-running after the file is edited post-application fails loudly and names the file', () => {
+    const dir = tempDir();
+    const file = join(dir, '0001_original.sql');
+    writeFileSync(file, 'create table a (x integer);');
+    const db = freshDb();
+    runMigrations(db, dir);
+
+    // Untouched: re-running does nothing and raises nothing. This is the
+    // correct silence — proves the fix does not turn every boot into a
+    // checksum-mismatch false alarm.
+    expect(runMigrations(db, dir)).toEqual({ applied: [], backfilledChecksums: [] });
+
+    // The exact incident from the M3 progress log: the migration's author
+    // edits the file (e.g. splits one trigger into two) *after* it has
+    // already been applied to a real database.
+    writeFileSync(file, 'create table a (x integer, y integer);');
+
+    expect(() => runMigrations(db, dir)).toThrow(/0001_original/);
+    expect(() => runMigrations(db, dir)).toThrow(/checksum/i);
+    // Names the actual file on disk, not just the version stem — the person
+    // hitting this is confused ("the code looks right, the database is
+    // wrong") and needs to be pointed at exactly what to go look at.
+    expect(() => runMigrations(db, dir)).toThrow(/0001_original\.sql/);
+
+    // And it genuinely refused rather than quietly reapplying or quietly
+    // skipping: the live table still has the pre-edit shape.
+    const cols = db.prepare('pragma table_info(a)').all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toEqual(['x']);
+  });
+});
+
+// The backfill problem: six migrations are already applied on real machines
+// (including this repo's own data/wf.db) with no recorded checksum, because
+// the column did not exist when they ran. The strategy chosen here: treat a
+// NULL checksum as "unknown provenance — trust the on-disk file once, as of
+// right now, and record it so every future run is protected." The
+// alternative (refuse to boot until someone manually re-certifies six
+// already-applied migrations) would brick every existing database, which
+// the task explicitly rules out. The accepted limitation, stated rather
+// than hidden: this cannot retroactively prove those six files were never
+// edited between application and this backfill — only a checksum captured
+// AT apply time could do that, and none was. It converts "permanently
+// unprotected" into "protected from this point forward," which is what is
+// achievable without out-of-band evidence (e.g. diffing against the live
+// schema, which is exactly what the M3 coordinator had to do by hand).
+describe('runMigrations checksum backfill for pre-existing rows', () => {
+  /**
+   * Simulates a database migrated before this checksum feature existed:
+   * schema_migrations has a real applied row with no checksum recorded
+   * because the column did not exist yet when the row was inserted. The
+   * live schema genuinely matches the file — this is a clean legacy
+   * database, not a drifted one — so backfilling is the correct call.
+   */
+  function seedLegacyAppliedRow(db: Db, dir: string, file: string, sql: string): void {
+    writeFileSync(join(dir, file), sql);
+    db.exec(`
+      create table if not exists schema_migrations (
+        version    text primary key,
+        applied_at text not null
+      )
+    `);
+    db.exec(sql);
+    const version = file.slice(0, -'.sql'.length);
+    db.prepare('insert into schema_migrations (version, applied_at) values (?, ?)').run(
+      version,
+      '2026-01-01T00:00:00.000Z',
+    );
+  }
+
+  it('backfills a checksum on first run without bricking the database or reapplying the migration', () => {
+    const dir = tempDir();
+    const db = freshDb();
+    seedLegacyAppliedRow(db, dir, '0001_legacy.sql', 'create table legacy (x integer);');
+
+    expect(runMigrations(db, dir)).toEqual({ applied: [], backfilledChecksums: ['0001_legacy'] });
+
+    const row = db
+      .prepare('select checksum from schema_migrations where version = ?')
+      .get('0001_legacy') as { checksum: string | null };
+    expect(row.checksum).toMatch(/^[0-9a-f]{64}$/);
+
+    // Exactly one `legacy` table — reapplying `create table` would have
+    // thrown "table legacy already exists" and this test would have failed
+    // via the outer expect above instead of reaching here.
+    const tables = db
+      .prepare("select count(*) as c from sqlite_master where type = 'table' and name = 'legacy'")
+      .get() as { c: number };
+    expect(tables.c).toBe(1);
+  });
+
+  it('is idempotent once backfilled: an unmodified file produces no further backfill and no error', () => {
+    const dir = tempDir();
+    const db = freshDb();
+    seedLegacyAppliedRow(db, dir, '0001_legacy.sql', 'create table legacy (x integer);');
+    runMigrations(db, dir);
+
+    expect(runMigrations(db, dir)).toEqual({ applied: [], backfilledChecksums: [] });
+  });
+
+  it('protects the migration going forward: an edit AFTER the backfill is still caught', () => {
+    const dir = tempDir();
+    const file = join(dir, '0001_legacy.sql');
+    const db = freshDb();
+    seedLegacyAppliedRow(db, dir, '0001_legacy.sql', 'create table legacy (x integer);');
+    runMigrations(db, dir); // establishes the trusted baseline checksum
+
+    writeFileSync(file, 'create table legacy (x integer, y integer);');
+    expect(() => runMigrations(db, dir)).toThrow(/0001_legacy/);
+  });
+});
+
+// Verified empirically in the M3 progress log: "a numerically-earlier file
+// appearing after a later one already ran is applied anyway, out of order,
+// with no warning."
+describe('runMigrations out-of-order application', () => {
+  it('refuses a numerically-earlier file that appears after a later one has already applied', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '0001_first.sql'), 'create table a (x integer);');
+    writeFileSync(join(dir, '0003_third.sql'), 'create table c (x integer);');
+    const db = freshDb();
+    runMigrations(db, dir); // applies 0001 and 0003; 0002 does not exist yet.
+
+    // A migration lands late, numbered as if it belonged between the two
+    // that already ran — exactly the scenario a colleague's delayed commit
+    // produces.
+    writeFileSync(join(dir, '0002_second.sql'), 'create table b (x integer);');
+
+    expect(() => runMigrations(db, dir)).toThrow(/0002_second/);
+    expect(() => runMigrations(db, dir)).toThrow(/order/i);
+
+    // Nothing applied: no table b, no bookkeeping row for it.
+    const tables = db
+      .prepare("select name from sqlite_master where type = 'table' and name = 'b'")
+      .all();
+    expect(tables).toEqual([]);
+    const row = db
+      .prepare('select version from schema_migrations where version = ?')
+      .get('0002_second');
+    expect(row).toBeUndefined();
+  });
+});
+
+// The boot-behaviour design question: entrypoints no longer auto-apply.
+// assertMigrationsUpToDate is what src/bin/{api,ingest,score,rank,scheduler}.ts
+// call instead of runMigrations — see CLAUDE.md and
+// .superpowers/sdd/2026-08-14-m3-api-dashboard/fix-migration-runner-report.md
+// for the reasoning. It still performs the same checksum/backfill/ordering
+// checks (drift and out-of-order files are integrity problems regardless of
+// whether the caller is allowed to apply), it just never executes a pending
+// migration's SQL.
+describe('assertMigrationsUpToDate', () => {
+  it('does not throw when every migration on disk has already been applied', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '0001_first.sql'), 'create table a (x integer);');
+    const db = freshDb();
+    runMigrations(db, dir);
+
+    expect(() => assertMigrationsUpToDate(db, dir)).not.toThrow();
+  });
+
+  it('refuses to boot with pending migrations, naming them and pointing at npm run migrate', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '0001_first.sql'), 'create table a (x integer);');
+    const db = freshDb();
+    // Nothing applied yet — an entrypoint booted against a fresh clone (or
+    // a machine a `git pull` just landed new migrations on) before anyone
+    // ran `npm run migrate`.
+
+    expect(() => assertMigrationsUpToDate(db, dir)).toThrow(/0001_first/);
+    expect(() => assertMigrationsUpToDate(db, dir)).toThrow(/npm run migrate/);
+
+    // It really did refuse: table a was never created, unlike runMigrations.
+    const tables = db
+      .prepare("select name from sqlite_master where type = 'table' and name = 'a'")
+      .all();
+    expect(tables).toEqual([]);
+  });
+
+  it('still detects checksum drift on already-applied migrations, without applying anything new', () => {
+    const dir = tempDir();
+    const file = join(dir, '0001_first.sql');
+    writeFileSync(file, 'create table a (x integer);');
+    const db = freshDb();
+    runMigrations(db, dir);
+
+    writeFileSync(file, 'create table a (x integer, y integer);');
+    expect(() => assertMigrationsUpToDate(db, dir)).toThrow(/0001_first/);
+  });
+
+  it('still refuses an out-of-order file even in check-only mode', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '0001_first.sql'), 'create table a (x integer);');
+    writeFileSync(join(dir, '0003_third.sql'), 'create table c (x integer);');
+    const db = freshDb();
+    runMigrations(db, dir);
+    writeFileSync(join(dir, '0002_second.sql'), 'create table b (x integer);');
+
+    // Must be refused as an ORDERING violation specifically — not merely as
+    // a generic "pending migration" (assertMigrationsUpToDate's own
+    // "pending" message also happens to name the file, which would let a
+    // disabled ordering check hide behind that unrelated message).
+    expect(() => assertMigrationsUpToDate(db, dir)).toThrow(/0002_second/);
+    expect(() => assertMigrationsUpToDate(db, dir)).toThrow(/order/i);
+  });
+
+  it('still backfills checksums for legacy rows even though it never applies anything', () => {
+    const dir = tempDir();
+    const db = freshDb();
+    writeFileSync(join(dir, '0001_legacy.sql'), 'create table legacy (x integer);');
+    db.exec(`
+      create table if not exists schema_migrations (
+        version    text primary key,
+        applied_at text not null
+      )
+    `);
+    db.exec('create table legacy (x integer);');
+    db.prepare('insert into schema_migrations (version, applied_at) values (?, ?)').run(
+      '0001_legacy',
+      '2026-01-01T00:00:00.000Z',
+    );
+
+    expect(() => assertMigrationsUpToDate(db, dir)).not.toThrow();
+    const row = db
+      .prepare('select checksum from schema_migrations where version = ?')
+      .get('0001_legacy') as { checksum: string | null };
+    expect(row.checksum).toMatch(/^[0-9a-f]{64}$/);
   });
 });

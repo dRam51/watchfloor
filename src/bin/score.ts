@@ -21,7 +21,7 @@ import { parseArgs } from 'node:util';
 import { join } from 'node:path';
 import { loadEnv } from '../config/env.ts';
 import { openDatabase } from '../db/openDatabase.ts';
-import { runMigrations } from '../db/migrate.ts';
+import { assertMigrationsUpToDate } from '../db/migrate.ts';
 import { closeDb } from '../db/connection.ts';
 import { loadSourcesFile } from '../sources/load.ts';
 import { loadInterestsFile } from '../interests/load.ts';
@@ -45,8 +45,15 @@ try {
   const env = loadEnv();
   const db = openDatabase(env.WF_DB_PATH);
   try {
-    const applied = runMigrations(db, join(repoRoot, 'db', 'migrations'));
-    if (applied.length > 0) console.log(`applied migrations: ${applied.join(', ')}`);
+    // Entrypoints no longer auto-apply migrations -- run `npm run migrate`
+    // first. See src/db/migrate.ts's doc comment on assertMigrationsUpToDate.
+    const { backfilledChecksums } = assertMigrationsUpToDate(db, join(repoRoot, 'db', 'migrations'));
+    if (backfilledChecksums.length > 0) {
+      console.log(
+        `backfilled checksum for previously-applied migration(s) with no recorded checksum: ` +
+          `${backfilledChecksums.join(', ')}`,
+      );
+    }
 
     const sources = loadSourcesFile(join(repoRoot, 'config', 'sources.yaml'));
     const interestProfile = loadInterestsFile(join(repoRoot, 'config', 'interests.yaml'));

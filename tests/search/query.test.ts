@@ -149,7 +149,16 @@ describe('migration 0005: items_fts schema', () => {
       .filter((f) => f.endsWith('.sql'))
       .sort();
     for (const f of files) {
-      if (f === '0005_fts_search.sql') continue;
+      // Strictly BEFORE 0005, not merely "not named 0005" -- migrations
+      // added after this test was written (0006_lane_layout.sql) sort past
+      // 0005 and must stay excluded too, or this builds a database with
+      // 0006 applied and 0005 not, which the runner now correctly refuses
+      // to reconcile out of order (src/db/migrate.ts, "runMigrations
+      // out-of-order application"). That refusal is the fix working: this
+      // test's own directory used to be able to construct exactly the
+      // out-of-order shape the M3 progress log flagged as silently
+      // tolerated.
+      if (f >= '0005_fts_search.sql') continue;
       writeFileSync(join(preFtsDir, f), readFileSync(join(REAL_MIGRATIONS_DIR, f), 'utf8'));
     }
 
@@ -162,11 +171,18 @@ describe('migration 0005: items_fts schema', () => {
     insertItem(db, mangioneApNews());
     insertItem(db, mangionePbsNewshour());
 
-    // Now apply the REAL, full migrations directory (includes 0005).
-    // runMigrations is idempotent by filename/version, so this only
-    // executes 0005 -- 0001 through 0004 are already recorded as applied.
-    const newlyApplied = runMigrations(db, REAL_MIGRATIONS_DIR);
-    expect(newlyApplied).toEqual(['0005_fts_search']);
+    // Now apply the REAL, full migrations directory (includes 0005 and
+    // everything after it). runMigrations is idempotent by filename/version,
+    // so this only executes what preFtsDir didn't already apply -- 0001
+    // through 0004 are already recorded as applied. Computed from `files`
+    // rather than hardcoded, so this survives a future 0007+ being added
+    // without needing an edit here (the same robustness the directory-build
+    // loop above already goes out of its way for).
+    const expectedNewlyApplied = files
+      .filter((f) => f >= '0005_fts_search.sql')
+      .map((f) => f.slice(0, -'.sql'.length));
+    const { applied: newlyApplied } = runMigrations(db, REAL_MIGRATIONS_DIR);
+    expect(newlyApplied).toEqual(expectedNewlyApplied);
 
     // The backfill inside 0005 must have picked up both pre-existing items
     // with no separate manual reindex step.
