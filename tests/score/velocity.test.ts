@@ -1,11 +1,15 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
 import { recordStarSnapshot } from '../../src/db/repoSnapshots.ts';
-import { computeStarVelocity, DEFAULT_MIN_SPAN_DAYS } from '../../src/score/velocity.ts';
+import {
+  computeStarVelocity,
+  computeStarVelocityForItem,
+  DEFAULT_MIN_SPAN_DAYS,
+} from '../../src/score/velocity.ts';
 
 const open: Array<ReturnType<typeof openDb>> = [];
 function migratedDb() {
@@ -333,5 +337,125 @@ describe('computeStarVelocity input validation', () => {
     expect(() =>
       computeStarVelocity(db, AGENTKIT.repoId, { now: '2026-08-14', tz: NY }),
     ).toThrow();
+  });
+});
+
+describe('the insufficient-history case cannot be silently unwrapped', () => {
+  it('will not compile if a caller reads the rate without checking the status', () => {
+    // These three `@ts-expect-error` directives ARE the assertion, and they
+    // are checked by `npm run typecheck` (tsc -p tsconfig.test.json), NOT by
+    // vitest -- esbuild strips types without checking them, exactly as
+    // tests/domain/repo.test.ts pins the Excerpt brand.
+    //
+    // Self-guarding: if `starsPerDay` were ever added to the
+    // insufficient_history branch -- as a 0, as an optional, as a `| null` --
+    // every directive below becomes unused and tsc fails with TS2578. So the
+    // guard cannot rot into a silent no-op the way a runtime assertion could.
+    const db = migratedDb();
+    const result = computeStarVelocity(db, AGENTKIT.repoId, { now: NOW, tz: NY });
+
+    // @ts-expect-error starsPerDay does not exist on the insufficient branch
+    const direct: number = result.starsPerDay;
+    // @ts-expect-error destructuring is the same property access
+    const { starsPerDay } = result;
+    // @ts-expect-error the property access fails before ?? can supply a default
+    const defaulted: number = result.starsPerDay ?? 0;
+
+    // Runtime half: TypeScript refused all three, but nothing stops a JS
+    // caller, so record what those reads actually produce -- undefined, which
+    // `?? 0` would then turn into a confident, wrong "flat".
+    expect(direct).toBeUndefined();
+    expect(starsPerDay).toBeUndefined();
+    expect(defaulted).toBe(0);
+    expect(result.status).toBe('insufficient_history');
+  });
+
+  it('narrows to a number once the status is checked', () => {
+    // The other half: the union must not be so closed that the legitimate
+    // caller cannot get at the value.
+    const db = migratedDb();
+    snap(db, 40, AT('2026-08-08'));
+    snap(db, 400, AT('2026-08-14'));
+    const result = computeStarVelocity(db, AGENTKIT.repoId, { now: NOW, tz: NY });
+
+    const rate: number = result.status === 'ok' ? result.starsPerDay : Number.NaN;
+
+    expect(rate).toBe(60);
+  });
+});
+
+describe('computeStarVelocityForItem', () => {
+  it('resolves the item key to a repo and computes its velocity', () => {
+    const db = migratedDb();
+    snap(db, 40, AT('2026-08-08'));
+    snap(db, 400, AT('2026-08-14'));
+
+    const result = computeStarVelocityForItem(db, AGENTKIT.itemKey, { now: NOW, tz: NY });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.repoId).toBe(AGENTKIT.repoId);
+    expect(result.starsPerDay).toBe(60);
+  });
+
+  it('reports an unknown key as insufficient history, not as a zero rate', () => {
+    // The fifth way a caller could end up with a confident zero: an item that
+    // is not a repo, or a repo never snapshotted. Folded into the SAME union
+    // so it inherits the compile-time guard above rather than being a
+    // separate `null` each caller handles its own way.
+    const db = migratedDb();
+
+    const result = computeStarVelocityForItem(db, 'f'.repeat(64), { now: NOW, tz: NY });
+
+    expect(result.status).toBe('insufficient_history');
+    if (result.status !== 'insufficient_history') return;
+    expect(result.reason).toBe('unknown_repo');
+    expect(result.repoId).toBeNull();
+    expect(result.fromDay).toBe('2026-08-08');
+    expect(result.throughDay).toBe('2026-08-14');
+    expect(result.expectedDays).toBe(7);
+    expect(result.missingDays).toEqual([]);
+  });
+});
+
+describe('velocity is pure and decay-invariant', () => {
+  it('reads no clock of its own', () => {
+    // `now` is always injected, matching src/score/decay.ts. A Date.now() in
+    // here would make a historical query untruthful and this module
+    // untestable without freezing time.
+    const source = readFileSync(join(process.cwd(), 'src', 'score', 'velocity.ts'), 'utf8');
+    expect(source).not.toMatch(/Date\.now\(\)|new Date\(\s*\)/);
+  });
+
+  it('never imports or applies decay', () => {
+    // Velocity is a STORED component of signal_score. item_scores is
+    // append-only, so a component that changes with the clock has no stable
+    // row to append -- decay belongs to the read path (src/score/decay.ts),
+    // which applies it separately. Structural, not a promise. Same three
+    // greps tests/score/mechanical.test.ts:440-442 uses, for the same reason:
+    // narrow enough that the module can still DOCUMENT decay-invariance
+    // without tripping its own guard.
+    const source = readFileSync(join(process.cwd(), 'src', 'score', 'velocity.ts'), 'utf8');
+    expect(source).not.toMatch(/from ['"].*decay\.ts['"]/);
+    expect(source).not.toMatch(/\bdecayFactor\s*\(/);
+    expect(source).not.toMatch(/\bcomputeDecayFactor\s*\(/);
+  });
+
+  it('does not write to the database', () => {
+    const db = migratedDb();
+    snap(db, 40, AT('2026-08-08'));
+    snap(db, 400, AT('2026-08-14'));
+    const before = db
+      .prepare('select count(*) as n, sum(stars) as s from github_repo_star_snapshots')
+      .get() as { n: number; s: number };
+
+    computeStarVelocity(db, AGENTKIT.repoId, { now: NOW, tz: NY });
+    computeStarVelocityForItem(db, AGENTKIT.itemKey, { now: NOW, tz: NY });
+
+    expect(
+      db
+        .prepare('select count(*) as n, sum(stars) as s from github_repo_star_snapshots')
+        .get(),
+    ).toEqual(before);
   });
 });

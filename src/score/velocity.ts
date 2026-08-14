@@ -1,6 +1,11 @@
 import type { Db } from '../db/connection.ts';
 import { assertCanonicalTimestamp } from '../domain/item.ts';
-import { localDay, getSnapshotWindow, type SnapshotWindow } from '../db/repoSnapshots.ts';
+import {
+  localDay,
+  getSnapshotWindow,
+  resolveRepoId,
+  type SnapshotWindow,
+} from '../db/repoSnapshots.ts';
 
 export const DEFAULT_WINDOW_DAYS = 7;
 
@@ -23,7 +28,6 @@ export interface VelocityEndpoint {
 }
 
 export interface VelocityWindowFacts {
-  repoId: number;
   fromDay: string;
   throughDay: string;
   expectedDays: number;
@@ -33,6 +37,7 @@ export interface VelocityWindowFacts {
 
 export interface VelocityOk extends VelocityWindowFacts {
   status: 'ok';
+  repoId: number;
   /** Signed. Negative is real data -- see the module doc comment, point 3. */
   starsPerDay: number;
   /** `last.stars - first.stars`, so `starsPerDay` is auditable, not opaque. */
@@ -56,11 +61,21 @@ export interface VelocityOk extends VelocityWindowFacts {
   mixedTimezone: boolean;
 }
 
-export type InsufficientReason = 'no_snapshots' | 'single_snapshot' | 'span_too_short';
+export type InsufficientReason =
+  /** The item_key belongs to no repo this system has ever snapshotted. */
+  | 'unknown_repo'
+  /** The window holds no readings at all -- a fresh database, day one. */
+  | 'no_snapshots'
+  /** One reading. A rate needs two points; one has nothing to subtract from. */
+  | 'single_snapshot'
+  /** Two or more readings, too close together in real time to state a rate. */
+  | 'span_too_short';
 
 export interface VelocityInsufficient extends VelocityWindowFacts {
   status: 'insufficient_history';
   reason: InsufficientReason;
+  /** `null` only for `unknown_repo` -- there is no repo to name. */
+  repoId: number | null;
   /** Elapsed days between the oldest and newest reading; 0 when under two. */
   spanDays: number;
   /** The floor `spanDays` failed to reach. */
@@ -73,7 +88,6 @@ const DAY_MS = 86_400_000;
 
 function facts(window: SnapshotWindow): VelocityWindowFacts {
   return {
-    repoId: window.repoId,
     fromDay: window.fromDay,
     throughDay: window.throughDay,
     expectedDays: window.expectedDays,
@@ -96,6 +110,7 @@ export function starVelocityFromWindow(
     ...facts(window),
     status: 'insufficient_history',
     reason,
+    repoId: window.repoId,
     spanDays,
     minSpanDays,
   });
@@ -113,6 +128,7 @@ export function starVelocityFromWindow(
   return {
     ...facts(window),
     status: 'ok',
+    repoId: window.repoId,
     // No clamp, in either direction -- module doc comment, point 3.
     starsPerDay: starsGained / spanDays,
     starsGained,
@@ -172,4 +188,63 @@ export function computeStarVelocity(
     days,
   });
   return starVelocityFromWindow(window, minSpanDays);
+}
+
+/**
+ * Steps a calendar-day LABEL by `delta` whole days.
+ *
+ * Deliberate duplicate of the private `shiftDay` in src/db/repoSnapshots.ts,
+ * reproduced rather than exported because that file belongs to another task
+ * this milestone. Same reasoning applies verbatim: input and output are bare
+ * YYYY-MM-DD labels with no instant and no zone attached, so `Date.UTC` is a
+ * fixed frame for proleptic-Gregorian arithmetic, NOT a zone read -- and
+ * `new Date(y, m, d)` would both read the host zone and land on the wrong
+ * date across a DST shift, where a local day is 23 or 25 hours. IF THE TWO
+ * ARE EVER UNIFIED, UNIFY BOTH -- a divergence here would be silent.
+ */
+function shiftDay(day: string, delta: number): string {
+  const [year, month, date] = day.split('-').map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, date + delta)).toISOString().slice(0, 10);
+}
+
+/**
+ * Velocity for the repo an `item_key` refers to -- the entry point a caller
+ * holding the rest of the system's identity (rather than GitHub's numeric id)
+ * actually has. See `resolveRepoId` for how the many-to-many mapping is
+ * resolved.
+ *
+ * A key that maps to no repo is folded into the SAME discriminated union as
+ * every other insufficient case, rather than returned as its own `null`. That
+ * is the whole point: it inherits the compile-time guard, so the fifth route
+ * to a confident zero -- "this item is not a repo, so call it flat" -- is
+ * closed by the same mechanism as the other four.
+ */
+export function computeStarVelocityForItem(
+  db: Db,
+  itemKey: string,
+  opts: VelocityOptions,
+): VelocityResult {
+  const repoId = resolveRepoId(db, itemKey);
+  if (repoId !== null) return computeStarVelocity(db, repoId, opts);
+
+  assertCanonicalTimestamp('now', opts.now);
+  const days = opts.windowDays ?? DEFAULT_WINDOW_DAYS;
+  const throughDay = localDay(opts.now, opts.tz);
+  return {
+    status: 'insufficient_history',
+    reason: 'unknown_repo',
+    repoId: null,
+    fromDay: shiftDay(throughDay, -(days - 1)),
+    throughDay,
+    expectedDays: days,
+    observedDays: 0,
+    // Empty, NOT the whole window: nothing is "missing" for a repo that was
+    // never watched. `no_snapshots` means we looked and saw nothing;
+    // `unknown_repo` means there was never anything to look at. Naming seven
+    // missing days here would invite a consumer to render "0 of 7 days
+    // observed" for an item that is not a repo at all.
+    missingDays: [],
+    spanDays: 0,
+    minSpanDays: opts.minSpanDays ?? DEFAULT_MIN_SPAN_DAYS,
+  };
 }
