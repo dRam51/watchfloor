@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { act } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ItemRow } from '../src/components/ItemRow.tsx';
 import { actClick, makeFeedItem, mount, type Mounted } from './testUtils.tsx';
@@ -21,7 +22,7 @@ describe('ItemRow -- at rest', () => {
       signalScore: 3.482,
     });
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     const text = current.container.textContent!;
     expect(text).toContain('A cyber advisory');
@@ -50,14 +51,14 @@ describe('ItemRow -- at rest', () => {
   it('shows the cluster count only when the item is actually clustered', () => {
     const solo = makeFeedItem({ clusterSize: 1 });
     current = mount(
-      <ItemRow item={solo} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={solo} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     expect(current.container.textContent).not.toContain('×');
 
     current.unmount();
     const clustered = makeFeedItem({ clusterSize: 4 });
     current = mount(
-      <ItemRow item={clustered} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={clustered} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     expect(current.container.textContent).toContain('×4');
   });
@@ -65,7 +66,7 @@ describe('ItemRow -- at rest', () => {
   it('provides visible, tappable (>=44px) affordances for open, save, and dismiss -- none hover-only', () => {
     const item = makeFeedItem();
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     const open = current.container.querySelector('a.item-row__action')!;
     const buttons = Array.from(current.container.querySelectorAll('button.item-row__action'));
@@ -91,7 +92,7 @@ describe('ItemRow -- pinned-at-zero legibility', () => {
       },
     });
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     const text = current.container.textContent!;
     expect(text).toContain('PINNED');
@@ -106,7 +107,7 @@ describe('ItemRow -- pinned-at-zero legibility', () => {
   it('an unpinned item with the same 0.000 score gets no PINNED badge and no accent', () => {
     const item = makeFeedItem({ signalScore: 0 });
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     expect(current.container.textContent).not.toContain('PINNED');
     expect(current.container.querySelector('li.item-row')!.classList.contains('item-row--pinned')).toBe(false);
@@ -117,7 +118,7 @@ describe('ItemRow -- summary: null vs empty vs present', () => {
   function expandedTextOf(summary: string | null): string {
     const item = makeFeedItem({ summary });
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     actClick(current.container.querySelector<HTMLButtonElement>('.item-row__toggle')!);
     const text = current.container.textContent!;
@@ -143,7 +144,7 @@ describe('ItemRow -- expand/collapse', () => {
   it('toggles aria-expanded and reveals the detail panel in place, on the same row', () => {
     const item = makeFeedItem({ summary: 'Detail content goes here.' });
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     const toggle = current.container.querySelector<HTMLButtonElement>('.item-row__toggle')!;
     const wrapper = current.container.querySelector('.item-row__detail-wrapper')!;
@@ -173,7 +174,16 @@ describe('ItemRow -- actions call the right callback', () => {
     const onOpen = vi.fn();
     const item = makeFeedItem();
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={onOpen} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow
+        item={item}
+        dismissing={false}
+        focused={false}
+        tabIndex={-1}
+        onFocusRow={noop}
+        onOpen={onOpen}
+        onToggleSave={noop}
+        onDismiss={noop}
+      />,
     );
     actClick(current.container.querySelector('a.item-row__action')!);
     expect(onOpen).toHaveBeenCalledExactlyOnceWith(item);
@@ -183,7 +193,16 @@ describe('ItemRow -- actions call the right callback', () => {
     const onToggleSave = vi.fn();
     const unsaved = makeFeedItem();
     current = mount(
-      <ItemRow item={unsaved} dismissing={false} onOpen={noop} onToggleSave={onToggleSave} onDismiss={noop} />,
+      <ItemRow
+        item={unsaved}
+        dismissing={false}
+        focused={false}
+        tabIndex={-1}
+        onFocusRow={noop}
+        onOpen={noop}
+        onToggleSave={onToggleSave}
+        onDismiss={noop}
+      />,
     );
     const saveBtn = Array.from(current.container.querySelectorAll('button.item-row__action')).find(
       (b) => b.textContent === 'Save',
@@ -195,7 +214,7 @@ describe('ItemRow -- actions call the right callback', () => {
     current.unmount();
     const saved = makeFeedItem({ state: { readAt: null, savedAt: '2026-08-14T17:00:00.000Z', dismissedAt: null } });
     current = mount(
-      <ItemRow item={saved} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow item={saved} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
     );
     const savedBtn = Array.from(current.container.querySelectorAll('button.item-row__action')).find(
       (b) => b.textContent === 'Saved',
@@ -207,7 +226,16 @@ describe('ItemRow -- actions call the right callback', () => {
     const onDismiss = vi.fn();
     const item = makeFeedItem();
     current = mount(
-      <ItemRow item={item} dismissing={false} onOpen={noop} onToggleSave={noop} onDismiss={onDismiss} />,
+      <ItemRow
+        item={item}
+        dismissing={false}
+        focused={false}
+        tabIndex={-1}
+        onFocusRow={noop}
+        onOpen={noop}
+        onToggleSave={noop}
+        onDismiss={onDismiss}
+      />,
     );
     const dismissBtn = Array.from(current.container.querySelectorAll('button.item-row__action')).find(
       (b) => b.textContent === 'Dismiss',
@@ -217,11 +245,65 @@ describe('ItemRow -- actions call the right callback', () => {
   });
 });
 
+describe('ItemRow -- keyboard focus wiring (M3 task 9)', () => {
+  it('applies the tabIndex prop to the toggle button verbatim -- roving tabindex is Stream\'s call, not ItemRow\'s', () => {
+    const item = makeFeedItem();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={0} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    expect(current.container.querySelector('.item-row__toggle')!.getAttribute('tabindex')).toBe('0');
+
+    current.unmount();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    expect(current.container.querySelector('.item-row__toggle')!.getAttribute('tabindex')).toBe('-1');
+  });
+
+  it('calls onFocusRow when the toggle button receives REAL DOM focus -- not on render, not on hover', () => {
+    const onFocusRow = vi.fn();
+    const item = makeFeedItem();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={0} onFocusRow={onFocusRow} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    expect(onFocusRow).not.toHaveBeenCalled();
+
+    const toggle = current.container.querySelector<HTMLButtonElement>('.item-row__toggle')!;
+    act(() => toggle.focus());
+
+    expect(document.activeElement).toBe(toggle);
+    expect(onFocusRow).toHaveBeenCalledOnce();
+  });
+
+  it('the `focused` prop paints the row highlight, but ONLY as a consequence of real focus -- see Stream.tsx, never independently', () => {
+    const item = makeFeedItem();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={true} tabIndex={0} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    expect(current.container.querySelector('li.item-row')!.classList.contains('item-row--focused')).toBe(true);
+
+    current.unmount();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={0} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    expect(current.container.querySelector('li.item-row')!.classList.contains('item-row--focused')).toBe(false);
+  });
+});
+
 describe('ItemRow -- dismissing transition state', () => {
   it('marks the row aria-hidden and with the dismissing class while the fade plays, without implying undo', () => {
     const item = makeFeedItem();
     current = mount(
-      <ItemRow item={item} dismissing={true} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+      <ItemRow
+        item={item}
+        dismissing={true}
+        focused={false}
+        tabIndex={-1}
+        onFocusRow={noop}
+        onOpen={noop}
+        onToggleSave={noop}
+        onDismiss={noop}
+      />,
     );
     const row = current.container.querySelector('li.item-row')!;
     expect(row.classList.contains('item-row--dismissing')).toBe(true);

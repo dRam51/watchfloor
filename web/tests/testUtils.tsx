@@ -70,6 +70,28 @@ export function typeInto(input: HTMLInputElement, value: string): void {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+/**
+ * Dispatches a real, cancelable `keydown` on `target` (default: `window`,
+ * matching where Stream.tsx's global keyboard listener is attached) INSIDE
+ * an `act()` call, same rationale as `actClick` above. Returns the event so
+ * a test can assert `defaultPrevented` -- the jsdom-verifiable proxy for "a
+ * character would not have leaked into a focused field," since jsdom does
+ * not implement the browser's own keydown -> character-insertion default
+ * action the way a real browser does (see web/tests/Stream.test.tsx's `/`
+ * tests for why that matters here specifically).
+ */
+export function actKeyDown(
+  key: string,
+  opts: Partial<Omit<KeyboardEventInit, 'key'>> = {},
+  target: EventTarget = window,
+): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...opts });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
 // ---------------------------------------------------------------------------
 // Fetch mocking
 // ---------------------------------------------------------------------------

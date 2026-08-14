@@ -26,6 +26,21 @@ const BEAT_LABELS: Record<Beat, string> = {
 export interface ItemRowProps {
   item: FeedItem;
   dismissing: boolean;
+  /**
+   * Real-focus wiring for M3 task 9's keyboard layer (`j`/`k` roving
+   * navigation). `focused` and `tabIndex` are both DERIVED from actual DOM
+   * focus in Stream.tsx (never an independent "selectedIndex" that merely
+   * paints a highlight) -- see that file's `focusedItemKey` state and its
+   * own comment on why. `toggleRef` and `onFocusRow` are what keep it that
+   * way: `toggleRef` lets Stream call `.focus()` on this exact button, and
+   * `onFocusRow` reports back whenever this button receives focus by ANY
+   * means (keyboard nav, Tab, or a plain mouse click), so the two paths
+   * can never disagree about which row is "current."
+   */
+  focused: boolean;
+  tabIndex: number;
+  onFocusRow: () => void;
+  toggleRef?: (el: HTMLButtonElement | null) => void;
   onOpen: (item: FeedItem) => void;
   onToggleSave: (item: FeedItem) => void;
   onDismiss: (item: FeedItem) => void;
@@ -76,7 +91,17 @@ function SummaryBlock({ summary }: { summary: string | null }) {
   return <p className="item-row__summary">{summary}</p>;
 }
 
-export function ItemRow({ item, dismissing, onOpen, onToggleSave, onDismiss }: ItemRowProps) {
+export function ItemRow({
+  item,
+  dismissing,
+  focused,
+  tabIndex,
+  onFocusRow,
+  toggleRef,
+  onOpen,
+  onToggleSave,
+  onDismiss,
+}: ItemRowProps) {
   const [expanded, setExpanded] = useState(false);
   const detailId = useId();
   const override = activeOverride(item);
@@ -91,6 +116,7 @@ export function ItemRow({ item, dismissing, onOpen, onToggleSave, onDismiss }: I
         override.pinned ? 'item-row--pinned' : '',
         read ? 'item-row--read' : '',
         dismissing ? 'item-row--dismissing' : '',
+        focused ? 'item-row--focused' : '',
       ]
         .filter(Boolean)
         .join(' ')}
@@ -99,9 +125,12 @@ export function ItemRow({ item, dismissing, onOpen, onToggleSave, onDismiss }: I
       <div className="item-row__row">
         <button
           type="button"
+          ref={toggleRef}
           className="item-row__toggle"
           aria-expanded={expanded}
           aria-controls={detailId}
+          tabIndex={tabIndex}
+          onFocus={onFocusRow}
           onClick={() => setExpanded((v) => !v)}
         >
           <span className="item-row__chevron" aria-hidden="true">
