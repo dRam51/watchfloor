@@ -31,6 +31,7 @@ import { computeDecayFactor, type DecayConfig } from '../../src/score/decay.ts';
 import { loadDecayConfig } from '../../src/score/decay.ts';
 import { loadOverridesConfig, type OverridesConfig, type OverrideRule } from '../../src/score/overrides.ts';
 import { loadMechanicalScoreConfig } from '../../src/score/mechanical.ts';
+import { recordStarSnapshot } from '../../src/db/repoSnapshots.ts';
 import type { Source } from '../../src/sources/load.ts';
 
 const TOKEN = 'a-real-token-that-is-long-enough';
@@ -854,4 +855,187 @@ describe('real corpus (data/wf.db)', () => {
       await server.close();
     })();
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// M4a task 7 -- the repos lane's row payload
+//
+// §7: "Repos lane rows differ: repo name, one-line description, language,
+// stars + velocity arrow, last-commit age." None of that is derivable client-
+// side (§7.1 forbids business logic in the frontend), so all of it is handed
+// over -- together with the VELOCITY STATUS, which is what lets the arrow
+// render honestly on a database that has no history yet.
+// ---------------------------------------------------------------------------
+describe('GET /feed -- the repo block', () => {
+  const REPO_SOURCE: Source = testSource({ id: 'github-mcp', type: 'github_search', beats: ['repos'], kind: undefined });
+
+  /**
+   * A pruned GitHub search result, in the shape src/adapters/github.ts stores
+   * in items.raw_json -- read back through that module's own
+   * repoFromSearchItem, which is the documented round trip.
+   */
+  function repoRawJson(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      id: 991,
+      name: 'mcp-stama',
+      full_name: 'StamManif/mcp-stama',
+      owner: { login: 'StamManif' },
+      description: 'An ultra-fast Rust MCP server with no dependencies',
+      language: 'Rust',
+      license: { spdx_id: 'MIT' },
+      stargazers_count: 400,
+      open_issues_count: 12,
+      pushed_at: '2026-08-13T09:15:00Z',
+      fork: false,
+      archived: false,
+      ...overrides,
+    });
+  }
+
+  function repoItem(db: Db, opts: { owner?: string; name?: string; raw?: string } = {}) {
+    const owner = opts.owner ?? 'StamManif';
+    const name = opts.name ?? 'mcp-stama';
+    const url = `https://github.com/${owner}/${name}`;
+    return insertItem(
+      db,
+      baseItem({ url, canonicalUrl: url, title: name, sourceId: 'github-mcp', beats: ['repos'], rawJson: opts.raw ?? repoRawJson() }),
+    );
+  }
+
+  it('is null for every non-repo item', async () => {
+    const db = migratedDb();
+    const item = insertItem(db, baseItem());
+    insertScoreRow(db, item.item_id, 'usnews', 5, 5, '2026-08-14T00:00:00.000Z');
+
+    const res = await buildTestServer(db).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    expect(res.json().items[0].repo).toBeNull();
+  });
+
+  it('carries §7\'s five row fields for a repos-lane item', async () => {
+    const db = migratedDb();
+    const item = repoItem(db);
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const repo = res.json().items[0].repo;
+
+    expect(repo.fullName).toBe('StamManif/mcp-stama');
+    expect(repo.description).toBe('An ultra-fast Rust MCP server with no dependencies');
+    expect(repo.language).toBe('Rust');
+    expect(repo.stars).toBe(400);
+    expect(repo.lastCommitAt).toBe('2026-08-13T09:15:00.000Z');
+    // Named for what GitHub's field actually counts -- never bare "issues".
+    expect(repo.openIssuesAndPullRequests).toBe(12);
+  });
+
+  it('SAYS SO RATHER THAN LYING WITH A ZERO: a repo with no snapshot history reports insufficient_history and a named reason', async () => {
+    const db = migratedDb();
+    const item = repoItem(db);
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const velocity = res.json().items[0].repo.velocity;
+
+    expect(velocity.status).toBe('insufficient_history');
+    expect(velocity.reason).toBe('unknown_repo');
+    expect(velocity.starsPerDay).toBeUndefined(); // never a confident zero on the wire either
+    expect(velocity.observedDays).toBe(0);
+    expect(velocity.expectedDays).toBe(7);
+  });
+
+  it('reports a real rate with a FRACTIONAL spanDays, so §7 cannot render day labels as the measurement', async () => {
+    const db = migratedDb();
+    const item = repoItem(db);
+    // 40 -> 400 across six days and two hours: §4's example, off a whole number
+    // on purpose (src/score/velocity.ts's carry-forward to task 8).
+    recordStarSnapshot(db, { repoId: 991, itemKey: item.item_key, fullName: 'StamManif/mcp-stama', stars: 40, observedAt: '2026-08-08T10:00:00.000Z', tz: 'UTC' });
+    recordStarSnapshot(db, { repoId: 991, itemKey: item.item_key, fullName: 'StamManif/mcp-stama', stars: 400, observedAt: '2026-08-14T12:00:00.000Z', tz: 'UTC' });
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T18:00:00.000Z');
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T19:00:00.000Z'));
+    const repo = res.json().items[0].repo;
+
+    expect(repo.velocity.status).toBe('ok');
+    expect(repo.velocity.spanDays).toBeCloseTo(6 + 2 / 24, 6);
+    expect(repo.velocity.spanDays).not.toBe(Math.round(repo.velocity.spanDays));
+    expect(repo.velocity.starsPerDay).toBeCloseTo(360 / (6 + 2 / 24), 6);
+    expect(repo.velocity.staleDays).toBe(0);
+    expect(repo.repoId).toBe(991);
+    // The number the scorer actually used, beside the facts behind it.
+    expect(repo.velocityComponent).toBeGreaterThan(0.9);
+  });
+
+  it('SHIPS THE HN EVIDENCE, not just a flag: the mention that caused the de-rank is named', async () => {
+    const db = migratedDb();
+    const item = repoItem(db, { owner: 'github', name: 'dmca', raw: repoRawJson({ name: 'dmca', owner: { login: 'github' }, full_name: 'github/dmca' }) });
+    // The real row from attic/wf-m1-firstrun-2026-08-14.db -- a deep link, so
+    // its item_key differs from the repo's.
+    insertItem(
+      db,
+      baseItem({
+        url: 'https://github.com/github/dmca/blob/master/2020/10/2020-10-23-RIAA.md',
+        canonicalUrl: 'https://github.com/github/dmca/blob/master/2020/10/2020-10-23-RIAA.md',
+        title: 'YouTube-dl has received a DMCA takedown from RIAA',
+        sourceId: 'hn-algolia',
+        beats: ['ai'],
+      }),
+    );
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const hn = res.json().items[0].repo.hn;
+
+    expect(hn.seen).toBe(true);
+    expect(hn.component).toBe(1);
+    expect(hn.mentions).toHaveLength(1);
+    expect(hn.mentions[0].via).toBe('url');
+    expect(hn.mentions[0].title).toBe('YouTube-dl has received a DMCA takedown from RIAA');
+    expect(hn.mentions[0].canonicalUrl).toContain('/blob/');
+  });
+
+  it('IS READ AS OF THE SCORE\'S OWN computed_at, not the request now -- so the arrow describes the same instant the number does', async () => {
+    const db = migratedDb();
+    const item = repoItem(db);
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+    // An HN story fetched AFTER the score was computed. Counting it would show
+    // a de-rank the displayed score was never computed against -- the same
+    // reasoning src/score/rank.ts gives for cluster size.
+    insertItem(
+      db,
+      baseItem({
+        url: 'https://github.com/StamManif/mcp-stama',
+        canonicalUrl: 'https://github.com/StamManif/mcp-stama-later',
+        title: 'Show HN: MCP-stama – An ultra-fast Rust MCP server',
+        sourceId: 'hn-algolia',
+        beats: ['ai'],
+        fetchedAt: '2026-08-14T06:00:00.000Z',
+      }),
+    );
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T12:00:00.000Z'));
+    expect(res.json().items[0].repo.hn.seen).toBe(false);
+  });
+
+  it('an explicitly-supplied scoring config with NO repos block turns the whole mechanism off, honestly', async () => {
+    const db = migratedDb();
+    const item = repoItem(db);
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+
+    const bare = { ...loadMechanicalScoreConfig(join(process.cwd(), 'config', 'scoring.yaml')), repos: undefined };
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE], scoringConfig: bare }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    expect(res.json().items[0].repo).toBeNull();
+  });
+
+  it('a defective raw_json costs the metadata, never the velocity facts', async () => {
+    const db = migratedDb();
+    const item = repoItem(db, { raw: '{"nope": true}' });
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const repo = res.json().items[0].repo;
+    expect(repo.fullName).toBe('StamManif/mcp-stama'); // from the URL, always available
+    expect(repo.language).toBeNull();
+    expect(repo.stars).toBeNull();
+    expect(repo.velocity.status).toBe('insufficient_history');
+  });
 });

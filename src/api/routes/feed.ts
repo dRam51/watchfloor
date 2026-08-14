@@ -178,9 +178,13 @@ import { getItemEntities } from '../../domain/itemEntities.ts';
 import { getItemFirstFetchedAt } from '../../domain/itemFirstFetchedAt.ts';
 import { getItemState } from '../../domain/itemState.ts';
 import { getClusterSizeAsOf } from '../../cluster/store.ts';
-import { getLatestItemScore, type ItemScoreRow } from '../../score/mechanical.ts';
+import { getLatestItemScore, type ItemScoreRow, type MechanicalScoreConfig } from '../../score/mechanical.ts';
 import { computeDecayFactor, type DecayConfig } from '../../score/decay.ts';
 import { evaluateOverrides, type OverrideResult, type OverridesConfig } from '../../score/overrides.ts';
+import { DEFAULT_REPO_SCORING_CONFIG, resolveRepoSignal, type RepoScoringConfig, type RepoSignal } from '../../score/repoSignal.ts';
+import type { VelocityResult } from '../../score/velocity.ts';
+import { repoFromSearchItem } from '../../adapters/github.ts';
+import type { Repo } from '../../domain/repo.ts';
 import { KINDS, type Kind, type Source } from '../../sources/load.ts';
 
 // ---------------------------------------------------------------------------
@@ -202,6 +206,31 @@ export interface FeedDeps {
    * null` on the wire, never an error -- see `sourceKindById` below.
    */
   sources: Source[];
+  /**
+   * The loaded config/scoring.yaml (M4a task 7), used ONLY for its optional
+   * `repos:` block -- the weights and match rules behind the repos lane's
+   * velocity and HN-overlap facts.
+   *
+   * Optional, and the two absent cases mean DIFFERENT things on purpose:
+   *
+   *   dep omitted entirely       fall back to
+   *                              DEFAULT_REPO_SCORING_CONFIG, which a test
+   *                              asserts is byte-identical to the shipped
+   *                              config/scoring.yaml's repos block. This is
+   *                              today's production path: src/bin/api.ts
+   *                              builds FeedDeps and is not a file any M4a
+   *                              task owns, so defaulting is what keeps the
+   *                              lane's rows populated rather than silently
+   *                              blank. Wiring the real config through is a
+   *                              one-line change there.
+   *   dep supplied, `repos`
+   *   deleted from the YAML      the mechanism is OFF and every row reports
+   *                              `repo: null`. Deleting the block is
+   *                              config/scoring.yaml's documented one-edit
+   *                              rollback, and it has to reach the API too or
+   *                              the rollback would be half-applied.
+   */
+  scoringConfig?: MechanicalScoreConfig;
   /**
    * Injectable clock, matching every pure module in this codebase's "now is
    * always a parameter, never read from the system clock internally"
@@ -396,6 +425,26 @@ interface FeedRow {
   signalOverride: OverrideResult;
   readOverride: OverrideResult;
   state: { readAt: string | null; savedAt: string | null; dismissedAt: string | null };
+  /**
+   * The repos lane's row payload (M4a task 7 / §7: "repo name, one-line
+   * description, language, stars + velocity arrow, last-commit age"). `null`
+   * for every non-repo item, and for every item at all when the repos
+   * mechanism is switched off -- see FeedDeps.scoringConfig.
+   */
+  repo: FeedRepo | null;
+}
+
+interface FeedRepo {
+  /** Velocity + HN overlap, plus the two numbers the scorer derived from them. */
+  signal: RepoSignal;
+  /**
+   * The enrichment fields, read back out of `items.raw_json` through
+   * src/adapters/github.ts's own repoFromSearchItem -- the round trip that
+   * module documents and tests. `null` when the stored JSON is defective, in
+   * which case the velocity and HN facts are still perfectly good and are still
+   * shipped: a bad raw_json costs the metadata, never the ranking evidence.
+   */
+  meta: Repo | null;
 }
 
 interface BestBeatScore {
@@ -456,15 +505,63 @@ function pickBestBeat(
  * (§7), and reads every item-level fact from the item-key-scoped read paths
  * (module doc comment, point 4) rather than a single-version shortcut.
  */
+/**
+ * The repos-lane payload for one item, or `null` if it is not a repo item.
+ *
+ * ## Gated on the SOURCE TYPE, mirroring src/score/mechanical.ts exactly
+ * `github_search` is the one source type that emits repositories. Gating on the
+ * URL alone would misfire on an HN story that links to a repo root -- which
+ * shares an item_key with the repo under append-only storage, and is a real
+ * case -- and gating on the `repos` beat would break the moment a repo source
+ * is configured onto a second beat.
+ *
+ * ## Read AS OF the score's own computed_at, never the request's `now`
+ * The same decision, for the same reason, that this module and src/score/
+ * rank.ts already make for cluster size: the displayed velocity arrow and the
+ * displayed score must describe ONE instant. Reading velocity at `now` would
+ * put a fresher rate next to a number that was computed against an older one --
+ * more confusing than informative, and it would also make the response depend
+ * on the wall clock in a way the cursor's pinned-`now` snapshot property does
+ * not survive. The count catches up on the next scoring pass, exactly as
+ * cluster size does.
+ */
+function resolveFeedRepo(
+  db: Db,
+  itemKey: string,
+  item: Pick<Item, 'canonicalUrl' | 'sourceId' | 'rawJson'>,
+  sourceTypeById: Map<string, Source['type']>,
+  asOf: string,
+  repoConfig: RepoScoringConfig | null,
+): FeedRepo | null {
+  if (repoConfig === null) return null;
+  if (sourceTypeById.get(item.sourceId) !== 'github_search') return null;
+
+  const signal = resolveRepoSignal(db, itemKey, item.canonicalUrl, asOf, repoConfig);
+  if (signal === null) return null;
+
+  let meta: Repo | null = null;
+  try {
+    meta = repoFromSearchItem(JSON.parse(item.rawJson));
+  } catch {
+    // Unparseable raw_json. Not an error worth a 500: the item is still a real
+    // repo with real velocity and real HN evidence, and `meta: null` says so.
+    meta = null;
+  }
+
+  return { signal, meta };
+}
+
 function buildCandidateRows(
   db: Db,
   beatFilter: Beat | undefined,
   kindFilter: Kind | undefined,
   sourceKindById: Map<string, Kind | null>,
+  sourceTypeById: Map<string, Source['type']>,
   now: string,
   profile: SortProfile,
   decayConfig: DecayConfig,
   overridesConfig: OverridesConfig,
+  repoConfig: RepoScoringConfig | null,
 ): FeedRow[] {
   const itemKeys = beatFilter ? candidateItemKeysForBeat(db, beatFilter, now) : candidateItemKeysAll(db, now);
   const rows: FeedRow[] = [];
@@ -532,6 +629,7 @@ function buildCandidateRows(
         savedAt: state?.savedAt ?? null,
         dismissedAt: state?.dismissedAt ?? null,
       },
+      repo: resolveFeedRepo(db, itemKey, item, sourceTypeById, best.score.computedAt, repoConfig),
     });
   }
 
@@ -549,6 +647,107 @@ function rankKeyFor(row: FeedRow, profile: SortProfile): RankKey {
 // convention). Domain rows are never serialized directly (Item mixes
 // camelCase/snake_case) -- every field below is named and mapped explicitly.
 // ---------------------------------------------------------------------------
+
+/**
+ * src/score/velocity.ts's discriminated union, on the wire, WITH THE UNION
+ * INTACT.
+ *
+ * The two branches are written out separately rather than spread from a shared
+ * object, so `starsPerDay` is genuinely ABSENT from an insufficient-history
+ * response rather than present as `null` or `0`. That is the whole point of
+ * that module's type: a client reaching for `velocity.starsPerDay ?? 0` gets
+ * `undefined`, not a confident zero, and §7's row is forced to branch on
+ * `status` -- which is what makes "velocity unavailable -- N days of history"
+ * the only renderable answer on a database that has no history yet.
+ */
+function toVelocityJson(velocity: VelocityResult) {
+  if (velocity.status === 'insufficient_history') {
+    return {
+      status: velocity.status,
+      reason: velocity.reason,
+      repoId: velocity.repoId,
+      fromDay: velocity.fromDay,
+      throughDay: velocity.throughDay,
+      expectedDays: velocity.expectedDays,
+      observedDays: velocity.observedDays,
+      missingDays: velocity.missingDays,
+      spanDays: velocity.spanDays,
+      minSpanDays: velocity.minSpanDays,
+    };
+  }
+  return {
+    status: velocity.status,
+    repoId: velocity.repoId,
+    fromDay: velocity.fromDay,
+    throughDay: velocity.throughDay,
+    expectedDays: velocity.expectedDays,
+    observedDays: velocity.observedDays,
+    missingDays: velocity.missingDays,
+    /** Signed. A declining repo really does report a negative rate. */
+    starsPerDay: velocity.starsPerDay,
+    starsGained: velocity.starsGained,
+    /** FRACTIONAL -- elapsed days between two observation INSTANTS, not a count of day labels. */
+    spanDays: velocity.spanDays,
+    spanCoverage: velocity.spanCoverage,
+    /** Nonzero means this rate describes an interval that stopped this many days ago. */
+    staleDays: velocity.staleDays,
+    first: { day: velocity.first.day, stars: velocity.first.stars, observedAt: velocity.first.observedAt },
+    last: { day: velocity.last.day, stars: velocity.last.stars, observedAt: velocity.last.observedAt },
+    mixedTimezone: velocity.mixedTimezone,
+  };
+}
+
+/** §7's repo row, plus the evidence behind its two derived numbers. Named field by field, never spread. */
+function toRepoJson(repo: FeedRepo) {
+  const { signal, meta } = repo;
+  return {
+    owner: signal.ref.owner,
+    name: signal.ref.name,
+    fullName: signal.fullName,
+    /** GitHub's numeric id -- `null` until the repo has a snapshot history. */
+    repoId: signal.repoId,
+    // Enrichment, `null` throughout when items.raw_json could not be read back.
+    description: meta?.description ?? null,
+    language: meta?.language ?? null,
+    licenseSpdxId: meta?.licenseSpdxId ?? null,
+    stars: meta?.stars ?? null,
+    /**
+     * GitHub's `open_issues_count` counts open PULL REQUESTS too, so a repo
+     * with 3 issues and 90 PRs reports 93. Named for what it holds; §7's row
+     * must not label it bare "issues".
+     */
+    openIssuesAndPullRequests: meta?.openIssuesAndPullRequests ?? null,
+    /** Canonical instant; `null` for a repo never pushed to. §7's "last-commit age" is `now - this`. */
+    lastCommitAt: meta?.lastCommitAt ?? null,
+    isFork: meta?.isFork ?? null,
+    isArchived: meta?.isArchived ?? null,
+    /**
+     * The README's first paragraph, capped at ~300 characters. `null` here is
+     * "no excerpt stored", which is NOT the same as "this repo has no README" --
+     * an unread README is indistinguishable from a missing one, so §7 must not
+     * render this absence as "no README".
+     */
+    readmeExcerpt: meta?.readmeExcerpt ?? null,
+    velocity: toVelocityJson(signal.velocity),
+    /** The bounded [-1, 1] number the scorer actually added. 0 also means "no history". */
+    velocityComponent: signal.velocityComponent,
+    hn: {
+      seen: signal.hn.seen,
+      strength: signal.hn.strength,
+      /** The bounded [0, 1] number the scorer actually SUBTRACTED. */
+      component: signal.hnComponent,
+      mentions: signal.hn.mentions.map((m) => ({
+        itemKey: m.itemKey,
+        title: m.title,
+        canonicalUrl: m.canonicalUrl,
+        sourceId: m.sourceId,
+        publishedAt: m.publishedAt,
+        /** `url` -- a link that named the repo; `title` -- a headline that did. */
+        via: m.via,
+      })),
+    },
+  };
+}
 
 function toFeedItemJson(row: FeedRow, profile: SortProfile) {
   return {
@@ -590,6 +789,10 @@ function toFeedItemJson(row: FeedRow, profile: SortProfile) {
       },
     },
     state: row.state,
+    // §7's repo row (M4a task 7). `null` for every non-repo item -- present
+    // rather than omitted, so a client can branch on one field instead of on
+    // the absence of one.
+    repo: row.repo === null ? null : toRepoJson(row.repo),
   };
 }
 
@@ -630,6 +833,14 @@ export function registerFeed(server: FastifyInstance, deps: FeedDeps): void {
   // "no kind classification" -- this map only ever holds the classifications
   // that DO exist.
   const sourceKindById = new Map<string, Kind | null>(deps.sources.map((s) => [s.id, s.kind ?? null]));
+  // The repos lane needs the source's TYPE, not its kind -- `github_search` is
+  // the one type that emits repositories (see resolveFeedRepo).
+  const sourceTypeById = new Map<string, Source['type']>(deps.sources.map((s) => [s.id, s.type]));
+  // See FeedDeps.scoringConfig for why "no dep" and "a dep whose repos block was
+  // deleted" resolve differently.
+  const repoConfig: RepoScoringConfig | null = deps.scoringConfig
+    ? (deps.scoringConfig.repos ?? null)
+    : DEFAULT_REPO_SCORING_CONFIG;
 
   server.get('/feed', async (request, reply) => {
     const parsedQuery = FeedQuerySchema.safeParse(request.query);
@@ -705,10 +916,12 @@ export function registerFeed(server: FastifyInstance, deps: FeedDeps): void {
         beatFilter,
         kindFilter,
         sourceKindById,
+        sourceTypeById,
         now,
         profile,
         deps.decayConfig,
         deps.overridesConfig,
+        repoConfig,
       );
       const sorted = [...rows].sort((a, b) => compareRankKey(rankKeyFor(a, profile), rankKeyFor(b, profile)));
 
