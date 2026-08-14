@@ -25,8 +25,9 @@
  */
 
 import { canonicalizeUrl } from './url.ts';
-import { assertCanonicalTimestamp, type ItemType, type NewItem } from '../domain/item.ts';
+import { assertCanonicalTimestamp, type NewItem } from '../domain/item.ts';
 import type { Source } from '../sources/load.ts';
+import { classifyItemType } from '../classify/itemType.ts';
 
 export interface RawItem {
   url: string;
@@ -441,62 +442,20 @@ function truncateSummary(summary: string | null): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// item_type: deliberately crude, four-branch mechanical rule
+// item_type
+//
+// M1 shipped a deliberately crude four-branch rule here (source tier, a
+// government-primary id list, and a >=400-word threshold on the original
+// summary), refined in M2 task 7 into `classifyItemType`
+// (src/classify/itemType.ts) -- moved there rather than kept inline because
+// it is now substantial enough to own its own module, its own tests, and
+// its own extensive real-corpus-grounded doc comment (see that file). This
+// call site is otherwise unchanged in shape: classification still happens
+// once, at insert time, using the feed's ORIGINAL (pre-truncation) summary
+// -- see .superpowers/sdd/2026-08-14-m2-scoring/task-7-report.md for why
+// this stays an insert-time-only refinement rather than adding a
+// read-time reclassification path.
 // ---------------------------------------------------------------------------
-
-// Exact source ids from the brief's government-primary list, minus `cisa-*`
-// which is a prefix match handled separately below.
-const GOVERNMENT_PRIMARY_IDS = new Set([
-  'federal-register',
-  'whitehouse-actions',
-  'scotus-slip',
-  'nws-fl-alerts',
-  'nvd-cve',
-]);
-
-function isGovernmentPrimary(sourceId: string): boolean {
-  return GOVERNMENT_PRIMARY_IDS.has(sourceId) || sourceId.startsWith('cisa-');
-}
-
-function countWords(text: string): number {
-  const trimmed = text.trim();
-  if (trimmed === '') return 0;
-  return trimmed.split(/\s+/).length;
-}
-
-/**
- * items.item_type is NOT NULL with a CHECK constraint (event | analysis |
- * press), so M1 cannot insert a row without SOME value. This rule is
- * deliberately crude -- full classification is a later milestone's job
- * (M2/M4b).
- *
- * Originally implemented as the brief's literal four branches with no
- * `tier === 'analysis'` branch, per an explicit "do not improve it"
- * instruction, and flagged in the task-4 report as a possible asymmetry
- * worth a second look (Source.tier has two possible values but only
- * tier:"event" participated). Fix round 1, Finding 2 ruled the omission a
- * required addition: without it, every analysis-tier source silently falls
- * through to the word-count/press branches unless it happens to exceed 400
- * words, which is wrong for an explicit operator declaration. Placed
- * alongside the tier:"event" check, ahead of both the government-primary
- * check and the word-count fallback -- a tier is a stated fact about the
- * source, not a heuristic, so it outranks both.
- *
- * Word count is measured against the FEED'S ORIGINAL summary, before the
- * 300-character truncation applied for storage. Truncating first would cap
- * every summary at roughly 50-60 words, making the >= 400 branch
- * permanently unreachable rather than merely rare -- the only reading under
- * which that branch is actually exercisable, which the task's own
- * definition of done requires.
- */
-function assignItemType(source: Source, originalSummary: string | null): ItemType {
-  if (source.tier === 'event') return 'event';
-  if (source.tier === 'analysis') return 'analysis';
-  if (isGovernmentPrimary(source.id)) return 'event';
-  const wordCount = originalSummary === null ? 0 : countWords(originalSummary);
-  if (wordCount >= 400) return 'analysis';
-  return 'press';
-}
 
 // ---------------------------------------------------------------------------
 // normalizeItem
@@ -519,7 +478,7 @@ export function normalizeItem(raw: RawItem, source: Source, fetchedAt: string): 
     title: raw.title,
     author: raw.author ?? null,
     sourceId: source.id,
-    itemType: assignItemType(source, originalSummary),
+    itemType: classifyItemType(source, raw.title, originalSummary),
     // Copy rather than alias: the same Source object is reused across every
     // item drawn from that feed, so returning source.beats by reference
     // would let one item's caller mutate the array out from under every

@@ -525,11 +525,22 @@ describe('normalizeItem', () => {
   });
 
   // ---------------------------------------------------------------------
-  // item_type: the four-branch mechanical rule, exactly as specified.
-  // Deliberately crude -- M2 owns real classification. See task-4-report.md.
+  // item_type: refined in M2 task 7 -- normalizeItem now delegates to
+  // classifyItemType (src/classify/itemType.ts) instead of the old
+  // four-branch, deliberately-crude M1 rule (formerly `assignItemType` in
+  // this file -- see task-4-report.md for that rule's original scope and
+  // task-7-report.md for the refinement, the real-corpus measurement, and
+  // the architectural decision behind keeping classification at insert
+  // time). These tests cover the INTEGRATION -- that normalizeItem wires
+  // title/summary/source through to the classifier correctly; the
+  // classifier's own full decision table, boundary cases, and
+  // false-positive guards (real deepmind-blog/huggingface-blog/arxiv
+  // fixtures, the Task 1 "AI-powered" regression guard, etc.) are tested
+  // exhaustively in tests/classify/itemType.test.ts and are not duplicated
+  // here.
   // ---------------------------------------------------------------------
   describe('item_type', () => {
-    it('branch 1: source has tier "event" -> event', () => {
+    it('source has tier "event" -> event', () => {
       const item = normalizeItem(
         rawItem({ summary: 'short' }),
         source({ id: 'crypto-prices', tier: 'event' }),
@@ -538,7 +549,7 @@ describe('normalizeItem', () => {
       expect(item.itemType).toBe('event');
     });
 
-    it('branch 2: government-primary source by exact id -> event', () => {
+    it('government-primary source by exact id -> event', () => {
       const govIds = [
         'federal-register',
         'whitehouse-actions',
@@ -556,7 +567,7 @@ describe('normalizeItem', () => {
       }
     });
 
-    it('branch 2: government-primary source matched by the cisa-* prefix -> event', () => {
+    it('government-primary source matched by the cisa-* prefix -> event', () => {
       const item = normalizeItem(
         rawItem({ summary: 'short' }),
         source({ id: 'cisa-kev' }),
@@ -565,93 +576,90 @@ describe('normalizeItem', () => {
       expect(item.itemType).toBe('event');
     });
 
-    it('branch 2: a non-cisa- source that merely contains "cisa" is NOT treated as government-primary', () => {
+    it('a non-cisa- source that merely contains "cisa" is NOT treated as government-primary -> falls through to analysis', () => {
       const item = normalizeItem(
         rawItem({ summary: 'short' }),
         source({ id: 'not-cisa-related' }),
         FETCHED_AT,
       );
+      expect(item.itemType).toBe('analysis');
+    });
+
+    it('a genuine press-release wire-syndication signature (not tier, not government-primary) -> press', () => {
+      const item = normalizeItem(
+        rawItem({
+          title: 'Acme Robotics Announces Strategic Partnership',
+          summary: 'SAN FRANCISCO, Aug. 14, 2026 /PRNewswire/ -- Acme Robotics today announced a partnership.',
+        }),
+        source({ id: 'some-corp-blog' }),
+        FETCHED_AT,
+      );
       expect(item.itemType).toBe('press');
     });
 
-    it('branch 3: summary word count >= 400 (and not tier:event / not gov-primary) -> analysis', () => {
+    it('a churn signature in the TITLE alone (null summary) also -> press, proving normalizeItem passes title through to the classifier', () => {
       const item = normalizeItem(
-        rawItem({ summary: words(400) }),
+        rawItem({ title: 'Acme Corp News (PRNewswire)', summary: null }),
+        source({ id: 'some-corp-blog' }),
+        FETCHED_AT,
+      );
+      expect(item.itemType).toBe('press');
+    });
+
+    it('default: no tier, not government-primary, no churn signature -> analysis, not press (the M1 fallthrough this task fixes -- see task-7-report.md)', () => {
+      const item = normalizeItem(
+        rawItem({ summary: 'A short press-length summary.' }),
         source({ id: 'some-blog' }),
         FETCHED_AT,
       );
       expect(item.itemType).toBe('analysis');
     });
 
-    it('branch 3 boundary: exactly 399 words does NOT reach analysis', () => {
-      const item = normalizeItem(
-        rawItem({ summary: words(399) }),
-        source({ id: 'some-blog' }),
-        FETCHED_AT,
-      );
-      expect(item.itemType).toBe('press');
-    });
-
-    it('branch 4: otherwise -> press', () => {
-      const item = normalizeItem(
-        rawItem({ summary: 'A short press-length summary.' }),
-        source({ id: 'some-blog' }),
-        FETCHED_AT,
-      );
-      expect(item.itemType).toBe('press');
-    });
-
-    it('branch 4: no summary at all -> press (word count 0)', () => {
+    it('default holds with no summary at all (was "press (word count 0)" under M1 -- word count is no longer a classification input at all)', () => {
       const item = normalizeItem(
         rawItem({ summary: null }),
         source({ id: 'some-blog' }),
         FETCHED_AT,
       );
-      expect(item.itemType).toBe('press');
+      expect(item.itemType).toBe('analysis');
     });
 
-    it('precedence: tier "event" wins even over a 400+-word summary', () => {
+    it('word count plays no role at all: a 500-word summary with no churn signature is still analysis, identically to a one-word summary (M1\'s >=400-word branch is retired entirely, not merely recalibrated -- see task-7-report.md)', () => {
+      const long = normalizeItem(rawItem({ summary: words(500) }), source({ id: 'some-blog' }), FETCHED_AT);
+      const short = normalizeItem(rawItem({ summary: 'one' }), source({ id: 'some-blog' }), FETCHED_AT);
+      expect(long.itemType).toBe('analysis');
+      expect(short.itemType).toBe('analysis');
+    });
+
+    it('precedence: tier "event" wins even when the summary matches the churn signature', () => {
       const item = normalizeItem(
-        rawItem({ summary: words(500) }),
+        rawItem({ summary: 'FOR IMMEDIATE RELEASE -- distributed via PRNewswire' }),
         source({ id: 'crypto-prices', tier: 'event' }),
         FETCHED_AT,
       );
       expect(item.itemType).toBe('event');
     });
 
-    it('precedence: government-primary wins even over a 400+-word summary', () => {
+    it('precedence: government-primary wins even when the summary matches the churn signature', () => {
       const item = normalizeItem(
-        rawItem({ summary: words(500) }),
+        rawItem({ summary: 'FOR IMMEDIATE RELEASE -- distributed via PRNewswire' }),
         source({ id: 'federal-register', tier: undefined }),
         FETCHED_AT,
       );
       expect(item.itemType).toBe('event');
     });
 
-    it('word count is measured on the ORIGINAL summary, not the 300-char-truncated one', () => {
-      // 500 words is comfortably >= 400 (analysis branch) and also
-      // comfortably over 300 characters (so summaryRaw is truncated). If
-      // word count were computed on the already-truncated ~50-60-word
-      // excerpt instead, this would misclassify as 'press'.
-      const raw = rawItem({ summary: words(500) });
-      const item = normalizeItem(raw, source({ id: 'some-blog' }), FETCHED_AT);
-
-      expect(item.itemType).toBe('analysis');
-      expect((item.summaryRaw as string).length).toBeLessThanOrEqual(300);
-    });
-
-    it('branch (ruling, fix round 1 Finding 2): tier "analysis" forces item_type analysis, even with a short summary', () => {
+    it('branch (ruling, fix round 1 Finding 2, unchanged by this task): tier "analysis" forces item_type analysis, even with a short summary', () => {
       // Originally implemented as a literal four-branch rule with no
       // tier:"analysis" branch, per the brief's "do not improve it"
       // instruction, and flagged in the task-4 report as a possible
       // asymmetry worth a second look (Source.tier has two values but only
       // tier:"event" participated). Fix round 1, Finding 2 ruled the
       // omission a required addition: without it, an analysis-tier source
-      // silently falls through to word-count/press unless it happens to
+      // silently fell through to word-count/press unless it happened to
       // exceed 400 words, when a tier is an explicit operator declaration
-      // that should outrank a heuristic. A one-word summary (nowhere near
-      // the 400-word threshold) proves the tier branch is what wins here,
-      // not a coincidental word-count match.
+      // that should outrank a heuristic. That precedence carries forward
+      // unchanged into classifyItemType (tier checked first, unconditionally).
       const item = normalizeItem(
         rawItem({ summary: 'short' }),
         source({ id: 'some-index', tier: 'analysis' }),
