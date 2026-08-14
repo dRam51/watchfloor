@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type IncomingHttpHeaders, type RequestListener, type Server } from 'node:http';
 import { readFileSync } from 'node:fs';
+import { inspect } from 'node:util';
 import { join } from 'node:path';
 import { GitHubClient, RATE_LIMITS } from '../../src/fetch/github.ts';
 import { USER_AGENT } from '../../src/fetch/http.ts';
@@ -199,5 +200,97 @@ describe('per-host spacing', () => {
 
     expect(starts).toHaveLength(3);
     expect(starts[2]! - starts[0]!).toBeGreaterThanOrEqual(590);
+  });
+});
+
+describe('the token never escapes', () => {
+  // This repository is PUBLIC and a leaked PAT is the owner's GitHub account.
+  // The value below is not a real credential, but every assertion here would
+  // hold identically for one.
+  const TOKEN = 'ghp_thisMustNeverAppearInAnyOutput0123456789';
+
+  /** Every string a thrown error can realistically reach a log through. */
+  function surfacesOf(err: unknown): string[] {
+    const e = err as Error & Record<string, unknown>;
+    return [
+      e.message,
+      e.stack ?? '',
+      String(e),
+      // Own properties — a caller serializing the error's fields.
+      JSON.stringify(Object.getOwnPropertyNames(e).map((k) => [k, e[k]])),
+      // The shape a structured logger (pino, Fastify's own) would emit.
+      JSON.stringify(e, Object.getOwnPropertyNames(e)),
+      inspect(e, { depth: 8 }),
+    ];
+  }
+
+  it('does not leak the token through an error thrown from a failed authenticated request', async () => {
+    // A real 401 from a real server, with the token really sent on the wire.
+    let sawAuthorization = '';
+    const baseUrl = await serve((req, res) => {
+      sawAuthorization = String(req.headers.authorization ?? '');
+      res.writeHead(401, { ...headersOf('repo_200'), 'content-type': 'application/json' });
+      res.end(JSON.stringify({ message: 'Bad credentials' }));
+    });
+
+    const client = new GitHubClient({ token: TOKEN, baseUrl });
+    const err = await client.request('/repos/a/b').then(
+      () => { throw new Error('expected the 401 to reject'); },
+      (e: unknown) => e,
+    );
+
+    // The token really did go out — otherwise this test proves nothing.
+    expect(sawAuthorization).toBe(`Bearer ${TOKEN}`);
+    for (const surface of surfacesOf(err)) {
+      expect(surface).not.toContain(TOKEN);
+    }
+  });
+
+  it('does not leak the token when the transport fails and the cause carries the request', async () => {
+    // Nothing is listening on this port, so undici builds the error itself.
+    // Port 1 is privileged and never bound by a test server.
+    const client = new GitHubClient({ token: TOKEN, baseUrl: 'http://127.0.0.1:1' });
+    const err = await client.request('/repos/a/b', { minIntervalMs: 0 }).then(
+      () => { throw new Error('expected the connection failure to reject'); },
+      (e: unknown) => e,
+    );
+
+    for (const surface of surfacesOf(err)) {
+      expect(surface).not.toContain(TOKEN);
+    }
+  });
+
+  it('does not leak the token when the response body exceeds the byte ceiling', async () => {
+    const baseUrl = await serve((_req, res) => {
+      res.writeHead(200, { ...headersOf('repo_200'), 'content-type': 'application/json' });
+      res.end('x'.repeat(4096));
+    });
+
+    const client = new GitHubClient({ token: TOKEN, baseUrl });
+    const err = await client.request('/repos/a/b', { maxBytes: 128 }).then(
+      () => { throw new Error('expected the oversized body to reject'); },
+      (e: unknown) => e,
+    );
+
+    for (const surface of surfacesOf(err)) {
+      expect(surface).not.toContain(TOKEN);
+    }
+  });
+
+  it('keeps the token off the client itself, so logging the client cannot leak it', async () => {
+    // A `#private` field is invisible to JSON.stringify, util.inspect, and
+    // Object.keys — which is why it is a #field and not a `private` one
+    // (TypeScript's `private` is erased at runtime and would serialize).
+    const client = new GitHubClient({ token: TOKEN, baseUrl: 'http://127.0.0.1:1' });
+
+    expect(JSON.stringify(client)).not.toContain(TOKEN);
+    expect(inspect(client, { depth: 8 })).not.toContain(TOKEN);
+    expect(Object.getOwnPropertyNames(client)).toHaveLength(0);
+  });
+
+  it('still reports mode without revealing anything about the token value', () => {
+    const client = new GitHubClient({ token: TOKEN, baseUrl: 'http://127.0.0.1:1' });
+    expect(client.mode).toBe('authenticated');
+    expect(JSON.stringify({ mode: client.mode, limits: client.limits })).not.toContain(TOKEN);
   });
 });
