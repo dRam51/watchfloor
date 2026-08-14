@@ -8,7 +8,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ReactElement } from 'react';
 import { vi } from 'vitest';
-import type { FeedItem, FeedResponse } from '../src/api/types.ts';
+import type { FeedItem, FeedItemRepo, FeedResponse } from '../src/api/types.ts';
 
 // React 19's act() requires this flag or it warns on every call, even
 // though the calls below are already wrapped correctly -- a
@@ -168,6 +168,40 @@ export function makeFeedItem(overrides: Partial<FeedItem> = {}): FeedItem {
       read: { pinned: false, priority: null, label: null },
     },
     state: { readAt: null, savedAt: null, dismissedAt: null },
+    ...overrides,
+  };
+}
+
+/**
+ * A repo payload for the M4a repos lane (`FeedItem.repo`).
+ *
+ * The DEFAULT velocity is deliberately `insufficient_history` / `no_snapshots`,
+ * not a healthy `ok`. That is what a fresh database actually returns for every
+ * repo for its first seven days (M4a plan: "on day one there is no velocity,
+ * and the lane cannot do its job yet... this is not a bug to engineer around;
+ * it is the shape of the feature"), so a test that forgets to specify velocity
+ * exercises the state the lane will really be in when it is first judged --
+ * rather than the happy path, which is the rarer one at that moment.
+ */
+export function makeRepo(overrides: Partial<FeedItemRepo> = {}): FeedItemRepo {
+  return {
+    fullName: 'fixture-owner/fixture-repo',
+    description: 'A fixture repository.',
+    language: 'TypeScript',
+    licenseSpdxId: 'MIT',
+    stars: 1234,
+    openIssuesAndPullRequests: 12,
+    lastCommitAt: '2026-08-13T12:00:00.000Z',
+    readmeExcerpt: 'A fixture README first paragraph.',
+    readmeKnown: true,
+    velocity: {
+      status: 'insufficient_history',
+      reason: 'no_snapshots',
+      observedDays: 0,
+      expectedDays: 7,
+      spanDays: 0,
+      minSpanDays: 3,
+    },
     ...overrides,
   };
 }

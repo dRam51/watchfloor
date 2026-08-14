@@ -16,7 +16,7 @@ import { scoreIntensity } from '../lib/scoreIntensity.ts';
  * lane-shaped component before the merged stream works").
  */
 
-const BEAT_LABELS: Record<Beat, string> = {
+export const BEAT_LABELS: Record<Beat, string> = {
   ai: 'AI',
   cyber: 'Cyber',
   aisec: 'AI Security',
@@ -25,6 +25,15 @@ const BEAT_LABELS: Record<Beat, string> = {
   usnews: 'US News',
 };
 
+/**
+ * M4a task 8 exported this (and `ScoreIndicator` / `BEAT_LABELS` below) rather
+ * than letting `RepoRow.tsx` restate it. The repos row differs in its CONTENT
+ * (§7: "repo name, one-line description, language, stars + velocity arrow,
+ * last-commit age"), not in its row CHROME: the same pinned-at-zero problem,
+ * the same roving-tabindex contract, the same three affordances, the same
+ * expand-in-place. A second copy of the pinned-at-zero substitution would be a
+ * second place to forget it.
+ */
 export interface ItemRowProps {
   item: FeedItem;
   dismissing: boolean;
@@ -66,7 +75,7 @@ export interface ItemRowProps {
  * signal there, never the number, and that stays true whether the number is
  * spelled out as text or as a bar's fill level.
  */
-function ScoreIndicator({ item }: { item: FeedItem }) {
+export function ScoreIndicator({ item }: { item: FeedItem }) {
   const override = activeOverride(item);
   const score = activeScore(item);
   const formatted = score.toFixed(3);
