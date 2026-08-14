@@ -645,3 +645,64 @@ sources:
     # reporting about it.
     kind: advisory
     enabled: true
+
+  # --------------------------------------------------------------------------
+  # M4a task 9. The repos beat's only source, and the first `github_search`
+  # entry in this file -- that type has been in the SourceType union since M1
+  # with no adapter behind it (src/scheduler/run.ts reported it out of scope);
+  # M4a task 4 filled the hole.
+  #
+  # `filters.topics` is §4's list verbatim. It is REQUIRED for this type and
+  # enforced by a cross-field rule in src/sources/load.ts: the topic list is the
+  # only input the search query has, so a github_search source without one polls
+  # on schedule, spends rate-limit budget, and yields nothing forever -- which on
+  # the source-health page is indistinguishable from a quiet source.
+  #
+  # Every topic must be a lowercase GitHub topic SLUG. GitHub lowercases every
+  # topic it stores, so "LLM" or "Prompt Injection" would query for something
+  # that cannot exist -- and would return zero results with no error anywhere.
+  # The loader rejects those at config-load time rather than at fetch time.
+  #
+  # min_stars: 10 is applied SERVER-SIDE as a `stars:>=10` qualifier, the same
+  # route hn-algolia's own quality floor takes. 10 and not 50 for a specific
+  # reason: §4's worked example is a repo going 40 -> 400 in a week, so any
+  # floor above 40 makes the brief's own headline case impossible to observe.
+  # Verified live by task 4: topic:llm page 1 bottoms out at 1,898 stars, so the
+  # floor is inert there -- but topic:netdevops has 34 repos with a MAX of 11,
+  # where it is doing all the work.
+  #
+  # poll_interval is 13m, and the primality matters. Topic rotation is
+  # `floor(now/period) % topicCount`, which advances by a constant that is ZERO
+  # whenever the period is a multiple of the topic count -- at 60m that freezes
+  # 9 topics at 9h, 6 at 6h, 3 at 3h, permanently. A sweep found 60 frozen
+  # combinations at 60m and zero at 13m. See src/adapters/github.ts.
+  #
+  # kind: aggregator -- a search index over other people's repos, the same
+  # bucket as hn-algolia, not a publisher of its own content.
+  #
+  # NOTE: nine topics x two recency-halves = 18 requests per complete poll,
+  # against an UNAUTHENTICATED ceiling of 10 requests/minute. This source is
+  # therefore `degraded` on /api/sources until WF_GITHUB_TOKEN is set -- it
+  # polls successfully and still cannot observe everything it is configured to
+  # observe. That is reported honestly rather than hidden; see task 10.
+  - id: github-topics
+    name: GitHub Topic Search
+    type: github_search
+    url: https://api.github.com/search/repositories
+    beats: [repos]
+    weight: 1.0
+    poll_interval: 13m
+    kind: aggregator
+    filters:
+      topics:
+        - llm
+        - agents
+        - mcp
+        - rag
+        - ai-security
+        - prompt-injection
+        - llmops
+        - network-automation
+        - netdevops
+      min_stars: 10
+    enabled: true
