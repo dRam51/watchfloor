@@ -62,3 +62,53 @@
 # games) -- the WNBA template scores exactly 0 and the TD-pass template tops
 # out at 0.0556, both below 0.10.
 near_duplicate_threshold: 0.1
+
+# ---------------------------------------------------------------------------
+# FIX ROUND 1 -- max_bridge_document_frequency. Full derivation and evidence
+# in .superpowers/sdd/2026-08-14-m2-scoring/task-4-report.md's fix-round-1
+# section; mechanism documented in src/cluster/group.ts's module doc comment.
+# ---------------------------------------------------------------------------
+#
+# WHAT WENT WRONG, briefly: the 180-title validation above (all usnews) never
+# exercised a formulaic, templated corpus. A fresh, full, real 4,134-item
+# ingest (all beats) produced a single 1,543-member cluster (37% of the
+# entire corpus, 100% cisa-kev) and a 28-member cluster (100%
+# huggingface-blog). No individual pair score was wrong -- most pairs
+# anywhere in the corpus score exactly 0 -- but a handful of generic
+# vulnerability-class/AI-research phrases ("remote code execution", document
+# frequency 196 of 4,134; "large language models", 30) bridge otherwise-
+# unrelated items, and transitive (single-link) grouping welds those bridges
+# into one enormous, meaningless component.
+#
+# TWO independent defenses fix this (both live in src/cluster/group.ts, not
+# configured here beyond this one cap):
+#
+#   1. Cross-source only -- two candidates sharing a source_id are never
+#      merged, full stop. This ALONE fully eliminates both real pathological
+#      clusters above (both were 100% single-source) and needs no config
+#      value at all.
+#   2. Boilerplate trigram filtering -- ANY trigram whose document frequency
+#      across the whole candidate set exceeds the value below is dropped
+#      from every candidate's shingle set before Jaccard is computed. This
+#      catches a SEPARATE, smaller real case cross-source-only cannot: real
+#      arxiv-cs-ai / huggingface-blog titles about unrelated "vision-language
+#      model" papers and posts, bridged purely by that phrase (their own
+#      corpus document frequency: 9).
+#
+# WHY 5: the largest genuine cross-source corroboration found in the fresh
+# 4,134-item corpus is a real 3-outlet story (a Niger-missionary release,
+# pbs-newshour/npr-news/ap-news), whose bridging trigrams have document
+# frequency 2-3. Confirmed boilerplate starts at document frequency 9
+# ("vision language models") and runs into the hundreds ("remote code
+# execution", 196). 5 sits with real margin above the largest confirmed-
+# genuine case (3) and well below where confirmed boilerplate starts (9+) --
+# the same "margin on both sides, not a knife-edge fit" reasoning already
+# used above for near_duplicate_threshold. Verified directly against both
+# real regression cases (the cisa-kev CVE chain and the arxiv/huggingface
+# "vision-language model" false merge) in tests/cluster/group.test.ts.
+#
+# Optional in the schema (src/cluster/config.ts) so a config literal
+# predating this fix round keeps working via src/cluster/group.ts's own
+# default -- but stated explicitly here regardless, matching every other
+# config file in this codebase never relying on an implicit code default.
+max_bridge_document_frequency: 5

@@ -49,21 +49,33 @@ describe('getCurrentTitlesForClustering', () => {
     expect(getCurrentTitlesForClustering(db)).toEqual([]);
   });
 
-  it('returns one candidate per distinct item_key with its title', () => {
+  it('returns one candidate per distinct item_key with its title and source_id', () => {
+    // sourceId (fix round 1, M2 task 4 fix-round-1): src/cluster/group.ts's
+    // cross-source-only defense needs it on every candidate.
     const db = migratedDb();
     const a = insertItem(
       db,
-      baseItem({ url: 'https://example.test/a', canonicalUrl: 'https://example.test/a', title: 'Story A' }),
+      baseItem({
+        url: 'https://example.test/a',
+        canonicalUrl: 'https://example.test/a',
+        title: 'Story A',
+        sourceId: 'ap-news',
+      }),
     );
     const b = insertItem(
       db,
-      baseItem({ url: 'https://example.test/b', canonicalUrl: 'https://example.test/b', title: 'Story B' }),
+      baseItem({
+        url: 'https://example.test/b',
+        canonicalUrl: 'https://example.test/b',
+        title: 'Story B',
+        sourceId: 'npr-news',
+      }),
     );
     const candidates = getCurrentTitlesForClustering(db);
     expect(candidates.slice().sort((x, y) => (x.itemKey < y.itemKey ? -1 : 1))).toEqual(
       [
-        { itemKey: a.item_key, title: 'Story A' },
-        { itemKey: b.item_key, title: 'Story B' },
+        { itemKey: a.item_key, title: 'Story A', sourceId: 'ap-news' },
+        { itemKey: b.item_key, title: 'Story B', sourceId: 'npr-news' },
       ].sort((x, y) => (x.itemKey < y.itemKey ? -1 : 1)),
     );
   });
@@ -90,7 +102,7 @@ describe('getCurrentTitlesForClustering', () => {
     );
     const candidates = getCurrentTitlesForClustering(db);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toEqual({ itemKey: v1.item_key, title: 'Corrected headline' });
+    expect(candidates[0]).toEqual({ itemKey: v1.item_key, title: 'Corrected headline', sourceId: 'ap-news' });
   });
 
   it('breaks a fetched_at TIE by rowid desc, matching getCurrentItem exactly -- the real arXiv cs.AI/cs.CR shape', () => {
@@ -111,7 +123,15 @@ describe('getCurrentTitlesForClustering', () => {
     insertItem(db, baseItem({ ...shared, title: 'cs.AI version title', sourceId: 'arxiv-cs-ai' }));
     const candidates = getCurrentTitlesForClustering(db);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toEqual({ itemKey: first.item_key, title: 'cs.AI version title' });
+    // sourceId follows the SAME winning version as title -- not left over
+    // from the first-inserted row. Real consequence (fix round 1): if this
+    // resolved sourceId from the wrong version, src/cluster/group.ts's
+    // cross-source-only defense could compare against a stale attribution.
+    expect(candidates[0]).toEqual({
+      itemKey: first.item_key,
+      title: 'cs.AI version title',
+      sourceId: 'arxiv-cs-ai',
+    });
   });
 });
 

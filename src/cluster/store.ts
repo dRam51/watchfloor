@@ -50,16 +50,23 @@ import type { ClusterCandidate } from './group.ts';
 
 /**
  * One candidate per distinct `item_key` in `items`, carrying that item's
- * CURRENT version's title -- the same "current version" tie-break
- * `src/domain/item.ts`'s `getCurrentItem`/`getItemAsOf` use (`fetched_at`
- * desc, then `rowid` desc to break a genuine timestamp tie deterministically;
- * see that module's comment on why a tie is real, not hypothetical: two
- * versions can legally share an instant on a batch ingest or a
- * second-precision source). Implemented as a single windowed query rather
- * than one `getCurrentItem` call per distinct `item_key` -- both are
+ * CURRENT version's title AND source_id -- the same "current version"
+ * tie-break `src/domain/item.ts`'s `getCurrentItem`/`getItemAsOf` use
+ * (`fetched_at` desc, then `rowid` desc to break a genuine timestamp tie
+ * deterministically; see that module's comment on why a tie is real, not
+ * hypothetical: two versions can legally share an instant on a batch ingest
+ * or a second-precision source). Implemented as a single windowed query
+ * rather than one `getCurrentItem` call per distinct `item_key` -- both are
  * correct, but doing it in one query avoids O(distinct item_keys) round
  * trips for what is, today, the single largest read in the whole clustering
  * pass.
+ *
+ * `sourceId` (fix round 1, M2 task 4 fix-round-1 -- see src/cluster/
+ * group.ts's module doc comment) is resolved from the SAME winning row as
+ * `title`, not independently -- an item_key with multiple versions attached
+ * to different source_ids (the real arXiv cs.AI/cs.CR cross-listing shape)
+ * must report the CURRENT version's source, matching every other field on
+ * the same candidate. Verified directly in store.test.ts's tie-break test.
  *
  * Exact-URL duplicates are already collapsed by `item_key` itself
  * (`src/domain/item.ts`'s `deriveItemKey`) before this function ever runs --
@@ -70,9 +77,9 @@ import type { ClusterCandidate } from './group.ts';
 export function getCurrentTitlesForClustering(db: Db): ClusterCandidate[] {
   const rows = db
     .prepare(
-      `select item_key, title
+      `select item_key, title, source_id
        from (
-         select item_key, title,
+         select item_key, title, source_id,
                 row_number() over (
                   partition by item_key
                   order by fetched_at desc, rowid desc
@@ -87,14 +94,15 @@ export function getCurrentTitlesForClustering(db: Db): ClusterCandidate[] {
     // treats a named interface array target more strictly than a
     // structurally identical inline literal array target for this exact
     // cast shape (confirmed empirically; a named `interface CandidateRow {
-    // item_key: string; title: string }` here fails `tsc` with TS2352
-    // "neither type sufficiently overlaps", while this inline literal with
-    // the identical fields does not). tests/domain/itemBeats.test.ts's
-    // existing `.all() as Array<{ item_id: string; beat: string }>` is the
-    // same established pattern already in this codebase -- matched here
-    // rather than reaching for `as unknown as X[]`.
-    .all() as Array<{ item_key: string; title: string }>;
-  return rows.map((row) => ({ itemKey: row.item_key, title: row.title }));
+    // item_key: string; title: string; source_id: string }` here fails
+    // `tsc` with TS2352 "neither type sufficiently overlaps", while this
+    // inline literal with the identical fields does not).
+    // tests/domain/itemBeats.test.ts's existing
+    // `.all() as Array<{ item_id: string; beat: string }>` is the same
+    // established pattern already in this codebase -- matched here rather
+    // than reaching for `as unknown as X[]`.
+    .all() as Array<{ item_key: string; title: string; source_id: string }>;
+  return rows.map((row) => ({ itemKey: row.item_key, title: row.title, sourceId: row.source_id }));
 }
 
 // ---------------------------------------------------------------------------

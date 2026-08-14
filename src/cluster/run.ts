@@ -43,7 +43,15 @@ export interface ClusteringPassSummary extends ClusterWriteSummary {
  */
 export function runClusteringPass(db: Db, config: ClusterConfig, runAt: string): ClusteringPassSummary {
   const candidates = getCurrentTitlesForClustering(db);
-  const groups = groupNearDuplicates(candidates, config.near_duplicate_threshold);
+  // config.max_bridge_document_frequency (fix round 1) is passed through
+  // EXPLICITLY, even though groupNearDuplicates has its own default for the
+  // common case where it's omitted -- omitting this line would silently
+  // strand the config field as dead, parsed-but-never-consulted input the
+  // moment someone actually sets a non-default value. When the field is
+  // itself `undefined` (the config omitted it), passing `undefined` through
+  // still triggers groupNearDuplicates' own default parameter -- same as
+  // simply not supplying the argument.
+  const groups = groupNearDuplicates(candidates, config.near_duplicate_threshold, config.max_bridge_document_frequency);
   const writeSummary = writeClusters(db, groups, runAt);
   return {
     candidatesConsidered: candidates.length,
