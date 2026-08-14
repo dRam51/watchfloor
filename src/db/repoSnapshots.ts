@@ -1,3 +1,5 @@
+import { assertCanonicalTimestamp } from '../domain/item.ts';
+
 /**
  * Converts a canonical UTC instant to the calendar date it falls on **in
  * `tz`** -- the zone the caller supplies, which in this system is always
@@ -8,6 +10,7 @@
  * DAY is exactly such a derived schedule quantity.
  */
 export function localDay(instant: string, tz: string): string {
+  assertCanonicalTimestamp('instant', instant);
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     year: 'numeric',
