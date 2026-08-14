@@ -568,3 +568,41 @@ describe('schema enforcement, bypassing the access layer', () => {
     ).toThrow(/may only move forward/i);
   });
 });
+
+describe('daylight-saving boundaries', () => {
+  it('buckets a reading taken during the spring-forward gap into the right local day', () => {
+    // 2026-03-08 is the US spring-forward date: 07:00Z is 02:00 EST, which
+    // does not exist locally -- the clock jumps 01:59:59 EST to 03:00 EDT.
+    // The calendar day is still the 8th either way.
+    expect(localDay('2026-03-08T07:00:00.000Z', NY)).toBe('2026-03-08');
+    // And 04:30Z, half an hour before the shift, is still the 7th.
+    expect(localDay('2026-03-08T04:30:00.000Z', NY)).toBe('2026-03-07');
+  });
+
+  it('spans a DST change without losing or duplicating a day', () => {
+    // A 7-day window ending 2026-03-09 contains the spring-forward date, so
+    // one of its local days is 23 hours long. Day arithmetic that subtracts
+    // 6 x 86,400,000 ms in LOCAL time lands on 2026-03-02T23:00 and reports
+    // fromDay as 2026-03-02 -- an eight-day window silently labelled seven.
+    const db = migratedDb();
+    recordDays(db, [
+      ['2026-03-03', 10],
+      ['2026-03-09', 70],
+    ]);
+
+    const window = getSnapshotWindow(db, AGENTKIT.repoId, {
+      throughDay: '2026-03-09',
+      days: 7,
+    });
+
+    expect(window.fromDay).toBe('2026-03-03');
+    expect(window.expectedDays).toBe(7);
+    expect(window.missingDays).toEqual([
+      '2026-03-04',
+      '2026-03-05',
+      '2026-03-06',
+      '2026-03-07',
+      '2026-03-08',
+    ]);
+  });
+});
