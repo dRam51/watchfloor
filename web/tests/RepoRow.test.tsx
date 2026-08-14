@@ -443,6 +443,10 @@ describe('RepoRow -- keyboard + action parity with ItemRow', () => {
 // §7.1: design tokens in ONE place
 // ---------------------------------------------------------------------------
 
+function readWebSource(rel: string): string {
+  return readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+}
+
 describe('§7.1 -- no component may hardcode a colour', () => {
   it('tokens.css is the only file in web/src that contains a colour literal', () => {
     // "Design tokens in one place: colors, spacing, type scale as CSS custom
@@ -450,9 +454,79 @@ describe('§7.1 -- no component may hardcode a colour', () => {
     // records that the current palette is a PROPOSAL, so this is load-bearing.
     const roots = ['../src/components/RepoRow.tsx', '../src/components/FeedRow.tsx', '../src/styles/global.css'];
     for (const rel of roots) {
-      const source = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      const source = readWebSource(rel);
       expect(source, `${rel} must not contain a hex colour`).not.toMatch(/#[0-9a-fA-F]{3}\b|#[0-9a-fA-F]{6}\b/);
       expect(source, `${rel} must not contain an rgb()/hsl() literal`).not.toMatch(/\b(rgba?|hsla?)\(/);
+    }
+  });
+
+  it('every --color-velocity-* token the stylesheet reads is actually defined in tokens.css', () => {
+    const tokens = readWebSource('../src/styles/tokens.css');
+    const used = new Set(readWebSource('../src/styles/global.css').match(/--color-velocity-[a-z-]+/g) ?? []);
+    expect(used.size).toBe(4); // up, down, flat, unknown -- one per display state
+    for (const name of used) {
+      expect(tokens, `${name} is read by global.css but never defined`).toContain(`${name}:`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The gap jsdom leaves: it parses no stylesheet at all, so every test above
+// would pass just as happily against a stylesheet whose selectors are typo'd
+// or missing. These two close the specific, silent failure that produces --
+// a name that differs between the component and the stylesheet, which loses
+// styling with no error anywhere. Neither pretends to judge how the row LOOKS;
+// CLAUDE.md is explicit that the palette is a proposal and the "does it read
+// like a terminal" question is the owner's call, not a test's.
+// ---------------------------------------------------------------------------
+
+/** Every `repo-row*` class the component really emits, across the branches that produce different markup. */
+function emittedRepoClasses(): Set<string> {
+  const emitted = new Set<string>();
+  const variants: Array<Partial<FeedItemRepo>> = [
+    { description: null, language: null, lastCommitAt: null, readmeExcerpt: null, readmeKnown: true },
+    { readmeExcerpt: null, readmeKnown: false },
+    { velocity: { status: 'ok', starsPerDay: 12, starsGained: 72, spanDays: 6, spanCoverage: 1, staleDays: 0, observedDays: 7, expectedDays: 7 } },
+    { velocity: { status: 'ok', starsPerDay: -12, starsGained: -72, spanDays: 6, spanCoverage: 1, staleDays: 2, observedDays: 5, expectedDays: 7 } },
+    { velocity: { status: 'ok', starsPerDay: 0, starsGained: 0, spanDays: 6, spanCoverage: 1, staleDays: 0, observedDays: 7, expectedDays: 7 } },
+    { velocity: insufficient('no_snapshots') },
+  ];
+  for (const variant of variants) {
+    const container = renderRepo(variant);
+    expand(container);
+    for (const el of container.querySelectorAll('*')) {
+      for (const cls of el.classList) if (cls.startsWith('repo-row')) emitted.add(cls);
+    }
+    current!.unmount();
+    current = null;
+  }
+  return emitted;
+}
+
+describe('RepoRow -- the component and the stylesheet agree on every name', () => {
+  it('every .repo-row* selector in global.css matches a class the component actually renders', () => {
+    // The direction with NO legitimate exceptions, and the one where a typo is
+    // invisible: a rule for `.repo-row__velocity--unkown` silently styles
+    // nothing, and the row just quietly loses its colour.
+    const emitted = emittedRepoClasses();
+    const selectors = new Set(readWebSource('../src/styles/global.css').match(/\.repo-row[a-z0-9_-]*/g) ?? []);
+    expect(selectors.size).toBeGreaterThan(10);
+    for (const selector of selectors) {
+      expect(emitted, `${selector} is styled but no rendered element carries it`).toContain(selector.slice(1));
+    }
+  });
+
+  it('every STATE MODIFIER the component renders has a rule -- a modifier that styles nothing is pointless', () => {
+    // The other direction, restricted to the classes whose entire purpose is
+    // to look different: `--up`, `--down`, `--stale`, `--missing`, `--absent`,
+    // `--unknown`. Base structural classes are exempt because some legitimately
+    // exist only as query anchors (`.repo-row__issues`), but a modifier that
+    // nothing styles is a state the UI claims to distinguish and does not.
+    const css = readWebSource('../src/styles/global.css');
+    const modifiers = [...emittedRepoClasses()].filter((cls) => cls.includes('--'));
+    expect(modifiers.length).toBeGreaterThan(5);
+    for (const cls of modifiers) {
+      expect(css, `.${cls} is a state modifier with no rule -- it distinguishes nothing`).toContain(`.${cls}`);
     }
   });
 });
