@@ -10,6 +10,7 @@ import { registerFeed } from './routes/feed.ts';
 import { registerSources, countFailingSources } from './routes/sources.ts';
 import { registerDashboard } from './routes/dashboard.ts';
 import { registerSearch } from './routes/search.ts';
+import { registerItems } from './routes/items.ts';
 
 export interface ServerDeps {
   db: Db;
@@ -69,15 +70,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
       registerSources(api, { db: deps.db, sources: deps.sources });
 
-  // `countFailingSources` is task 5's definition of failing — enabled, and
-  // either in an explicit error streak or stale against its OWN configured
-  // poll_interval. Task 6 shipped a deliberately minimal placeholder
-  // (`consecutiveFailures > 0`) behind this injection point precisely so the
-  // real definition could replace it without editing its files, and its
-  // report asked for this wiring. Without it the header strip's failing count
-  // would miss the silent-stale case §7 cares most about — a feed that has
-  // not succeeded in weeks while reporting zero failures because nothing is
-  // polling it.
+      // `countFailingSources` is task 5's definition of failing — enabled,
+      // and either in an explicit error streak or stale against its OWN
+      // configured poll_interval. Task 6 shipped a deliberately minimal
+      // placeholder (`consecutiveFailures > 0`) behind this injection point
+      // precisely so the real definition could replace it without editing its
+      // files, and its report asked for this wiring. Without it the header
+      // strip's failing count would miss the silent-stale case §7 cares most
+      // about — a feed that has not succeeded in weeks while reporting zero
+      // failures because nothing is polling it.
       registerDashboard(api, {
         db: deps.db,
         sources: deps.sources,
@@ -85,6 +86,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       });
 
       registerSearch(api, { db: deps.db });
+
+      // §7's `s` (save) and `x` (dismiss) need somewhere to POST. Task 3
+      // built the domain layer and task 4's feed reads the state onto each
+      // row, but no Wave 2 task owned exposing the writes — so the dashboard
+      // could display state it had no way to change.
+      registerItems(api, { db: deps.db });
     },
     { prefix: '/api' },
   );
