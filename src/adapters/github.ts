@@ -249,11 +249,20 @@ export const RESULTS_PER_PAGE = 50;
 /**
  * How often the topic order rotates. See `buildSearchRequests`.
  *
- * One hour is short enough that consecutive polls at any realistic
- * `poll_interval` start at different offsets, and long enough that two polls
- * minutes apart (a manual re-run) do not reshuffle for no reason.
+ * **13 minutes, and the primality is the point.** The offset is
+ * `floor(now / period) % topicCount`, so if the period evenly divides the poll
+ * interval the offset advances by a CONSTANT every poll -- and that constant is
+ * zero whenever it is a multiple of the topic count, which freezes the rotation
+ * permanently. That is not a contrived case: at a one-hour period, nine topics
+ * polled every nine hours, six topics every six hours, and three topics every
+ * three hours all freeze, and the symptom is silent (the same tail of the list
+ * is skipped forever). Swept over every plausible `poll_interval` (15m, 30m,
+ * 1h, 3h, 6h, 12h, 1d) x topic counts 2-12 x four clock phases: a 60-minute
+ * period freezes in 60 of those combinations, a 13-minute period in none --
+ * because 13 divides none of those intervals, so the advance varies with phase
+ * instead of being constant. Pinned by a test.
  */
-export const TOPIC_ROTATION_PERIOD_MS = 60 * 60 * 1000;
+export const TOPIC_ROTATION_PERIOD_MS = 13 * 60 * 1000;
 
 /**
  * The env var holding the read-only PAT. Optional: unauthenticated is a real,
@@ -411,9 +420,23 @@ function searchEndpoint(source: Source): URL {
  * testable rather than merely plausible. With a PAT the sweep completes every
  * time and rotation is invisible.
  *
- * A topic's two halves stay ADJACENT, and rotation moves whole topics: a sweep
- * cut short mid-list never returns a topic's `created` half without its
- * `pushed` half.
+ * ## Every `created` half first, then every `pushed` half
+ * Not the obvious grouping (a topic's two halves side by side), and the live
+ * run is what settled it. Measured unauthenticated, nine topics: **10 of 18
+ * requests got through** before the budget refused the eleventh. Under
+ * topic-adjacent ordering that means five topics complete and four -- which on
+ * that run were `llm`, `agents`, `mcp` and `rag` -- contributing NOTHING at
+ * all. Under this ordering the same ten requests cover all nine topics'
+ * `created` half plus one `pushed` half.
+ *
+ * Both are lossy; they lose different things, and losing whole topics is worse.
+ * The `created` half is also the more valuable one to keep: recently-created
+ * repos sorted by stars are the risen-fast pool §4's own example describes,
+ * while the `pushed` half is the established-giants control group -- which is
+ * exactly the material the owner has already seen on Hacker News, i.e. what the
+ * deliverable is trying NOT to surface.
+ *
+ * With a PAT the whole sweep completes and the ordering is unobservable.
  */
 export function buildSearchRequests(source: Source, now: Date): SearchRequest[] {
   const topics = source.filters?.topics;
@@ -436,8 +459,9 @@ export function buildSearchRequests(source: Source, now: Date): SearchRequest[] 
   const rotated = [...topics.slice(offset), ...topics.slice(0, offset)];
 
   const requests: SearchRequest[] = [];
-  for (const topic of rotated) {
-    for (const { half, qualifier } of halves) {
+  // Halves outermost, topics innermost -- see the doc comment above.
+  for (const { half, qualifier } of halves) {
+    for (const topic of rotated) {
       // `archived:false` is server-side §4 suppression; see the module doc.
       const q = `topic:${topic} archived:false stars:>=${minStars} ${qualifier}`;
       const url = new URL(endpoint);

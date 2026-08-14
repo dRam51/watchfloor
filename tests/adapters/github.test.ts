@@ -176,13 +176,19 @@ describe('githubSearchAdapter', () => {
       }
     });
 
-    it('keeps a topic\'s two halves adjacent, so a sweep cut short by the rate limit never returns one half of a topic without the other', () => {
+    // Settled by the live run, not by taste: unauthenticated, 10 of these 18
+    // requests get through before the budget refuses the eleventh. Grouping a
+    // topic's two halves together would mean five complete topics and four --
+    // on the observed run llm, agents, mcp and rag -- contributing nothing at
+    // all. Grouping by HALF instead means every topic is represented.
+    it('issues every created half before any pushed half, so a truncated sweep still covers every topic', () => {
       const requests = buildSearchRequests(makeSource({ filters: { topics: NINE } }), NOW);
-      for (let i = 0; i < requests.length; i += 2) {
-        expect(requests[i]!.topic).toBe(requests[i + 1]!.topic);
-        expect(requests[i]!.half).toBe('created');
-        expect(requests[i + 1]!.half).toBe('pushed');
-      }
+      expect(requests.slice(0, 9).every((r) => r.half === 'created')).toBe(true);
+      expect(requests.slice(9).every((r) => r.half === 'pushed')).toBe(true);
+
+      // What an unauthenticated poll actually gets through: 10 of 18.
+      const truncated = requests.slice(0, 10);
+      expect(new Set(truncated.map((r) => r.topic))).toEqual(new Set(NINE));
     });
 
     it('anchors both halves to the injected now, at day granularity, per §4\'s 180 and 14 days', () => {
@@ -228,15 +234,44 @@ describe('githubSearchAdapter', () => {
     // Rotation exists because 18 requests exceed an unauthenticated minute's
     // entire search budget (10). Without it the tail of the topic list would
     // never be polled at all -- a whole category of repo silently dropped.
-    it('rotates the topic order with time, so a sweep cut short by the budget does not always cut the same topics', () => {
+    it('rotates the topic order with time, so the pushed halves a truncated sweep reaches are not always the same ones', () => {
       const source = makeSource({ filters: { topics: NINE } });
-      const first = buildSearchRequests(source, NOW).map((r) => r.topic);
-      const later = buildSearchRequests(source, new Date(NOW.getTime() + 6 * 60 * 60 * 1000)).map((r) => r.topic);
-      expect(later).not.toEqual(first);
-      // Rotation reorders; it never drops or duplicates.
-      expect(new Set(later)).toEqual(new Set(first));
-      expect(later).toHaveLength(first.length);
+      const starts = new Set<string>();
+      for (let poll = 0; poll < 6; poll++) {
+        const requests = buildSearchRequests(source, new Date(NOW.getTime() + poll * 6 * 60 * 60 * 1000));
+        starts.add(requests[0]!.topic);
+        // Rotation reorders; it never drops or duplicates.
+        expect(new Set(requests.map((r) => r.topic))).toEqual(new Set(NINE));
+        expect(requests).toHaveLength(18);
+      }
+      expect(starts.size).toBeGreaterThan(1);
     });
+
+    // The failure this pins is silent and was nearly shipped: with a rotation
+    // period that evenly divides the poll interval, the offset advances by a
+    // constant, and that constant is ZERO whenever it is a multiple of the
+    // topic count -- nine topics every nine hours, six every six, three every
+    // three. Rotation then never rotates and the same tail is skipped forever.
+    // Measured over this same grid, a 60-minute period freezes in 60
+    // combinations; TOPIC_ROTATION_PERIOD_MS (13 minutes, prime, dividing none
+    // of these intervals) freezes in none.
+    it.each([15, 30, 60, 180, 360, 720, 1440])(
+      'never freezes rotation at a %i-minute poll interval, for any topic count',
+      (intervalMinutes) => {
+        for (let topicCount = 2; topicCount <= 12; topicCount++) {
+          const topics = Array.from({ length: topicCount }, (_, i) => `t${i}`);
+          const source = makeSource({ filters: { topics } });
+          for (const phaseMinutes of [0, 5, 7, 11]) {
+            const starts = new Set<string>();
+            for (let poll = 0; poll < 12; poll++) {
+              const at = new Date(NOW.getTime() + (phaseMinutes + poll * intervalMinutes) * 60_000);
+              starts.add(buildSearchRequests(source, at)[0]!.topic);
+            }
+            expect(starts.size, `frozen at ${topicCount} topics, phase ${phaseMinutes}m`).toBeGreaterThan(1);
+          }
+        }
+      },
+    );
 
     it('is deterministic for the same now -- rotation is a function of the clock, not of a counter', () => {
       const source = makeSource({ filters: { topics: NINE } });
