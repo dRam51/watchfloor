@@ -9,6 +9,8 @@ import {
   localDay,
   recordStarSnapshot,
   getStarSnapshots,
+  resolveRepoId,
+  getRepoNames,
 } from '../../src/db/repoSnapshots.ts';
 
 const open: Array<ReturnType<typeof openDb>> = [];
@@ -163,5 +165,100 @@ describe('recordStarSnapshot, polled more than once in a day', () => {
     const snapshots = getStarSnapshots(db, AGENTKIT.repoId);
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]?.snapshotDay).toBe('2026-08-08');
+  });
+});
+
+// The same repo after a rename: GitHub keeps the numeric id and redirects the
+// old path, so the canonical URL -- and therefore item_key -- changes while
+// the repo does not.
+const AGENTKIT_RENAMED = {
+  repoId: AGENTKIT.repoId,
+  itemKey: 'b'.repeat(64),
+  fullName: 'acme/agent-kit',
+};
+
+describe('repo identity across a rename', () => {
+  it('keeps one continuous velocity history rather than restarting it', () => {
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-08T13:00:00.000Z',
+      tz: NY,
+    });
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 90,
+      observedAt: '2026-08-09T13:00:00.000Z',
+      tz: NY,
+    });
+    // Renamed between polls. Nothing about the repo changed but its path.
+    recordStarSnapshot(db, {
+      ...AGENTKIT_RENAMED,
+      stars: 220,
+      observedAt: '2026-08-10T13:00:00.000Z',
+      tz: NY,
+    });
+
+    expect(getStarSnapshots(db, AGENTKIT.repoId).map((s) => [s.snapshotDay, s.stars])).toEqual([
+      ['2026-08-08', 40],
+      ['2026-08-09', 90],
+      ['2026-08-10', 220],
+    ]);
+  });
+
+  it('resolves either name to the one repo, so two names cannot accumulate two histories', () => {
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-08T13:00:00.000Z',
+      tz: NY,
+    });
+    recordStarSnapshot(db, {
+      ...AGENTKIT_RENAMED,
+      stars: 220,
+      observedAt: '2026-08-10T13:00:00.000Z',
+      tz: NY,
+    });
+
+    expect(resolveRepoId(db, AGENTKIT.itemKey)).toBe(AGENTKIT.repoId);
+    expect(resolveRepoId(db, AGENTKIT_RENAMED.itemKey)).toBe(AGENTKIT.repoId);
+    // Both names on record, neither overwritten -- a rename is a queryable
+    // fact, not an invisible discontinuity.
+    expect(getRepoNames(db, AGENTKIT.repoId).map((n) => n.fullName).sort()).toEqual([
+      'acme/agent-kit',
+      'acme/agentkit',
+    ]);
+  });
+
+  it('returns null for an item_key that belongs to no known repo', () => {
+    expect(resolveRepoId(migratedDb(), 'c'.repeat(64))).toBeNull();
+  });
+
+  it('resolves a reused path to the repo that most recently held it', () => {
+    // GitHub frees a deleted repo's path for reuse, so one item_key can point
+    // at two different numeric ids over time. The newer holder wins; the
+    // older pairing stays on disk rather than being rewritten.
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-08T13:00:00.000Z',
+      tz: NY,
+    });
+    recordStarSnapshot(db, {
+      repoId: 900002,
+      itemKey: AGENTKIT.itemKey,
+      fullName: AGENTKIT.fullName,
+      stars: 3,
+      observedAt: '2026-08-10T13:00:00.000Z',
+      tz: NY,
+    });
+
+    expect(resolveRepoId(db, AGENTKIT.itemKey)).toBe(900002);
+    // And the two repos' star histories stayed separate, not merged.
+    expect(getStarSnapshots(db, AGENTKIT.repoId).map((s) => s.stars)).toEqual([40]);
+    expect(getStarSnapshots(db, 900002).map((s) => s.stars)).toEqual([3]);
   });
 });

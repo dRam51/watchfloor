@@ -138,6 +138,70 @@ export function recordStarSnapshot(db: Db, obs: StarObservation): RecordOutcome 
   }
 }
 
+/** One (repo_id, item_key) pairing, as it was observed. */
+export interface RepoName {
+  repoId: number;
+  itemKey: string;
+  fullName: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+/**
+ * The repo whose velocity history a caller holding only an `item_key` should
+ * read -- the bridge from the rest of the system's identity to this module's.
+ * `null` when the key belongs to no repo this system has ever seen.
+ *
+ * Ties break on the most recently seen pairing, because the mapping is
+ * genuinely many-to-many over time: a rename gives one repo several keys, and
+ * GitHub freeing a deleted repo's path for reuse gives one key several repos.
+ * The older pairings stay on disk rather than being rewritten, so the
+ * ambiguity stays inspectable via getRepoNames.
+ */
+export function resolveRepoId(db: Db, itemKey: string): number | null {
+  const row = db
+    .prepare(
+      `select repo_id from github_repo_names
+        where item_key = ?
+        order by last_seen_at desc, repo_id desc
+        limit 1`,
+    )
+    .get(itemKey) as { repo_id: number } | undefined;
+  return row ? row.repo_id : null;
+}
+
+/**
+ * Every name `repoId` has ever been observed under, oldest first. More than
+ * one row means the repo was renamed or transferred while this system was
+ * watching -- which is exactly what the numeric-id identity exists to survive.
+ */
+export function getRepoNames(db: Db, repoId: number): RepoName[] {
+  // Inline type literal, not a named interface -- see the cast note in
+  // getStarSnapshots below.
+  const rows = db
+    .prepare(
+      `select repo_id, item_key, full_name, first_seen_at, last_seen_at
+         from github_repo_names
+        where repo_id = ?
+        order by first_seen_at asc, item_key asc`,
+    )
+    .all(repoId) as Array<{
+    repo_id: number;
+    item_key: string;
+    full_name: string;
+    first_seen_at: string;
+    last_seen_at: string;
+  }>;
+
+  return rows.map((r) => ({
+    repoId: r.repo_id,
+    itemKey: r.item_key,
+    fullName: r.full_name,
+    firstSeenAt: r.first_seen_at,
+    lastSeenAt: r.last_seen_at,
+  }));
+}
+
 /** Every recorded day for `repoId`, oldest first. Unobserved days are absent. */
 export function getStarSnapshots(db: Db, repoId: number): RepoStarSnapshot[] {
   // Inline type literal, not `as RepoStarSnapshot[]`: casting .all()'s
