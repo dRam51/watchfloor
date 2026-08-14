@@ -100,3 +100,38 @@ describe('cost gate', () => {
     }
   });
 });
+
+describe('GitHub API cost entry (M4a)', () => {
+  it('is registered as free-tier-no-card with no spend flag', () => {
+    // An account is required to hold a PAT; a payment method is not. Under
+    // docs/costs.md's taxonomy that is free-tier-no-card, which is permitted
+    // by default — only `paid` needs a WF_ALLOW_PAID_* flag.
+    const github = SERVICES.find((s) => s.id === 'github-api');
+    expect(github, 'src/cost/registry.ts has no github-api entry').toBeDefined();
+    expect(github!.costClass).toBe('free-tier-no-card');
+    expect(github!.category).toBeUndefined();
+  });
+
+  it('records that the unauthenticated path needs no account at all', () => {
+    // The distinction matters for the zero-dollar rule: with no token the
+    // system touches GitHub with no account, no key, and no relationship that
+    // could ever bill. The PAT only raises a rate limit.
+    const github = SERVICES.find((s) => s.id === 'github-api')!;
+    expect(github.rateLimit).toMatch(/unauthenticated/i);
+    expect(github.rateLimit).toMatch(/60/);
+  });
+
+  it('cannot bill at the limit — requests are refused, never charged', () => {
+    const github = SERVICES.find((s) => s.id === 'github-api')!;
+    expect(github.onLimit).not.toMatch(/bill|charge|overage/i);
+  });
+
+  it('no free-tier-no-card service carries a spend category', () => {
+    // A category implies a WF_ALLOW_PAID_* flag, and the doc/registry
+    // agreement test derives the doc's Flag column from it. A stray category
+    // on a non-paid service would silently demand a flag that should not exist.
+    for (const service of SERVICES.filter((s) => s.costClass !== 'paid')) {
+      expect(service.category, `${service.id} is not paid but declares a category`).toBeUndefined();
+    }
+  });
+});

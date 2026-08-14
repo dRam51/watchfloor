@@ -43,8 +43,29 @@ introductory price, and is disqualified from the default path.
 | `dark-reading` | Dark Reading RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
 | `rapid7` | Rapid7 Blog RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
 | `cisco-talos` | Cisco Talos Intelligence Blog RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `github-api` | GitHub REST API (repos beat) | free-tier-no-card | — | unauthenticated (default): 60 core req/hour, 10 search req/min. With a read-only PAT: 5,000 core req/hour, 30 search req/min | requests refused with 403/429; client stops before overdrawing; shown on source-health |
 | `ollama-local` | Ollama local inference | free-forever | — | local hardware | queues locally; no charge possible |
 | `anthropic-api` | Anthropic API (enrichment) | paid | `WF_ALLOW_PAID_ANTHROPIC` | per account | hard-disabled without the flag |
+
+> [!note] `github-api` is the first and only `free-tier-no-card` entry, and the class is exact
+> Every other row is `free-forever`. GitHub differs because holding a personal access token
+> requires a GitHub **account** — so it is not "an account that cannot be billed" — while
+> requiring **no payment method**, which is what keeps it out of `paid` and therefore
+> permitted by default with no `WF_ALLOW_PAID_*` flag.
+>
+> **The default path needs no account at all.** `WF_GITHUB_TOKEN` is optional and
+> `src/fetch/github.ts` has a real unauthenticated mode, which is what runs when it is unset.
+> The PAT buys rate limit and nothing else: ~83x the core budget (60/hour → 5,000/hour). It
+> unlocks no capability that costs money, because there is no paid tier on this API to fall
+> through to — at the limit GitHub refuses requests, and the client refuses to send before
+> even that. A read-only token is what §4 asks for; a classic token needs **no scopes ticked
+> at all** to read public repository data, and `repo` must not be granted.
+>
+> Two rate-limit facts worth keeping here rather than only in code, both measured live
+> 2026-08-14 against the real API: **`core` and `search` are separate budgets** with separate
+> ceilings, and **a 304 still consumed budget** on the unauthenticated path despite GitHub
+> documenting conditional requests as exempt. Any future budget arithmetic that treats a
+> revalidation as free will overrun the 60/hour ceiling.
 
 None of the 27 sources above require an account, an API key, or a card on file — every
 one is a public, unauthenticated RSS/Atom/JSON/sitemap endpoint. Some may be
