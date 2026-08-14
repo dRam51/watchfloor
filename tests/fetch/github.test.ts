@@ -3,7 +3,7 @@ import { createServer, type IncomingHttpHeaders, type RequestListener, type Serv
 import { readFileSync } from 'node:fs';
 import { inspect } from 'node:util';
 import { join } from 'node:path';
-import { GitHubClient, RATE_LIMITS } from '../../src/fetch/github.ts';
+import { GitHubApiError, GitHubClient, GitHubRateLimitError, RATE_LIMITS } from '../../src/fetch/github.ts';
 import { USER_AGENT } from '../../src/fetch/http.ts';
 
 // Real local http servers, no mocks — the same pattern tests/fetch/http.test.ts
@@ -292,5 +292,185 @@ describe('the token never escapes', () => {
     const client = new GitHubClient({ token: TOKEN, baseUrl: 'http://127.0.0.1:1' });
     expect(client.mode).toBe('authenticated');
     expect(JSON.stringify({ mode: client.mode, limits: client.limits })).not.toContain(TOKEN);
+  });
+});
+
+describe('rate-limit exhaustion', () => {
+  /** Serves the given status/headers and counts how many requests arrived. */
+  async function countingServer(
+    status: number,
+    headers: Record<string, string>,
+    body = '{}',
+  ): Promise<{ baseUrl: string; hits: () => number }> {
+    let hits = 0;
+    const baseUrl = await serve((_req, res) => {
+      hits += 1;
+      res.writeHead(status, { ...headers, 'content-type': 'application/json' });
+      res.end(body);
+    });
+    return { baseUrl, hits: () => hits };
+  }
+
+  it('throws GitHubRateLimitError on a 403 whose remaining is zero, carrying the reset instant', async () => {
+    // The real captured unauthenticated GraphQL 403: limit 0, remaining 0.
+    const { baseUrl } = await countingServer(
+      403,
+      headersOf('graphql_403'),
+      JSON.stringify(captured.graphql_403!._body),
+    );
+
+    const err = await new GitHubClient({ baseUrl }).request('/graphql').then(
+      () => { throw new Error('expected the 403 to reject'); },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(GitHubRateLimitError);
+    const rateErr = err as GitHubRateLimitError;
+    expect(rateErr.status).toBe(403);
+    expect(rateErr.retryable).toBe(true);
+    expect(rateErr.spent).toBe(true);
+    expect(rateErr.resetAt).toEqual(new Date(1_786_747_911 * 1000));
+  });
+
+  it('throws GitHubRateLimitError on a 429 and reports retry-after in milliseconds', async () => {
+    const { baseUrl } = await countingServer(
+      429,
+      headersOf('secondary_limit_429'),
+      JSON.stringify(captured.secondary_limit_429!._body),
+    );
+
+    const err = await new GitHubClient({ baseUrl }).request('/repos/a/b').then(
+      () => { throw new Error('expected the 429 to reject'); },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(GitHubRateLimitError);
+    // A secondary limit reports retry-after while `remaining` is still 23 —
+    // reading remaining alone would miss it entirely.
+    expect((err as GitHubRateLimitError).retryAfterMs).toBe(60_000);
+    expect((err as GitHubRateLimitError).rateLimit?.remaining).toBe(23);
+  });
+
+  it('leaves a 403 that is not a rate limit as an ordinary error', async () => {
+    // GitHub uses 403 for permission failures too. Misreporting one as a rate
+    // limit would make a scheduler wait for a reset that fixes nothing.
+    const { baseUrl } = await countingServer(403, { ...headersOf('repo_200') });
+
+    const err = await new GitHubClient({ baseUrl }).request('/repos/a/b').then(
+      () => { throw new Error('expected the 403 to reject'); },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(GitHubApiError);
+    expect(err).not.toBeInstanceOf(GitHubRateLimitError);
+    expect((err as GitHubApiError).retryable).toBe(false);
+  });
+
+  it('refuses to send at all once the observed remaining hits zero, without touching the network', async () => {
+    // The decision requirement 3 asks for: fail fast rather than send a
+    // request that is already known to be refused.
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const { baseUrl, hits } = await countingServer(200, {
+      'x-ratelimit-limit': '60',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-used': '60',
+      'x-ratelimit-resource': 'core',
+      'x-ratelimit-reset': String(future),
+    });
+
+    const client = new GitHubClient({ baseUrl });
+    await client.request('/repos/a/b', { minIntervalMs: 0 });
+    expect(hits()).toBe(1);
+
+    const err = await client.request('/repos/c/d', { minIntervalMs: 0 }).then(
+      () => { throw new Error('expected the exhausted budget to reject'); },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(GitHubRateLimitError);
+    expect((err as GitHubRateLimitError).spent).toBe(false);
+    expect((err as GitHubRateLimitError).retryable).toBe(true);
+    // The whole point: no second request was made.
+    expect(hits()).toBe(1);
+  });
+
+  it('resumes once the reset instant has passed', async () => {
+    const past = Math.floor(Date.now() / 1000) - 1;
+    const { baseUrl, hits } = await countingServer(200, {
+      'x-ratelimit-limit': '60',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-used': '60',
+      'x-ratelimit-resource': 'core',
+      'x-ratelimit-reset': String(past),
+    });
+
+    const client = new GitHubClient({ baseUrl });
+    await client.request('/repos/a/b', { minIntervalMs: 0 });
+    await client.request('/repos/c/d', { minIntervalMs: 0 });
+
+    expect(hits()).toBe(2);
+  });
+
+  it('an exhausted search budget does not block a core request', async () => {
+    // Separate budgets, separate gates. Blocking core because search ran out
+    // would strand the enrichment path for a full minute for no reason.
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    let hits = 0;
+    const baseUrl = await serve((req, res) => {
+      hits += 1;
+      const exhausted = req.url?.startsWith('/search');
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'x-ratelimit-limit': exhausted ? '10' : '60',
+        'x-ratelimit-remaining': exhausted ? '0' : '59',
+        'x-ratelimit-resource': exhausted ? 'search' : 'core',
+        'x-ratelimit-reset': String(future),
+      });
+      res.end('{}');
+    });
+
+    const client = new GitHubClient({ baseUrl });
+    await client.request('/search/repositories?q=x', { minIntervalMs: 0 });
+
+    await expect(client.request('/search/repositories?q=y', { minIntervalMs: 0 })).rejects.toBeInstanceOf(
+      GitHubRateLimitError,
+    );
+    await expect(client.request('/repos/a/b', { minIntervalMs: 0 })).resolves.toMatchObject({ status: 200 });
+    expect(hits).toBe(2);
+  });
+
+  it('honours a reserve, stopping short of zero so a caller can keep headroom', async () => {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const { baseUrl, hits } = await countingServer(200, {
+      'x-ratelimit-limit': '60',
+      'x-ratelimit-remaining': '5',
+      'x-ratelimit-resource': 'core',
+      'x-ratelimit-reset': String(future),
+    });
+
+    const client = new GitHubClient({ baseUrl, reserve: 5 });
+    await client.request('/repos/a/b', { minIntervalMs: 0 });
+
+    await expect(client.request('/repos/c/d', { minIntervalMs: 0 })).rejects.toBeInstanceOf(GitHubRateLimitError);
+    expect(hits()).toBe(1);
+  });
+
+  it('never sleeps waiting for a reset — it rejects immediately', async () => {
+    // A poll that blocks for up to an hour inside a scheduler tick is worse
+    // than one that fails and gets retried by the existing backoff.
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const { baseUrl } = await countingServer(200, {
+      'x-ratelimit-limit': '60',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-resource': 'core',
+      'x-ratelimit-reset': String(future),
+    });
+
+    const client = new GitHubClient({ baseUrl });
+    await client.request('/repos/a/b', { minIntervalMs: 0 });
+
+    const startedAt = Date.now();
+    await expect(client.request('/repos/c/d', { minIntervalMs: 0 })).rejects.toBeInstanceOf(GitHubRateLimitError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 });

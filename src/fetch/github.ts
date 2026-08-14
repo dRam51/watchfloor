@@ -182,6 +182,13 @@ export interface GitHubClientOptions {
   token?: string;
   /** API origin. Overridable so tests can point at a real local server. */
   baseUrl?: string;
+  /**
+   * Stop sending while `remaining` is at or below this, rather than at
+   * zero. Default 0 — spend the whole budget, never overdraw it. Raise it
+   * to hold headroom back for a higher-priority call (e.g. leave room for
+   * the enrichment path after a search page).
+   */
+  reserve?: number;
 }
 
 /** Reads a header as a base-10 integer, or null when absent/unparseable. */
@@ -232,6 +239,7 @@ export class GitHubClient {
   readonly #baseUrl: string;
   /** Last observed budget per `x-ratelimit-resource`. */
   readonly #budgets = new Map<string, GitHubRateLimit>();
+  readonly #reserve: number;
   /** Gates when the next request to this client's host may start. */
   #hostSlot: Promise<number> = Promise.resolve(0);
 
@@ -239,6 +247,7 @@ export class GitHubClient {
     const token = opts.token?.trim();
     this.#token = token ? token : null;
     this.#baseUrl = opts.baseUrl ?? 'https://api.github.com';
+    this.#reserve = opts.reserve ?? 0;
   }
 
   /** Which mode this client is in. Safe to log — never includes the token. */
@@ -301,6 +310,8 @@ export class GitHubClient {
     } = opts;
 
     const url = new URL(path, this.#baseUrl).toString();
+
+    this.#assertBudget(path);
 
     await this.#acquireSlot(minIntervalMs);
 
@@ -370,15 +381,99 @@ export class GitHubClient {
     };
   }
 
+  /**
+   * ## What this client does as `remaining` approaches zero
+   *
+   * **It refuses to send, immediately, and never sleeps.** Requirement 3
+   * asks for this choice to be made and documented, so:
+   *
+   * *Why refuse rather than send anyway.* A request sent against a spent
+   * budget is not free — GitHub still counts it (`x-ratelimit-used` keeps
+   * climbing past `limit`), and sustained overdraft is what escalates a
+   * primary limit into a secondary block that outlasts the reset. Refusing
+   * locally is strictly cheaper than being refused remotely.
+   *
+   * *Why not sleep until the reset.* The reset can be up to an hour away
+   * unauthenticated. Blocking a scheduler tick for an hour would stall
+   * every OTHER source behind it, converting one exhausted budget into a
+   * whole-system stall. Rejecting with `retryable: true` instead hands the
+   * decision to `src/scheduler/run.ts`'s existing backoff, which already
+   * knows how to defer one source without holding up the rest. This is the
+   * same reasoning the zero-dollar rule applies to paid paths: a hard
+   * refusal, never a silent deferred retry.
+   *
+   * *Why the gate is per RESOURCE.* `core` and `search` are separate
+   * budgets. An exhausted search budget must not block a core request; the
+   * reverse strands the enrichment path for a full minute for no reason.
+   *
+   * *Why it clears optimistically at `resetAt`.* Once the reset instant has
+   * passed the budget has refilled, so the recorded zero is stale. The
+   * client tries again rather than waiting for a fresh observation it can
+   * only get by trying. A missing `resetAt` is treated as "cannot prove it
+   * refilled" and keeps refusing until a real response updates it.
+   */
+  #assertBudget(path: string): void {
+    const resource = path.startsWith('/search') ? 'search' : 'core';
+    const budget = this.#budgets.get(resource);
+    if (!budget || budget.remaining === null) return;
+    if (budget.remaining > this.#reserve) return;
+    if (budget.resetAt !== null && Date.now() >= budget.resetAt.getTime()) return;
+
+    throw new GitHubRateLimitError(
+      `refusing to request ${path}: the ${resource} budget is spent ` +
+        `(${budget.remaining} remaining, reserve ${this.#reserve})`,
+      { status: null, rateLimit: budget, resetAt: budget.resetAt, retryAfterMs: null, spent: false },
+    );
+  }
+
   async #buildError(response: Response, path: string, rateLimit: GitHubRateLimit | null): Promise<GitHubApiError> {
     await response.body?.cancel().catch(() => {});
-    const retryable = response.status === 429 || response.status >= 500;
+
+    // GitHub signals a rate limit two different ways, and reading only one
+    // misses the other. A PRIMARY limit is a 403 (or 429) with
+    // `x-ratelimit-remaining: 0`. A SECONDARY limit is a 403/429 carrying
+    // `retry-after` while `remaining` is still healthy — the captured
+    // fixture has remaining 23 — so a remaining-only check would classify
+    // it as an ordinary permission failure and retry straight into it.
+    const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+    const isRateLimited =
+      response.status === 429 ||
+      (response.status === 403 && (rateLimit?.remaining === 0 || retryAfterMs !== null));
+
+    if (isRateLimited) {
+      return new GitHubRateLimitError(`${path} responded ${response.status} ${response.statusText}`, {
+        status: response.status,
+        rateLimit,
+        resetAt: rateLimit?.resetAt ?? null,
+        retryAfterMs,
+        spent: true,
+      });
+    }
+
+    // A 403 that is NOT a rate limit is a permission failure — retrying it
+    // after a reset fixes nothing, so it must not be marked retryable.
+    const retryable = response.status >= 500;
     return new GitHubApiError(`${path} responded ${response.status} ${response.statusText}`, {
       status: response.status,
       retryable,
       rateLimit,
     });
   }
+}
+
+/**
+ * `Retry-After` is either delta-seconds or an HTTP-date (RFC 9110). GitHub
+ * sends seconds, but the header is defined as both and a proxy may rewrite
+ * it, so both are accepted. Returns milliseconds, or null when absent or
+ * unparseable.
+ */
+function parseRetryAfter(raw: string | null): number | null {
+  if (raw === null) return null;
+  const seconds = Number.parseInt(raw.trim(), 10);
+  if (Number.isFinite(seconds) && String(seconds) === raw.trim()) return seconds * 1000;
+  const date = Date.parse(raw);
+  if (Number.isNaN(date)) return null;
+  return Math.max(0, date - Date.now());
 }
 
 /**
@@ -402,6 +497,42 @@ export class GitHubApiError extends PoliteFetchError {
     super(message, { status: opts.status, retryable: opts.retryable, cause: opts.cause });
     this.name = 'GitHubApiError';
     this.rateLimit = opts.rateLimit;
+  }
+}
+
+/**
+ * A rate limit, either observed in a response (`spent: true` — the request
+ * was made and refused) or predicted before sending (`spent: false` — this
+ * client refused it locally against a budget it already knew was gone).
+ *
+ * That distinction is the useful one for a caller: `spent: true` means a
+ * request was consumed, `spent: false` means none was. Always `retryable`,
+ * since a rate limit is by definition temporary — but see `#assertBudget`
+ * for why this client never does the waiting itself.
+ */
+export class GitHubRateLimitError extends GitHubApiError {
+  /** When the budget refills, from `x-ratelimit-reset`. */
+  readonly resetAt: Date | null;
+  /** From `retry-after`, in ms. Present on secondary limits, not primary ones. */
+  readonly retryAfterMs: number | null;
+  /** Whether a request was actually sent (and therefore counted). */
+  readonly spent: boolean;
+
+  constructor(
+    message: string,
+    opts: {
+      status: number | null;
+      rateLimit: GitHubRateLimit | null;
+      resetAt: Date | null;
+      retryAfterMs: number | null;
+      spent: boolean;
+    },
+  ) {
+    super(message, { status: opts.status, retryable: true, rateLimit: opts.rateLimit });
+    this.name = 'GitHubRateLimitError';
+    this.resetAt = opts.resetAt;
+    this.retryAfterMs = opts.retryAfterMs;
+    this.spent = opts.spent;
   }
 }
 
