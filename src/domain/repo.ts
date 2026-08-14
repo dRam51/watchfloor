@@ -6,9 +6,11 @@
  * performs no HTTP (`src/fetch/github.ts`), no adapter routing
  * (`src/adapters/github.ts`), no snapshot storage (`src/db/repoSnapshots.ts`),
  * and — apart from one read against existing `item_state` — no database work
- * at all. It never writes anything, anywhere. That is load-bearing rather than
- * incidental; see "Suppression is a read-time predicate, never a stored
- * verdict" below.
+ * at all. It never writes anything, anywhere — asserted against a real
+ * database in the test file, not just claimed here. That is load-bearing
+ * rather than incidental: it is the whole argument for suppressing a
+ * README-less repo outright rather than de-ranking it. See "SUPPRESS, NOT
+ * DE-RANK" below.
  */
 
 import type { Db } from '../db/connection.ts';
