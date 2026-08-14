@@ -122,6 +122,78 @@ function makeManyEntriesBody(n: number): string {
   </urlset>`;
 }
 
+/**
+ * Builds a synthetic sitemap body for cap-ranking tests that mix well-dated
+ * entries with ones the cap cannot confidently rank at all: no
+ * <news:publication_date> element, an empty one, and a malformed one. Each
+ * of `datedCount` well-dated entries ("Dated 0".."Dated datedCount-1") gets
+ * a distinct, strictly descending date one day apart, same as
+ * makeManyEntriesBody -- entry 0 most recent.
+ *
+ * The three undated/malformed entries are SPLICED IN NEAR THE FRONT of the
+ * resulting document (low file-order index, among the otherwise-most-recent
+ * entries) rather than appended at the end. That placement is deliberate:
+ * fix round 1, Finding 1 asked specifically for a test proving recencyRank
+ * ranks an unparseable/missing date LAST, not merely that the cap trims
+ * *something*. Seeding them at the front means a regression that fell back
+ * to file order, or that flipped recencyRank's sign so unranked entries
+ * looked most-recent, would make THESE entries survive and cut real
+ * well-dated articles instead -- exactly the silent, undetected-by-length-
+ * alone failure mode the finding described.
+ */
+function makeMixedCapBody(datedCount: number): string {
+  const base = Date.UTC(2026, 7, 13, 0, 0, 0); // 2026-08-13T00:00:00Z
+  const dated = Array.from({ length: datedCount }, (_, i) => {
+    const date = new Date(base - i * 24 * 60 * 60 * 1000).toISOString();
+    return `<url>
+      <loc>https://example.test/article/dated-${i}</loc>
+      <news:news>
+        <news:publication><news:name>Associated Press</news:name></news:publication>
+        <news:publication_date>${date}</news:publication_date>
+        <news:title>Dated ${i}</news:title>
+      </news:news>
+    </url>`;
+  });
+
+  const undated = [
+    // No <news:publication_date> element at all.
+    `<url>
+      <loc>https://example.test/article/undated-missing</loc>
+      <news:news>
+        <news:publication><news:name>Associated Press</news:name></news:publication>
+        <news:title>Undated Missing</news:title>
+      </news:news>
+    </url>`,
+    // <news:publication_date> present but empty.
+    `<url>
+      <loc>https://example.test/article/undated-empty</loc>
+      <news:news>
+        <news:publication><news:name>Associated Press</news:name></news:publication>
+        <news:publication_date></news:publication_date>
+        <news:title>Undated Empty</news:title>
+      </news:news>
+    </url>`,
+    // <news:publication_date> present but not a real date.
+    `<url>
+      <loc>https://example.test/article/undated-malformed</loc>
+      <news:news>
+        <news:publication><news:name>Associated Press</news:name></news:publication>
+        <news:publication_date>not a real date at all</news:publication_date>
+        <news:title>Undated Malformed</news:title>
+      </news:news>
+    </url>`,
+  ];
+
+  const entries = dated.slice();
+  entries.splice(5, 0, undated[0]!);
+  entries.splice(9, 0, undated[1]!);
+  entries.splice(13, 0, undated[2]!);
+
+  return `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+    ${entries.join('\n')}
+  </urlset>`;
+}
+
 // ---------------------------------------------------------------------------
 
 describe('newsSitemapAdapter', () => {
@@ -286,6 +358,10 @@ describe('newsSitemapAdapter', () => {
       // Cap-trimming is not a defect -- every one of these entries parsed
       // fine, so skipped must stay 0, distinct from a parser problem.
       expect(result.skipped).toBe(0);
+      // `capped` reports exactly how many were trimmed -- distinct from
+      // `skipped`, and never folded into it (see AdapterResult.capped's doc
+      // comment in types.ts).
+      expect(result.capped).toBe(10);
 
       // makeManyEntriesBody makes entry 0 the newest and entry (total-1) the
       // oldest, one day apart -- so the surviving set must be EXACTLY
@@ -299,7 +375,7 @@ describe('newsSitemapAdapter', () => {
       }
     });
 
-    it('does not trim a batch already at or under the cap', async () => {
+    it('does not trim a batch already at or under the cap, and leaves `capped` undefined rather than a fabricated 0', async () => {
       const baseUrl = await serveBody(makeManyEntriesBody(MAX_ITEMS_PER_FETCH), {
         headers: { 'Content-Type': 'text/xml' },
       });
@@ -307,6 +383,43 @@ describe('newsSitemapAdapter', () => {
       const result = await newsSitemapAdapter.fetch(makeSource({ url: `${baseUrl}/sitemap` }), null);
 
       expect(result.items).toHaveLength(MAX_ITEMS_PER_FETCH);
+      expect(result.capped).toBeUndefined();
+    });
+
+    it('excludes undated and malformed-dated entries before any well-dated entry when the cap binds, even though they sit near the front of the file (fix round 1, Finding 1)', async () => {
+      const datedCount = MAX_ITEMS_PER_FETCH + 5; // 155 well-dated + 3 undated = 158 total
+      const body = makeMixedCapBody(datedCount);
+      const baseUrl = await serveBody(body, { headers: { 'Content-Type': 'text/xml' } });
+
+      const result = await newsSitemapAdapter.fetch(makeSource({ url: `${baseUrl}/sitemap` }), null);
+
+      expect(result.items).toHaveLength(MAX_ITEMS_PER_FETCH);
+      expect(result.skipped).toBe(0);
+      expect(result.capped).toBe(datedCount + 3 - MAX_ITEMS_PER_FETCH);
+
+      const titles = new Set(result.items.map((i) => i.title));
+
+      // Every undated/malformed-dated entry is gone -- recencyRank ranks
+      // them last (never first), so they are the FIRST to be trimmed
+      // regardless of file position. These three were seeded near the front
+      // (indices 5, 9, 13) specifically so a cap that fell back to file
+      // order, or that had recencyRank's comparison sign flipped, would keep
+      // them and cut real, well-dated recent articles instead.
+      expect(titles.has('Undated Missing')).toBe(false);
+      expect(titles.has('Undated Empty')).toBe(false);
+      expect(titles.has('Undated Malformed')).toBe(false);
+
+      // The MAX_ITEMS_PER_FETCH most recent DATED entries survive...
+      for (let i = 0; i < MAX_ITEMS_PER_FETCH; i++) {
+        expect(titles.has(`Dated ${i}`)).toBe(true);
+      }
+      // ...and the 5 oldest dated entries are cut too, same as the undated
+      // ones -- proving the cap still ranks correctly AMONG well-dated
+      // entries once the undated ones are out of the running, not just that
+      // undated entries always lose.
+      for (let i = MAX_ITEMS_PER_FETCH; i < datedCount; i++) {
+        expect(titles.has(`Dated ${i}`)).toBe(false);
+      }
     });
   });
 
@@ -323,6 +436,66 @@ describe('newsSitemapAdapter', () => {
 
       expect(result.items).toHaveLength(1);
       expect(result.items[0]!.title).toBe('Only One');
+    });
+  });
+
+  describe('absorbed-entry recovery (fix round 1, Finding 2)', () => {
+    // rss.ts has three dedicated tests proving its equivalent
+    // recoverAbsorbedEntries/collectAbsorbedEntries pair actually recovers a
+    // sibling absorbed by a genuinely unclosed element, not merely that it
+    // leaves well-formed documents unchanged (which the real-fixture test
+    // above already proves, via the no-op path -- entries.length === 55
+    // there is consistent with recovery working OR with it being dead code;
+    // it cannot tell the two apart). These two tests close that gap for
+    // this adapter directly, adapted to <url>/<loc>/<news:title>. Verified
+    // empirically first (node -e against fast-xml-parser with this file's
+    // exact parser config) that leaving <news:title> unclosed inside the
+    // first <url> makes the SECOND <url> parse as a descendant nested under
+    // `news:news.news:title.url`, not as a top-level sibling of <urlset> --
+    // exactly the shape recoverAbsorbedEntries is designed to find and lift
+    // back out.
+    it('recovers a <url> entry absorbed by a genuinely unclosed element instead of losing it', async () => {
+      const baseUrl = await serveBody(
+        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+<url><loc>https://example.test/broken</loc><news:news><news:publication_date>2026-08-12T00:00:00Z</news:publication_date><news:title>oops no closing tag
+<url><loc>https://example.test/good-two</loc><news:news><news:title>Good Two</news:title></news:news></url>
+</urlset>`,
+        { headers: { 'Content-Type': 'text/xml' } },
+      );
+
+      const result = await newsSitemapAdapter.fetch(makeSource({ url: `${baseUrl}/sitemap` }), null);
+
+      expect(result.items).toHaveLength(2);
+      const titles = result.items.map((i) => i.title).sort();
+      expect(titles).toEqual(['Good Two', 'oops no closing tag'].sort());
+
+      // "Broken One" (its own <news:title> is the truncated text itself,
+      // since that element never closed) is still a valid, usable item --
+      // a truncated element's own content is not, by itself, a reason to
+      // drop the entry it belongs to.
+      const brokenOne = result.items.find((i) => i.url === 'https://example.test/broken')!;
+      expect(brokenOne.publishedAt).toBe('2026-08-12T00:00:00Z');
+
+      const goodTwo = result.items.find((i) => i.title === 'Good Two')!;
+      expect(goodTwo.url).toBe('https://example.test/good-two');
+    });
+
+    it('recovers a CHAIN of multiple <url> entries absorbed by the same unclosed element', async () => {
+      const baseUrl = await serveBody(
+        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+<url><loc>https://example.test/broken</loc><news:news><news:title>oops no closing tag
+<url><loc>https://example.test/good-two</loc><news:news><news:title>Good Two</news:title></news:news></url>
+<url><loc>https://example.test/good-three</loc><news:news><news:title>Good Three</news:title></news:news></url>
+</urlset>`,
+        { headers: { 'Content-Type': 'text/xml' } },
+      );
+
+      const result = await newsSitemapAdapter.fetch(makeSource({ url: `${baseUrl}/sitemap` }), null);
+
+      expect(result.items).toHaveLength(3);
+      expect(result.items.map((i) => i.title).sort()).toEqual(
+        ['Good Three', 'Good Two', 'oops no closing tag'].sort(),
+      );
     });
   });
 

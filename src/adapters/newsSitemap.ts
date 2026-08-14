@@ -124,11 +124,16 @@ export class NewsSitemapParseError extends Error {
  * gives more than an order of magnitude of headroom over what even a
  * frequent poll interval (e.g. every 15-30 minutes) should ever need to pick
  * up as genuinely NEW in one cycle, while still cutting the realistic
- * ~585-entry response by more than half -- so a cold start, a batch import,
- * or recovery after a multi-hour outage catches up within one or two polls
- * rather than requiring the full body every single time. Exported so a
- * future tuning pass finds one named constant rather than a magic number
- * buried in fetch().
+ * ~585-entry response by more than half. A cold start, a batch import, or
+ * recovery after a multi-hour outage therefore does NOT need the full body
+ * in one shot: each poll re-ranks the same rolling universe by recency, so a
+ * backlog clears at roughly the rate new articles arrive -- nearer three or
+ * four cycles than one or two, since the cap can only ever admit that many
+ * new-to-us entries per poll, not the whole deficit at once. See `capped` on
+ * `AdapterResult` (src/adapters/types.ts) for how much was actually trimmed
+ * on any given fetch, so this is a measured number, not just an assumption.
+ * Exported so a future tuning pass finds one named constant rather than a
+ * magic number buried in fetch().
  */
 export const MAX_ITEMS_PER_FETCH = 150;
 
@@ -370,10 +375,15 @@ export const newsSitemapAdapter: Adapter = {
     // working-as-designed AP poll as "the parser is broken" every single
     // run, since 585 real entries against a 150 cap would otherwise report
     // skipped: ~435 forever.
-    const capped: ParseEntriesResult = {
-      items: capToMostRecent(parsed.items, MAX_ITEMS_PER_FETCH),
-      skipped: parsed.skipped,
-    };
-    return fetchedResult(fetchResult, capped);
+    const cappedItems = capToMostRecent(parsed.items, MAX_ITEMS_PER_FETCH);
+    const trimmedByCap = parsed.items.length - cappedItems.length;
+
+    const result = fetchedResult(fetchResult, { items: cappedItems, skipped: parsed.skipped });
+    // `capped` stays undefined (not a fabricated 0) whenever the cap didn't
+    // actually remove anything this fetch -- same "undefined means nothing
+    // to report" convention AdapterResult.skipped already uses. See that
+    // field's doc comment in types.ts for why this must never be folded
+    // into `skipped` itself.
+    return trimmedByCap > 0 ? { ...result, capped: trimmedByCap } : result;
   },
 };

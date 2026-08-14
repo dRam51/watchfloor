@@ -101,6 +101,34 @@ export interface AdapterResult {
    * required for correctness today. Added fix round 1, Finding 3.
    */
   skipped?: number;
+  /**
+   * How many otherwise-valid `RawItem`s an adapter's own volume cap
+   * discarded this fetch -- entries that parsed successfully and were
+   * excluded by policy, not by defect. Deliberately DISTINCT from
+   * `skipped` (see that field's doc comment just above): `skipped` means
+   * "this entry was broken or an EntryParser bug ate it," which is a
+   * health signal a source-health page should treat as a possible problem.
+   * An item cut by a cap is neither -- folding the two together would make
+   * a healthy, working-as-designed, at-capacity poll look identical to a
+   * parser that just broke on hundreds of entries.
+   *
+   * Optional because most adapters have no cap at all and must never
+   * fabricate a `0`: `rss`/`atom`, `json`, and `google_news` never set this
+   * field. `news_sitemap` (src/adapters/newsSitemap.ts) sets it whenever
+   * its MAX_ITEMS_PER_FETCH bound actually removed entries, and leaves it
+   * undefined on a fetch the cap didn't bind on -- same "undefined, not a
+   * fabricated 0, when there is nothing to report" convention `skipped`
+   * already uses for a `notModifiedResult`.
+   *
+   * Closes a blind spot `skipped` alone cannot: without this, `items: 150,
+   * skipped: 0` cannot distinguish "the source published exactly 150 and
+   * every one of them is here" from "the source published 585 and only the
+   * most recent 150 were kept" -- exactly the coverage question a
+   * source-health consumer most needs answered at cold start or after an
+   * outage, when a capped source is furthest behind. Added M1 task 8 fix
+   * round 1 (contract addition, authorized after tasks 6/7/9 all landed).
+   */
+  capped?: number;
 }
 
 // ---------------------------------------------------------------------------
