@@ -27,7 +27,11 @@ import { BEATS, assertCanonicalTimestamp, type Beat, type ItemType } from '../do
 // computeDecayFactor. (parseDecayConfig/loadDecayConfig DO touch the
 // filesystem -- they are config loaders, called once at process start or
 // on an explicit reload, never per item; kept in this file because the
-// task's file scope is exactly {decay.ts, decay.test.ts, decay.yaml}.)
+// task's file scope is exactly {decay.ts, decay.test.ts, decay.yaml}. The
+// one other kind of I/O this module needs -- resolving `firstFetchedAt`,
+// point 1 below -- is NOT here either, for the same reason: it lives in
+// src/domain/itemFirstFetchedAt.ts, a read path a caller runs before ever
+// calling into this file, exactly like resolving `now` itself.)
 //
 // TWO SCORES, NEVER BLENDED (§5.1): signal_score is machine relevance --
 // sharp decay, half-life in hours. read_score is human interest -- slow
@@ -55,14 +59,43 @@ import { BEATS, assertCanonicalTimestamp, type Beat, type ItemType } from '../do
 //        forever, and gets WORSE as more sources with unhandled date
 //        formats appear (M1 already found two formats that needed fixing;
 //        nothing guarantees the next one is caught before it ships).
-//      - fall back to fetched_at -> ALWAYS defined (items.fetched_at is
-//        NOT NULL), and defensible on its own terms: it answers "how long
-//        since we noticed this" rather than "how long since this
-//        happened" -- a different claim, but not an arbitrary one.
-//    DECISION: fall back to fetched_at (see effectivePublishedAt). STATED
-//    COST: a genuinely old document surfaced late (e.g. a historical CVE a
-//    scanner only just found) reads as artificially fresh relative to an
-//    item whose true publish date is known. That is accepted, not hidden.
+//      - fall back to when we first noticed the item -> ALWAYS defined
+//        (items.fetched_at is NOT NULL), and defensible on its own terms:
+//        it answers "how long since we noticed this" rather than "how long
+//        since this happened" -- a different claim, but not an arbitrary
+//        one.
+//    DECISION: fall back to when we first noticed the item (see
+//    effectivePublishedAt). GOT THE INPUT WRONG THE FIRST TIME THIS WAS
+//    IMPLEMENTED: "when we first noticed it" was originally read as
+//    getCurrentItem(...)'s own `fetchedAt` -- the *current* version's, not
+//    the item's *first* version's. insertItem never dedupes on content and
+//    items is append-only, so a source that re-delivers an item it already
+//    sent (not a correction -- the identical entry, again) still lands a
+//    brand-new row with a brand-new fetched_at, and getCurrentItem's
+//    `order by fetched_at desc` means that newest row is what "this item's
+//    fetchedAt" resolves to. For an undated item, that fetched_at is the
+//    ENTIRE timestamp decay has: every re-delivery reset its apparent age
+//    to zero, forever. Not a one-time offset -- a permanent inability to
+//    age. Reproduced against the real, unmodified primitives: an undated
+//    item first ingested five months before `now`, at cyber's 6h signal
+//    half-life, correctly decays to 5.88e-185 using its true first-seen
+//    time, and snaps back to exactly 1 (maximally fresh) the instant it is
+//    read via getCurrentItem(...).fetchedAt after a routine re-poll that
+//    changed nothing about the entry -- cisa-kev is exactly this shape,
+//    re-dumping its whole 1,665-entry catalog whenever a single CVE is
+//    added anywhere in it. See src/domain/itemFirstFetchedAt.ts, the fix:
+//    `firstFetchedAt` (the type-level name below, replacing a bare
+//    `fetchedAt` that any caller could satisfy with the wrong value) must
+//    be the EARLIEST fetched_at across every version sharing the item's
+//    item_key, which that module resolves and this one takes as a given
+//    (decayFactor stays pure -- no DB, no query, `firstFetchedAt` is just a
+//    parameter like everything else here).
+//    STATED COST, of the fallback itself, now correctly implemented: a
+//    genuinely old document surfaced late (e.g. a historical CVE a scanner
+//    only just found) reads as artificially fresh relative to an item whose
+//    true publish date is known. That one-time offset is accepted, not
+//    hidden. The permanent-reset failure mode above is not accepted -- it
+//    is the bug this fix round closes.
 //
 // 2. FUTURE-DATED items -- real: the AP news-sitemap adapter (M1 task 8)
 //    produced published_at values slightly ahead of fetchedAt/now during
@@ -189,7 +222,19 @@ export type ScoreProfile = 'signal' | 'read';
 
 export interface DecayTimestamps {
   publishedAt: string | null;
-  fetchedAt: string;
+  /**
+   * The EARLIEST `fetched_at` across every version sharing this item's
+   * `item_key` -- resolve it with `src/domain/itemFirstFetchedAt.ts`'s
+   * `getItemFirstFetchedAt`/`getItemFirstFetchedAtAsOf`, never with
+   * `getCurrentItem(...).fetchedAt` (`src/domain/item.ts`), which is the
+   * CURRENT version's fetchedAt and resets forward every time a source
+   * re-delivers an unchanged item. The field is named for this requirement
+   * rather than called `fetchedAt` specifically so a call site has to
+   * confront the distinction instead of reaching for the obvious-looking
+   * wrong value -- see the module doc comment, point 1, for the bug this
+   * once was.
+   */
+  firstFetchedAt: string;
 }
 
 export interface DecayInput extends DecayTimestamps {
@@ -202,10 +247,11 @@ const HOUR_MS = 3_600_000;
 /**
  * The null published_at decision (see the module doc comment, point 1),
  * isolated as its own small, independently-testable unit: fall back to
- * fetchedAt, which is always defined.
+ * firstFetchedAt, which is always defined and, unlike a current-version
+ * fetchedAt, never resets forward when a source re-delivers an item.
  */
 export function effectivePublishedAt(timestamps: DecayTimestamps): string {
-  return timestamps.publishedAt ?? timestamps.fetchedAt;
+  return timestamps.publishedAt ?? timestamps.firstFetchedAt;
 }
 
 /**
@@ -220,7 +266,7 @@ export function effectivePublishedAt(timestamps: DecayTimestamps): string {
  */
 export function decayFactor(timestamps: DecayTimestamps, now: string, halfLifeHours: number): number {
   assertCanonicalTimestamp('now', now);
-  assertCanonicalTimestamp('fetchedAt', timestamps.fetchedAt);
+  assertCanonicalTimestamp('firstFetchedAt', timestamps.firstFetchedAt);
   if (timestamps.publishedAt !== null) {
     assertCanonicalTimestamp('publishedAt', timestamps.publishedAt);
   }

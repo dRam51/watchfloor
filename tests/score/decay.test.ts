@@ -1,7 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, afterEach } from 'vitest';
+import { readFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { InvalidTimestampError } from '../../src/domain/item.ts';
+import { openDb, closeDb } from '../../src/db/connection.ts';
+import { runMigrations } from '../../src/db/migrate.ts';
+import { insertItem, getCurrentItem, InvalidTimestampError, type NewItem } from '../../src/domain/item.ts';
+import { getItemFirstFetchedAt } from '../../src/domain/itemFirstFetchedAt.ts';
 import {
   effectivePublishedAt,
   decayFactor,
@@ -55,28 +59,44 @@ function hoursBefore(iso: string, hours: number): string {
 // M1's first live ingest had 1,715 of 3,325 items with published_at null
 // (1,665 of those from cisa-kev alone, whose JSON feed carries no publish-
 // date field at all -- verified against attic/wf-m1-firstrun-2026-08-14.db).
-// The decision: fall back to fetchedAt. Weighed against the alternatives:
+// The decision: fall back to firstFetchedAt. Weighed against the alternatives:
 //   - treat as maximally old -> buries an undated item permanently, even if
 //     it is genuinely important (a KEV entry with no date is still a KEV
 //     entry). Silent and irrecoverable under append-only storage.
 //   - treat as maximally fresh -> undated churn would dominate every list
 //     forever, growing worse as more unhandled-format sources appear.
-//   - fall back to fetchedAt -> always defined (NOT NULL in the schema),
+//   - fall back to firstFetchedAt -> always defined (NOT NULL in the schema),
 //     and defensible: it answers "how long has it been since we noticed
 //     this" rather than "how long has it been since this happened". The
 //     stated cost: a genuinely old document surfaced late (e.g. a historical
 //     CVE our scanner only just found) will look artificially fresh relative
 //     to items whose true publish date is known. That's a real, accepted
 //     trade-off, not a silent one.
+//
+// FIX ROUND 1: the field is called `firstFetchedAt`, not `fetchedAt`, and
+// that rename is load-bearing, not cosmetic. The decision above ("fall back
+// to when we noticed it") was right; the original implementation read the
+// wrong timestamp for it -- `getCurrentItem(...).fetchedAt` (the CURRENT
+// version's), which resets forward every time a source re-delivers an item
+// unchanged (insertItem never dedupes on content; items is append-only).
+// cisa-kev re-dumps its whole catalog on nearly every poll, so an undated
+// KEV entry's apparent age reset to zero on every re-poll, permanently,
+// under the original field. `firstFetchedAt` must be the EARLIEST
+// fetched_at across every version sharing the item's item_key --
+// src/domain/itemFirstFetchedAt.ts resolves it; decayFactor only ever
+// consumes the already-resolved value (it still does no DB access itself).
+// The full regression proof, using the real cisa-kev shape and the actual
+// unmodified item.ts primitives, is in the "first-seen vs current-version
+// fetchedAt" describe block further down this file.
 describe('effectivePublishedAt (the null published_at decision)', () => {
   it('uses publishedAt directly when present', () => {
     expect(
-      effectivePublishedAt({ publishedAt: '2026-08-01T00:00:00.000Z', fetchedAt: '2026-08-10T00:00:00.000Z' }),
+      effectivePublishedAt({ publishedAt: '2026-08-01T00:00:00.000Z', firstFetchedAt: '2026-08-10T00:00:00.000Z' }),
     ).toBe('2026-08-01T00:00:00.000Z');
   });
 
-  it('falls back to fetchedAt when publishedAt is null', () => {
-    expect(effectivePublishedAt({ publishedAt: null, fetchedAt: '2026-08-10T00:00:00.000Z' })).toBe(
+  it('falls back to firstFetchedAt when publishedAt is null', () => {
+    expect(effectivePublishedAt({ publishedAt: null, firstFetchedAt: '2026-08-10T00:00:00.000Z' })).toBe(
       '2026-08-10T00:00:00.000Z',
     );
   });
@@ -87,28 +107,162 @@ describe('effectivePublishedAt (the null published_at decision)', () => {
     // source_id cisa-kev, item_type event, published_at NULL,
     // fetched_at 2026-08-14T03:47:10.404Z.
     expect(
-      effectivePublishedAt({ publishedAt: null, fetchedAt: '2026-08-14T03:47:10.404Z' }),
+      effectivePublishedAt({ publishedAt: null, firstFetchedAt: '2026-08-14T03:47:10.404Z' }),
     ).toBe('2026-08-14T03:47:10.404Z');
   });
 });
 
 describe('decayFactor -- null published_at flows through to the actual decay math', () => {
-  it('an undated item decays identically to a dated item whose publishedAt equals its fetchedAt', () => {
-    const fetchedAt = '2026-08-01T00:00:00.000Z';
-    const undated = decayFactor({ publishedAt: null, fetchedAt }, NOW, 24);
-    const datedAtFetch = decayFactor({ publishedAt: fetchedAt, fetchedAt }, NOW, 24);
+  it('an undated item decays identically to a dated item whose publishedAt equals its firstFetchedAt', () => {
+    const firstFetchedAt = '2026-08-01T00:00:00.000Z';
+    const undated = decayFactor({ publishedAt: null, firstFetchedAt }, NOW, 24);
+    const datedAtFetch = decayFactor({ publishedAt: firstFetchedAt, firstFetchedAt }, NOW, 24);
     expect(undated).toBe(datedAtFetch);
   });
 
   it('is NOT treated as uniformly fresh: an undated item fetched long ago decays more than one fetched recently', () => {
-    const oldUndated = decayFactor({ publishedAt: null, fetchedAt: '2026-06-01T00:00:00.000Z' }, NOW, 24);
-    const recentUndated = decayFactor({ publishedAt: null, fetchedAt: '2026-08-13T00:00:00.000Z' }, NOW, 24);
+    const oldUndated = decayFactor({ publishedAt: null, firstFetchedAt: '2026-06-01T00:00:00.000Z' }, NOW, 24);
+    const recentUndated = decayFactor({ publishedAt: null, firstFetchedAt: '2026-08-13T00:00:00.000Z' }, NOW, 24);
     expect(oldUndated).toBeLessThan(recentUndated);
   });
 
   it('is NOT treated as maximally stale: an undated item fetched moments ago is nearly as fresh as a freshly-published one', () => {
-    const undatedJustFetched = decayFactor({ publishedAt: null, fetchedAt: NOW }, NOW, 24);
+    const undatedJustFetched = decayFactor({ publishedAt: null, firstFetchedAt: NOW }, NOW, 24);
     expect(undatedJustFetched).toBeCloseTo(1, 9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: first-seen vs current-version fetchedAt.
+//
+// The bug: insertItem never dedupes on content and items is append-only, so
+// a source that re-delivers an item it already sent -- not a correction,
+// the identical entry again -- lands a brand-new row with a brand-new
+// fetched_at. getCurrentItem's `order by fetched_at desc, rowid desc`
+// (src/domain/item.ts) means that newest row is what "this item's
+// fetchedAt" resolves to for any caller reaching for the obvious thing. For
+// an undated item, that IS the entire timestamp decay has to work with, so
+// every re-delivery reset its apparent age to zero -- not a one-time
+// offset, a permanent inability to age. Reachable, not theoretical:
+// cisa-kev re-dumps its whole 1,665-entry catalog whenever a single CVE is
+// added anywhere in it, and it is the source of 1,665 of M1's 1,715
+// null-published_at items.
+//
+// This block does what the rest of this file cannot: it exercises the
+// REAL, unmodified item.ts primitives (insertItem, getCurrentItem) against
+// a REAL temp-file SQLite database, using the exact cisa-kev shape, to
+// prove first that the naive path breaks (a defect-proof, mirroring
+// tests/domain/itemBeats.test.ts's own "the defect X exists to fix"
+// pattern) and second that src/domain/itemFirstFetchedAt.ts's
+// getItemFirstFetchedAt is what actually fixes it.
+// ---------------------------------------------------------------------------
+describe('first-seen vs current-version fetchedAt (fix round 1 regression)', () => {
+  const open: Array<ReturnType<typeof openDb>> = [];
+  function migratedDb() {
+    const db = openDb(join(mkdtempSync(join(tmpdir(), 'wf-test-')), 'wf.db'));
+    open.push(db);
+    runMigrations(db, join(process.cwd(), 'db', 'migrations'));
+    return db;
+  }
+  afterEach(() => {
+    while (open.length) closeDb(open.pop()!);
+  });
+
+  // Real shape from attic/wf-m1-firstrun-2026-08-14.db: title "Microsoft
+  // Windows Remote Code Execution Vulnerability", published_at NULL,
+  // item_type 'event', beat 'cyber', source_id cisa-kev.
+  function kevItem(fetchedAt: string): NewItem {
+    return {
+      url: 'https://cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2014-4148',
+      canonicalUrl: 'https://cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2014-4148',
+      title: 'Microsoft Windows Remote Code Execution Vulnerability',
+      sourceId: 'cisa-kev',
+      itemType: 'event',
+      beats: ['cyber'],
+      entities: [],
+      publishedAt: null,
+      fetchedAt,
+      summaryRaw: null,
+      rawJson: '{}',
+    };
+  }
+
+  const CYBER_SIGNAL_HALF_LIFE_HOURS = 6; // matches config/decay.yaml's cyber.signal_half_life_hours
+  const FIRST_INGEST = '2026-03-14T03:47:10.404Z'; // ~5 months before NOW
+  const RE_POLL = NOW; // the feed re-dumps its catalog; this entry is unchanged
+
+  it('the defect: getCurrentItem(...).fetchedAt resets to the re-poll instant, even though nothing about the item changed', () => {
+    const db = migratedDb();
+    const v1 = insertItem(db, kevItem(FIRST_INGEST));
+    insertItem(db, kevItem(RE_POLL)); // same item_key, re-delivered unchanged
+
+    const current = getCurrentItem(db, v1.item_key);
+    // This is the wrong value decayFactor must never be handed -- proven
+    // here only to document why, not because any shipped code still does
+    // this: it IS the re-poll instant, not the item's true first-seen time.
+    expect(current?.fetchedAt).toBe(RE_POLL);
+  });
+
+  it('the defect, quantified: naively feeding getCurrentItem(...).fetchedAt into decayFactor snaps an ancient undated item to fully fresh', () => {
+    const db = migratedDb();
+    const v1 = insertItem(db, kevItem(FIRST_INGEST));
+
+    const decayBeforeRepoll = decayFactor(
+      { publishedAt: null, firstFetchedAt: v1.fetchedAt },
+      NOW,
+      CYBER_SIGNAL_HALF_LIFE_HOURS,
+    );
+    // ~5 months at a 6h half-life: astronomically small, correctly "old".
+    expect(decayBeforeRepoll).toBeGreaterThan(0);
+    expect(decayBeforeRepoll).toBeLessThan(1e-100);
+
+    insertItem(db, kevItem(RE_POLL)); // re-poll: unchanged entry, re-delivered anyway
+    const currentFetchedAt = getCurrentItem(db, v1.item_key)!.fetchedAt;
+
+    // The naive/obvious call -- exactly what a caller reaching for "this
+    // item's fetchedAt" without reading this module's contract would write.
+    const decayAfterNaiveRepoll = decayFactor(
+      { publishedAt: null, firstFetchedAt: currentFetchedAt },
+      NOW,
+      CYBER_SIGNAL_HALF_LIFE_HOURS,
+    );
+
+    // The jump this fix round exists to close: a routine re-poll that
+    // changed nothing about the item snaps its decay from "essentially
+    // zero" to "maximally fresh".
+    expect(decayAfterNaiveRepoll).toBe(1);
+    expect(decayAfterNaiveRepoll / decayBeforeRepoll).toBeGreaterThan(1e50);
+  });
+
+  it('the fix: getItemFirstFetchedAt is stable across re-delivery, so decay does not jump', () => {
+    const db = migratedDb();
+    const v1 = insertItem(db, kevItem(FIRST_INGEST));
+
+    const firstFetchedAtBefore = getItemFirstFetchedAt(db, v1.item_key);
+    const decayBeforeRepoll = decayFactor(
+      { publishedAt: null, firstFetchedAt: firstFetchedAtBefore! },
+      NOW,
+      CYBER_SIGNAL_HALF_LIFE_HOURS,
+    );
+
+    // Simulate cisa-kev re-dumping its whole catalog, twice more, with this
+    // entry unchanged both times.
+    insertItem(db, kevItem('2026-05-01T00:00:00.000Z'));
+    insertItem(db, kevItem(RE_POLL));
+
+    const firstFetchedAtAfter = getItemFirstFetchedAt(db, v1.item_key);
+    const decayAfterRepoll = decayFactor(
+      { publishedAt: null, firstFetchedAt: firstFetchedAtAfter! },
+      NOW,
+      CYBER_SIGNAL_HALF_LIFE_HOURS,
+    );
+
+    // The fact itself never moves...
+    expect(firstFetchedAtAfter).toBe(FIRST_INGEST);
+    expect(firstFetchedAtAfter).toBe(firstFetchedAtBefore);
+    // ...so neither does the decay computed from it. No jump.
+    expect(decayAfterRepoll).toBe(decayBeforeRepoll);
+    expect(decayAfterRepoll).toBeLessThan(1e-100); // still correctly "ancient"
   });
 });
 
@@ -117,22 +271,22 @@ describe('decayFactor -- null published_at flows through to the actual decay mat
 // ---------------------------------------------------------------------------
 describe('decayFactor', () => {
   it('is exactly 1 at age zero, regardless of half-life', () => {
-    expect(decayFactor({ publishedAt: NOW, fetchedAt: NOW }, NOW, 6)).toBe(1);
-    expect(decayFactor({ publishedAt: NOW, fetchedAt: NOW }, NOW, 720)).toBe(1);
+    expect(decayFactor({ publishedAt: NOW, firstFetchedAt: NOW }, NOW, 6)).toBe(1);
+    expect(decayFactor({ publishedAt: NOW, firstFetchedAt: NOW }, NOW, 720)).toBe(1);
   });
 
   it('is exactly one half at age == halfLife', () => {
     const publishedAt = hoursBefore(NOW, 6);
-    expect(decayFactor({ publishedAt, fetchedAt: publishedAt }, NOW, 6)).toBeCloseTo(0.5, 12);
+    expect(decayFactor({ publishedAt, firstFetchedAt: publishedAt }, NOW, 6)).toBeCloseTo(0.5, 12);
   });
 
   it('is one quarter at age == 2x halfLife, one eighth at 3x', () => {
     const halfLife = 10;
     expect(
-      decayFactor({ publishedAt: hoursBefore(NOW, 20), fetchedAt: hoursBefore(NOW, 20) }, NOW, halfLife),
+      decayFactor({ publishedAt: hoursBefore(NOW, 20), firstFetchedAt: hoursBefore(NOW, 20) }, NOW, halfLife),
     ).toBeCloseTo(0.25, 12);
     expect(
-      decayFactor({ publishedAt: hoursBefore(NOW, 30), fetchedAt: hoursBefore(NOW, 30) }, NOW, halfLife),
+      decayFactor({ publishedAt: hoursBefore(NOW, 30), firstFetchedAt: hoursBefore(NOW, 30) }, NOW, halfLife),
     ).toBeCloseTo(0.125, 12);
   });
 
@@ -140,7 +294,7 @@ describe('decayFactor', () => {
     const halfLife = 1; // 1-hour half-life makes the sweep below span ~1076 half-lives
     const ages = [0, 1, 2, 5, 10, 50, 100, 500, 1000, 1074, 1075, 1076, 2000, 10000, 100000];
     const factors = ages.map((age) =>
-      decayFactor({ publishedAt: hoursBefore(NOW, age), fetchedAt: hoursBefore(NOW, age) }, NOW, halfLife),
+      decayFactor({ publishedAt: hoursBefore(NOW, age), firstFetchedAt: hoursBefore(NOW, age) }, NOW, halfLife),
     );
     for (let i = 1; i < factors.length; i++) {
       expect(factors[i]).toBeLessThanOrEqual(factors[i - 1]!);
@@ -170,7 +324,7 @@ describe('decayFactor', () => {
   // ---------------------------------------------------------------------
   it('has no floor: a very old item decays to a small but strictly positive, finite factor', () => {
     const publishedAt = hoursBefore(NOW, 50 * 6); // 50 half-lives at a 6h half-life
-    const factor = decayFactor({ publishedAt, fetchedAt: publishedAt }, NOW, 6);
+    const factor = decayFactor({ publishedAt, firstFetchedAt: publishedAt }, NOW, 6);
     expect(factor).toBeGreaterThan(0);
     expect(factor).toBeLessThan(1e-14);
     expect(Number.isFinite(factor)).toBe(true);
@@ -179,14 +333,14 @@ describe('decayFactor', () => {
   it('has no floor: an astronomically old item is allowed to underflow to exactly 0, not throw or go negative', () => {
     // 56 years at a 6h half-life is ~81,800 half-lives -- vastly past IEEE-754
     // double underflow (~1075 half-lives), so this must land on literal 0.
-    const factor = decayFactor({ publishedAt: '1970-01-01T00:00:00.000Z', fetchedAt: '1970-01-01T00:00:00.000Z' }, NOW, 6);
+    const factor = decayFactor({ publishedAt: '1970-01-01T00:00:00.000Z', firstFetchedAt: '1970-01-01T00:00:00.000Z' }, NOW, 6);
     expect(factor).toBe(0);
     expect(Number.isNaN(factor)).toBe(false);
   });
 
   // ---------------------------------------------------------------------
   // Future-dated clamp. Real, not hypothetical: the AP news-sitemap adapter
-  // produced published_at values slightly ahead of fetchedAt during M1.
+  // produced published_at values slightly ahead of firstFetchedAt during M1.
   // Decision: clamp age at >= 0, which caps the factor at exactly 1.0 --
   // a future-dated item is treated as "as fresh as possible right now",
   // never boosted past that ceiling. The alternative (letting factor exceed
@@ -196,46 +350,46 @@ describe('decayFactor', () => {
   describe('future-dated clamp', () => {
     it('a publishedAt a few minutes ahead of now clamps to exactly 1, never exceeds it', () => {
       const publishedAt = new Date(Date.parse(NOW) + 5 * 60_000).toISOString();
-      expect(decayFactor({ publishedAt, fetchedAt: publishedAt }, NOW, 6)).toBe(1);
+      expect(decayFactor({ publishedAt, firstFetchedAt: publishedAt }, NOW, 6)).toBe(1);
     });
 
     it('a publishedAt days ahead of now also clamps to exactly 1 -- not scaled by how far ahead it is', () => {
       const publishedAt = new Date(Date.parse(NOW) + 5 * 86_400_000).toISOString();
-      expect(decayFactor({ publishedAt, fetchedAt: publishedAt }, NOW, 6)).toBe(1);
+      expect(decayFactor({ publishedAt, firstFetchedAt: publishedAt }, NOW, 6)).toBe(1);
     });
 
-    it('real AP-shaped case: sitemap publishedAt slightly ahead of the ingest fetchedAt/now pair', () => {
-      const fetchedAt = '2026-08-14T03:47:10.404Z';
+    it('real AP-shaped case: sitemap publishedAt slightly ahead of the ingest firstFetchedAt/now pair', () => {
+      const firstFetchedAt = '2026-08-14T03:47:10.404Z';
       const publishedAt = '2026-08-14T03:52:00.000Z'; // ~5 min ahead, as observed in M1
-      expect(decayFactor({ publishedAt, fetchedAt }, fetchedAt, 6)).toBe(1);
+      expect(decayFactor({ publishedAt, firstFetchedAt }, firstFetchedAt, 6)).toBe(1);
     });
   });
 
   describe('validation -- defends against malformed inputs rather than silently miscomputing', () => {
     it('rejects a non-canonical now (reuses the one canonical-timestamp validator, not a private copy)', () => {
-      expect(() => decayFactor({ publishedAt: null, fetchedAt: NOW }, '2026-08-14', 6)).toThrow(
+      expect(() => decayFactor({ publishedAt: null, firstFetchedAt: NOW }, '2026-08-14', 6)).toThrow(
         InvalidTimestampError,
       );
     });
 
-    it('rejects a non-canonical fetchedAt', () => {
-      expect(() => decayFactor({ publishedAt: null, fetchedAt: '2026-08-14' }, NOW, 6)).toThrow(
+    it('rejects a non-canonical firstFetchedAt', () => {
+      expect(() => decayFactor({ publishedAt: null, firstFetchedAt: '2026-08-14' }, NOW, 6)).toThrow(
         InvalidTimestampError,
       );
     });
 
     it('rejects a non-canonical publishedAt', () => {
-      expect(() => decayFactor({ publishedAt: '2026-08-14', fetchedAt: NOW }, NOW, 6)).toThrow(
+      expect(() => decayFactor({ publishedAt: '2026-08-14', firstFetchedAt: NOW }, NOW, 6)).toThrow(
         InvalidTimestampError,
       );
     });
 
     it.each([0, -1, -0.001])('rejects a non-positive halfLifeHours (%s)', (halfLife) => {
-      expect(() => decayFactor({ publishedAt: null, fetchedAt: NOW }, NOW, halfLife)).toThrow(RangeError);
+      expect(() => decayFactor({ publishedAt: null, firstFetchedAt: NOW }, NOW, halfLife)).toThrow(RangeError);
     });
 
     it.each([Number.POSITIVE_INFINITY, Number.NaN])('rejects a non-finite halfLifeHours (%s)', (halfLife) => {
-      expect(() => decayFactor({ publishedAt: null, fetchedAt: NOW }, NOW, halfLife)).toThrow(RangeError);
+      expect(() => decayFactor({ publishedAt: null, firstFetchedAt: NOW }, NOW, halfLife)).toThrow(RangeError);
     });
   });
 });
@@ -303,7 +457,7 @@ describe('computeDecayFactor', () => {
       beat: 'cyber',
       itemType: 'event',
       publishedAt: hoursBefore(NOW, 12),
-      fetchedAt: hoursBefore(NOW, 12),
+      firstFetchedAt: hoursBefore(NOW, 12),
     };
     const expected = decayFactor(input, NOW, resolveHalfLifeHours('cyber', 'event', 'signal', config));
     expect(computeDecayFactor(input, 'signal', NOW, config)).toBe(expected);
@@ -314,7 +468,7 @@ describe('computeDecayFactor', () => {
       beat: 'markets',
       itemType: 'analysis',
       publishedAt: hoursBefore(NOW, 100),
-      fetchedAt: hoursBefore(NOW, 100),
+      firstFetchedAt: hoursBefore(NOW, 100),
     };
     const expected = decayFactor(input, NOW, resolveHalfLifeHours('markets', 'analysis', 'read', config));
     expect(computeDecayFactor(input, 'read', NOW, config)).toBe(expected);
@@ -327,7 +481,7 @@ describe('computeDecayFactor', () => {
       beat: 'cyber',
       itemType: 'event',
       publishedAt: null,
-      fetchedAt: '2026-08-14T03:47:10.404Z',
+      firstFetchedAt: '2026-08-14T03:47:10.404Z',
     };
     const now = '2026-08-14T03:47:10.404Z'; // read happening moments after ingest
     expect(computeDecayFactor(input, 'signal', now, config)).toBeCloseTo(1, 9);
@@ -352,7 +506,7 @@ describe('signal_score and read_score are distinguishable, not just independentl
       beat: 'cyber',
       itemType: 'event',
       publishedAt: hoursBefore(NOW, age),
-      fetchedAt: hoursBefore(NOW, age),
+      firstFetchedAt: hoursBefore(NOW, age),
     };
     const signal = computeDecayFactor(input, 'signal', NOW, config);
     const read = computeDecayFactor(input, 'read', NOW, config);
@@ -375,7 +529,7 @@ describe('signal_score and read_score are distinguishable, not just independentl
       beat: 'markets',
       itemType: 'analysis',
       publishedAt: hoursBefore(NOW, age),
-      fetchedAt: hoursBefore(NOW, age),
+      firstFetchedAt: hoursBefore(NOW, age),
     };
     const signal = computeDecayFactor(input, 'signal', NOW, config);
     const read = computeDecayFactor(input, 'read', NOW, config);
@@ -397,7 +551,7 @@ describe('signal_score and read_score are distinguishable, not just independentl
       beat: 'markets',
       itemType: 'analysis',
       publishedAt: hoursBefore(NOW, 336),
-      fetchedAt: hoursBefore(NOW, 336),
+      firstFetchedAt: hoursBefore(NOW, 336),
     };
     expect(computeDecayFactor(input, 'read', NOW, config)).toBeGreaterThan(0.5);
   });
@@ -519,7 +673,7 @@ describe('performance', () => {
         beat: beats[i % beats.length]!,
         itemType: itemTypes[i % itemTypes.length]!,
         publishedAt: i % 7 === 0 ? null : hoursBefore(NOW, i),
-        fetchedAt: hoursBefore(NOW, i + 1),
+        firstFetchedAt: hoursBefore(NOW, i + 1),
       };
       computeDecayFactor(input, 'signal', NOW, config);
       computeDecayFactor(input, 'read', NOW, config);

@@ -101,13 +101,17 @@
 #
 # A null published_at (real: 1,715 of 3,325 items in the first live ingest
 # had no published_at, 1,665 of those from cisa-kev's date-less JSON feed)
-# falls back to fetched_at -- that decision is not a config knob, it is
-# fixed behaviour in src/score/decay.ts's effectivePublishedAt, because there
-# is exactly one defensible answer, not a tunable preference. Same for the
-# future-dated clamp (age floors at zero, capping the factor at 1.0) and the
-# absence of a decay floor (very old items are allowed to decay toward zero
-# with no artificial minimum). See that module's doc comment for the full
-# reasoning on all three.
+# falls back to when this system FIRST noticed the item -- the earliest
+# fetched_at across every version sharing its item_key (src/domain/
+# itemFirstFetchedAt.ts), never a current/latest version's fetched_at, which
+# resets forward every time a source re-delivers an item it already sent
+# (cisa-kev re-dumps its whole catalog on nearly every poll). That decision
+# is not a config knob, it is fixed behaviour in src/score/decay.ts's
+# effectivePublishedAt, because there is exactly one defensible answer, not
+# a tunable preference. Same for the future-dated clamp (age floors at zero,
+# capping the factor at 1.0) and the absence of a decay floor (very old
+# items are allowed to decay toward zero with no artificial minimum). See
+# that module's doc comment for the full reasoning on all three.
 
 beats:
   ai:
