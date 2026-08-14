@@ -7,6 +7,125 @@ import {
   type SnapshotWindow,
 } from '../db/repoSnapshots.ts';
 
+// ---------------------------------------------------------------------------
+// Star velocity (M4a task 5 / §4).
+//
+// §4: "Rank by star velocity (stars gained per day over the trailing 7 days),
+// not absolute stars. Store daily star snapshots so velocity is computable --
+// a repo going 40->400 in a week matters more than one sitting at 30k."
+//
+// THE CONTRACT THIS MODULE EXISTS FOR: "insufficient history" is a branch of
+// the RETURN TYPE, never a 0. On a fresh database there is no velocity and
+// there will not be for a week; if a caller could unwrap "we weren't looking"
+// into "no growth", the lane would rank confidently on nothing for its first
+// seven days, then silently start working -- the worst of both, and precisely
+// the shape of every plausible-wrong-answer bug this project has already been
+// bitten by (see CLAUDE.md, "The scoring read path is three functions").
+//
+// So VelocityResult is a discriminated union on `status`, and `starsPerDay`
+// exists ONLY on the `ok` branch. `result.starsPerDay`, `const { starsPerDay }
+// = result`, and `result.starsPerDay ?? 0` all fail to compile against the
+// union. That is asserted, not asserted-about: tests/score/velocity.test.ts
+// pins all three with `@ts-expect-error` directives checked by `npm run
+// typecheck`, so adding `starsPerDay` to the insufficient branch -- as a 0, an
+// optional, or a `| null` -- makes those directives unused and tsc fails with
+// TS2578. The same self-guarding technique src/domain/repo.ts's `Excerpt`
+// brand uses. Verified by negative control: flattening the union really does
+// fail the typecheck, it is not a directive that has quietly stopped meaning
+// anything.
+//
+// PURITY, as in src/score/decay.ts: `now` is always injected and so is `tz`.
+// Nothing here reads a wall clock, the host clock's zone, or process.env.TZ.
+// (Deliberately not naming the banned call in prose: the test file greps THIS
+// source for it, and a mention in a comment would trip the guard.)
+// starVelocityFromWindow is the pure numeric core with no database at all
+// (decay.ts's decayFactor plays the same role); computeStarVelocity and
+// computeStarVelocityForItem are the composed read-then-compute entry points.
+//
+// DECAY-INVARIANCE: velocity is a STORED component of signal_score, never a
+// decayed value. item_scores is append-only, so a component that changes with
+// the clock has no stable row to append -- src/score/decay.ts owns decay,
+// applied separately at read time. This module does not import it, and the
+// test file greps for exactly that (the same three greps
+// tests/score/mechanical.test.ts uses).
+//
+// ---------------------------------------------------------------------------
+// FIVE DECISIONS, each forced by a case that will actually occur
+// ---------------------------------------------------------------------------
+//
+// 1. THE RATE IS COMPUTED FROM OBSERVATION INSTANTS, NOT DAY LABELS.
+//    `spanDays = (last.observedAt - first.observedAt) / 24h`, fractional --
+//    not `dayIndex(last) - dayIndex(first)`. Day bucketing exists to stop a
+//    twice-polled day double-counting (Task 2's primary key); it is not the
+//    measurement's resolution. A star count read at an instant IS the count at
+//    that instant, so the endpoint instants give the exact average rate.
+//    Concretely: a poll at 23:00 and the next at 01:00 straddle two calendar
+//    days. Counting labels calls that "one day" and reports a rate 12x too
+//    high -- a confident, plausible, entirely wrong number. Measured from
+//    instants it is 0.083 days, which fails the gate in point 2 and correctly
+//    yields insufficient_history. Tested both ways.
+//
+// 2. THE GATE IS SPAN, NOT COUNT -- and this is what makes a gappy window
+//    work. The scheduler will be down sometimes; velocity over a gap is the
+//    case that will actually occur, so it had to be designed for rather than
+//    tolerated. The average rate over an interval is a function of its two
+//    ENDPOINTS alone; the intermediate readings describe the SHAPE of the
+//    growth, not its average. So a gap in the MIDDLE costs nothing: a window
+//    observed on only days 1 and 7 gives exactly the same, exactly as correct,
+//    stars/day as one observed on all seven. (Tested by computing both and
+//    asserting equality.) What disqualifies a window is not missing readings
+//    but a short SPAN between the two it has.
+//    WHY 3 DAYS, of 6 possible in a 7-day window: 1 would admit the noisy
+//    sample the plan warns about -- a 2-day sample gaining 200 stars computes
+//    to 100/day and would outrank §4's own 40->400 example at 60/day, letting
+//    a single 48-hour burst beat a real week-long trend. 6 would mean nothing
+//    ranks until day 7 and the lane looks broken for a week. 3 makes a repo
+//    rankable on day 4, and `spanCoverage` (span as a fraction of the 6 days
+//    the window could span) is returned so a ranker can attenuate a
+//    half-covered measurement rather than treating it as equal evidence.
+//    Deliberately a plain derived fraction, not a "confidence": no statistical
+//    claim is being made and none would be honest from two points.
+//
+// 3. NEGATIVE VELOCITY IS NEVER CLAMPED. Star counts genuinely go down --
+//    users unstar, and GitHub purges spam stars in bulk. Three reasons not to
+//    clamp: (a) clamping to 0 makes a repo that just lost 300 purged fake
+//    stars indistinguishable from a genuinely flat repo, discarding the single
+//    strongest piece of evidence that its earlier spike was manufactured --
+//    exactly the repo this lane must not promote; (b) §4 ranks BY velocity, so
+//    a declining repo must sort below a flat one, and clamping ties them;
+//    (c) a scorer that wants a non-negative contribution can clamp its own
+//    term, and it can only make that choice if this module tells the truth
+//    first -- clamping here removes the option irreversibly. The cost, stated:
+//    a caller that feeds starsPerDay straight into a weighted sum will get a
+//    negative term. That is Task 7's decision to make, not this module's to
+//    pre-empt.
+//
+// 4. STALENESS IS REPORTED, NOT GATED. A gap at the END of the window is the
+//    one that does cost something: the number is a true rate, but for an
+//    interval that stopped `staleDays` ago, so calling it "the trailing 7
+//    days" would overstate it. It is surfaced rather than refused because
+//    gating on it would blank the lane after a single missed poll even though
+//    a perfectly good 6-day measurement exists -- and because the right
+//    response differs by consumer: a ranker may want to attenuate, while §7's
+//    row wants to say "as of Tuesday". Baking either policy in here would
+//    force the other consumer to undo it. Both `staleDays` and the actual
+//    endpoints (`first`/`last`, with their days AND instants) are returned, so
+//    the number can never be mistaken for something it is not.
+//
+// 5. mixedTimezone CANNOT PERTURB THE NUMBER, and is passed through as an
+//    advisory rather than treated as insufficient history. It reports that
+//    WF_TZ changed mid-window, so the window's day LABELS do not all mean the
+//    same thing (Task 2 stores `tz` per row for exactly this). But by decision
+//    1 the rate is computed from instants, which carry no zone at all -- so
+//    the seam is arithmetically irrelevant to `starsPerDay`. Asserted rather
+//    than reasoned about: the test records the same two instants twice, once
+//    with WF_TZ changing New York -> Tokyo mid-window and once with it
+//    constant, and the two rates are identical. What the seam CAN still
+//    distort is the bucketing either side of it -- `observedDays` and
+//    `missingDays` -- which is why the flag is surfaced instead of dropped.
+// ---------------------------------------------------------------------------
+
+/** §4's window: "stars gained per day over the trailing 7 days". */
 export const DEFAULT_WINDOW_DAYS = 7;
 
 /**
