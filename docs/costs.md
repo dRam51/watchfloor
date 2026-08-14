@@ -39,11 +39,23 @@ introductory price, and is disqualified from the default path.
 | `anthropic-api` | Anthropic API (enrichment) | paid | `WF_ALLOW_PAID_ANTHROPIC` | per account | hard-disabled without the flag |
 
 None of the 19 sources above require an account, an API key, or a card on file — every
-one is a public, unauthenticated RSS/Atom/JSON/sitemap endpoint. `nvd-cve` and
-`project-zero` are configured with `enabled: false` in `config/sources.yaml` (real,
-reachable services — see that file's comments and task-11-report.md for why they can't
-usefully run yet); they are registered here regardless, since the zero-dollar rule is
-about what the system is *capable* of touching, not only what is currently enabled.
+one is a public, unauthenticated RSS/Atom/JSON/sitemap endpoint. Some may be
+`enabled: false` in `config/sources.yaml` at any given time (check that file rather than
+this one — the two drift); they are registered here regardless, since the zero-dollar rule
+is about what the system is *capable* of touching, not only what is currently enabled.
+
+> [!important] NVD's rate limit is load-bearing on a constant in the adapter
+> The `5 req/30s` figure above is not just documentation. `NVD_MAX_PAGES_PER_POLL` in
+> `src/adapters/json.ts` is set to **equal, not exceed**, that number — it bounds the total
+> requests one poll makes, including the total-discovery probe. **If the figure above is
+> ever corrected, that constant must move with it**, and vice versa. They are two copies of
+> one fact, in different files, with nothing mechanical keeping them in sync.
+>
+> This is the whole of NVD's unauthenticated allowance. NVD publishes a higher limit for
+> API-key holders, which this project does not use — a key is free but requires registering
+> an account, and the zero-dollar rule's standard is what the system is capable of, not what
+> it currently spends. Raising the page budget by obtaining a key is a decision to make
+> deliberately, not a tuning knob.
 No per-host rate limit above is a number this project invented — where a source
 publishes one (NVD), it's quoted from that source; everywhere else, "none published"
 means exactly that: no formal limit is declared, so the only throttling in effect is
