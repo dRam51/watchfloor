@@ -421,3 +421,150 @@ describe('getSnapshotWindow', () => {
     ).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The guarantees below are enforced by the SCHEMA, not by this module, and
+// that distinction is the point: a repair script, the sqlite3 CLI, or a
+// future writer that never imports repoSnapshots.ts must hit the same wall.
+// Every test here therefore writes raw SQL, deliberately bypassing the access
+// layer. See db/migrations/0007_repo_star_snapshots.sql.
+// ---------------------------------------------------------------------------
+
+const RAW_SNAPSHOT_COLUMNS =
+  'insert into github_repo_star_snapshots (repo_id, snapshot_day, stars, observed_at, tz, created_at) values (?, ?, ?, ?, ?, ?)';
+
+describe('schema enforcement, bypassing the access layer', () => {
+  it('refuses a second row for a day already recorded', () => {
+    const db = migratedDb();
+    db.prepare(RAW_SNAPSHOT_COLUMNS).run(
+      AGENTKIT.repoId,
+      '2026-08-08',
+      40,
+      '2026-08-08T13:00:00.000Z',
+      NY,
+      '2026-08-08T13:00:00.000Z',
+    );
+
+    expect(() =>
+      db.prepare(RAW_SNAPSHOT_COLUMNS).run(
+        AGENTKIT.repoId,
+        '2026-08-08',
+        47,
+        '2026-08-08T19:00:00.000Z',
+        NY,
+        '2026-08-08T19:00:00.000Z',
+      ),
+    ).toThrow(/UNIQUE constraint failed/i);
+  });
+
+  it('refuses to delete a snapshot', () => {
+    const db = migratedDb();
+    recordDays(db, [['2026-08-08', 40]]);
+    expect(() => db.exec('delete from github_repo_star_snapshots')).toThrow(/never deleted/i);
+  });
+
+  it('refuses to restate which day or repo a row belongs to', () => {
+    const db = migratedDb();
+    recordDays(db, [['2026-08-08', 40]]);
+    // observed_at is advanced too, so the monotonicity guard cannot be what
+    // catches this -- only the identity guard can.
+    expect(() =>
+      db.exec(
+        "update github_repo_star_snapshots set snapshot_day = '2026-08-09', observed_at = '2026-08-09T17:00:00.000Z'",
+      ),
+    ).toThrow(/immutable/i);
+  });
+
+  it('refuses to move a reading backwards in time', () => {
+    const db = migratedDb();
+    recordDays(db, [['2026-08-08', 40]]);
+    expect(() =>
+      db.exec(
+        "update github_repo_star_snapshots set observed_at = '2026-08-08T01:00:00.000Z', stars = 1",
+      ),
+    ).toThrow(/may only move forward/i);
+  });
+
+  it('refuses a negative star count', () => {
+    const db = migratedDb();
+    expect(() =>
+      db.prepare(RAW_SNAPSHOT_COLUMNS).run(
+        AGENTKIT.repoId,
+        '2026-08-08',
+        -1,
+        '2026-08-08T13:00:00.000Z',
+        NY,
+        '2026-08-08T13:00:00.000Z',
+      ),
+    ).toThrow(/CHECK constraint failed/i);
+  });
+
+  it('refuses a non-canonical observed_at', () => {
+    const db = migratedDb();
+    expect(() =>
+      db
+        .prepare(RAW_SNAPSHOT_COLUMNS)
+        .run(AGENTKIT.repoId, '2026-08-08', 40, '2026-08-08T13:00:00Z', NY, '2026-08-08T13:00:00.000Z'),
+    ).toThrow(/canonical UTC/i);
+  });
+
+  it('refuses a snapshot_day no timezone offset could produce for that instant', () => {
+    // The direct attack on the denominator: a well-formed row filing today's
+    // reading under an unrelated day. Nothing downstream could ever notice.
+    const db = migratedDb();
+    expect(() =>
+      db.prepare(RAW_SNAPSHOT_COLUMNS).run(
+        AGENTKIT.repoId,
+        '2026-07-01',
+        40,
+        '2026-08-08T13:00:00.000Z',
+        NY,
+        '2026-08-08T13:00:00.000Z',
+      ),
+    ).toThrow(/not a plausible local day/i);
+  });
+
+  it('accepts the widest real timezone offsets either side of the instant', () => {
+    // UTC+14 (Pacific/Kiritimati) puts the local day AHEAD of the UTC date;
+    // UTC-11 (Pacific/Niue) puts it behind. Both must pass the plausibility
+    // trigger above, or that guard would reject legitimate rows.
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-08T13:00:00.000Z',
+      tz: 'Pacific/Kiritimati',
+    });
+    recordStarSnapshot(db, {
+      repoId: 900003,
+      itemKey: 'd'.repeat(64),
+      fullName: 'acme/other',
+      stars: 40,
+      observedAt: '2026-08-08T05:00:00.000Z',
+      tz: 'Pacific/Niue',
+    });
+
+    expect(getStarSnapshots(db, AGENTKIT.repoId)[0]?.snapshotDay).toBe('2026-08-09');
+    expect(getStarSnapshots(db, 900003)[0]?.snapshotDay).toBe('2026-08-07');
+  });
+
+  it('refuses to delete a repo name', () => {
+    const db = migratedDb();
+    recordDays(db, [['2026-08-08', 40]]);
+    expect(() => db.exec('delete from github_repo_names')).toThrow(/never deleted/i);
+  });
+
+  it('refuses to repoint a recorded name at a different repo', () => {
+    const db = migratedDb();
+    recordDays(db, [['2026-08-08', 40]]);
+    expect(() => db.exec('update github_repo_names set repo_id = 999999')).toThrow(/immutable/i);
+  });
+
+  it('refuses to make a name pairing look staler than it is', () => {
+    const db = migratedDb();
+    recordDays(db, [['2026-08-08', 40]]);
+    expect(() =>
+      db.exec("update github_repo_names set last_seen_at = '2020-01-01T00:00:00.000Z'"),
+    ).toThrow(/may only move forward/i);
+  });
+});
