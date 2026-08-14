@@ -165,3 +165,332 @@ a {
   font-size: var(--text-xs);
   color: var(--color-text-dim);
 }
+
+/* ---------------------------------------------------------------------
+ * Beat filter chips (web/src/components/BeatFilter.tsx, M3 task 8) --
+ * filters via a server refetch (Stream owns that), this file only styles
+ * the row. §7.1: nothing may rely on hover to convey information, so the
+ * selected state is `aria-pressed` + a visible fill/border change, never a
+ * hover-only affordance.
+ * --------------------------------------------------------------------- */
+.beat-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.beat-filter__chip {
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
+}
+
+.beat-filter__chip:hover {
+  border-color: var(--color-accent-dim);
+}
+
+.beat-filter__chip[aria-pressed='true'] {
+  background: var(--color-accent-dim);
+  border-color: var(--color-accent);
+  color: var(--color-text-primary);
+}
+
+/* ---------------------------------------------------------------------
+ * Stream (web/src/components/Stream.tsx, M3 task 8) -- the merged stream.
+ * Task 10 (six-lane layout) arranges this SAME component at wide
+ * viewports; nothing lane-shaped belongs here.
+ * --------------------------------------------------------------------- */
+.stream {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.stream__status {
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.stream__status--error {
+  color: var(--color-error);
+}
+
+.stream__retry {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-sm);
+  color: var(--color-error);
+  cursor: pointer;
+}
+
+.stream__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--color-border);
+}
+
+/* Explicit pagination only -- no scroll listener anywhere in this tree
+   (task brief: "NO INFINITE SCROLL"). This button is the one way a second
+   page is ever requested. */
+.stream__load-more {
+  align-self: center;
+  padding: 0 var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.stream__load-more:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.stream__load-more:disabled {
+  color: var(--color-text-dim);
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------------
+ * Item row (web/src/components/ItemRow.tsx, M3 task 8) -- §7: "one line at
+ * rest, expands in place for the excerpt/summary and metadata". The
+ * expand/collapse transition is the concrete instance of §7.4's
+ * "micro-transitions are 150-200ms, ease-out, never bouncy" rule; it rides
+ * var(--motion-base) so prefers-reduced-motion (tokens.css) zeroes it for
+ * free.
+ * --------------------------------------------------------------------- */
+.item-row {
+  border-bottom: 1px solid var(--color-border);
+  border-left: 3px solid transparent;
+}
+
+/* Hard overrides pin regardless of score (task brief, point 1) -- this is
+   the STATIC foundation Task 12 animates (glow-pulse, then this same
+   persistent accent until read). No animation here; a flat, always-visible
+   accent is enough to make "why is this at the top with a 0.000" legible
+   on its own. */
+.item-row--pinned {
+  border-left-color: var(--color-alert);
+}
+
+/* Already-read rows recede slightly -- title drops from primary to
+   secondary text color. Never the ONLY signal of read state (the state is
+   also in the expanded detail panel as an explicit timestamp), so this is
+   an enhancement, not the sole carrier of the fact. */
+.item-row--read .item-row__title {
+  color: var(--color-text-secondary);
+}
+
+.item-row--dismissing {
+  opacity: 0;
+  transition: opacity var(--motion-base) var(--motion-ease);
+}
+
+.item-row__row {
+  display: flex;
+  align-items: stretch;
+}
+
+.item-row__toggle {
+  flex: 1 1 auto;
+  min-width: 0; /* allow the title to actually ellipsis inside a flex child */
+  min-height: var(--touch-target-min);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: none;
+  border: none;
+  color: inherit;
+  font-family: var(--font-mono);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item-row__toggle:hover {
+  background: var(--color-surface);
+}
+
+.item-row__chevron {
+  flex: 0 0 auto;
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+  width: 1em;
+}
+
+.item-row__score {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.item-row__score-value {
+  font-size: var(--text-sm);
+  color: var(--color-accent);
+  min-width: 4ch;
+}
+
+.item-row__score-value--dim {
+  color: var(--color-text-dim);
+}
+
+.item-row__pin-badge {
+  padding: 0 var(--space-1);
+  background: var(--color-alert-glow);
+  border: 1px solid var(--color-alert);
+  border-radius: var(--radius-sm);
+  color: var(--color-alert);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.05em;
+}
+
+.item-row__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-md);
+  color: var(--color-text-primary);
+}
+
+.item-row__meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.item-row__beat {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+}
+
+.item-row__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+}
+
+/* §7.1: touch targets >=44px even in the dense desktop view, and every
+   affordance is visible/reachable without a pointer -- none of these three
+   are hover-revealed. */
+.item-row__action {
+  padding: 0 var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
+}
+
+.item-row__action:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text-primary);
+}
+
+.item-row__action[aria-pressed='true'] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.item-row__action--danger:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+/* The CSS-grid accordion trick: animating 0fr -> 1fr on the row track gets
+   a smooth height transition without ever measuring pixel heights in JS
+   (which would need a ResizeObserver and would fight §7.4's "nothing
+   visual may block or delay data"). The child needs min-height: 0 and
+   overflow: hidden, or its intrinsic height would ignore the 0fr row. */
+.item-row__detail-wrapper {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--motion-base) var(--motion-ease);
+}
+
+.item-row__detail-wrapper--expanded {
+  grid-template-rows: 1fr;
+}
+
+.item-row__detail {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.item-row__detail > * {
+  padding: 0 var(--space-3) var(--space-3) calc(var(--space-3) + 1em + var(--space-3));
+}
+
+.item-row__summary {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.item-row__summary--missing,
+.item-row__summary--empty {
+  color: var(--color-text-dim);
+  font-style: italic;
+}
+
+.item-row__facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.item-row__facts dt {
+  color: var(--color-text-dim);
+}
+
+.item-row__facts dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}
+
+.item-row__url {
+  font-size: var(--text-xs);
+  word-break: break-all;
+}

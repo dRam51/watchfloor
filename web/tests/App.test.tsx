@@ -52,16 +52,37 @@ describe('App', () => {
   });
 
   it('attaches the entered token as a Bearer header and renders the real response', async () => {
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        beats: {
-          ai: { lastRefreshAt: null, sourceCount: 3 },
-          cyber: { lastRefreshAt: null, sourceCount: 2 },
-        },
-        failingSources: 1,
-        enrichmentSpend: { totalCents: 0 },
-      }),
+    // Two live routes fire on mount once a token exists: Dashboard's own
+    // '/api/dashboard/header' AND the merged stream's '/api/feed' (M3 task
+    // 8) -- both are real children of App now, not just the header. A
+    // blanket mockResolvedValue (as this test used before task 8) would
+    // hand the header shape to Stream's fetch too, which is not a valid
+    // FeedResponse and crashes rendering. Routing by URL keeps both real.
+    const fetchSpy = vi.fn((url: string) => {
+      if (url.startsWith('/api/dashboard/header')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            beats: {
+              ai: { lastRefreshAt: null, sourceCount: 3 },
+              cyber: { lastRefreshAt: null, sourceCount: 2 },
+            },
+            failingSources: 1,
+            enrichmentSpend: { totalCents: 0 },
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          items: [],
+          beat: null,
+          profile: 'signal',
+          now: '2026-08-14T00:00:00.000Z',
+          total: 0,
+          nextCursor: null,
+        }),
+      });
     });
     vi.stubGlobal('fetch', fetchSpy);
 
@@ -87,6 +108,10 @@ describe('App', () => {
     expect(el.textContent).toContain('2 beats configured');
     expect(el.textContent).toContain('5 sources tracked');
     expect(el.textContent).toContain('1 failing');
+    // The merged stream (M3 task 8) mounted and completed its own request
+    // too, rendering its explicit empty state rather than being invisible
+    // or crashed.
+    expect(el.textContent).toContain('Nothing here right now.');
   });
 
   it('treats a 401 as an invalid token and returns to the gate', async () => {

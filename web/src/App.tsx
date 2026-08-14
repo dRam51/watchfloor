@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthContext.tsx';
 import { AuthGate } from './auth/AuthGate.tsx';
 import { apiFetch, ApiError } from './api/client.ts';
+import { Stream } from './components/Stream.tsx';
 
 /**
  * Shape of GET /api/dashboard/header (src/api/routes/dashboard.ts, M3 task 6).
@@ -79,12 +80,11 @@ function Dashboard() {
         )}
       </section>
 
-      <section className="shell__placeholder">
-        <p>
-          The merged stream, lanes, and search land in the next tasks. This is the shell they
-          live in.
-        </p>
-      </section>
+      {/* `token` is narrowed to `string` here by the `&&` guard -- AuthGate
+          only renders Dashboard once a token exists, but that fact isn't
+          visible to the type checker from here, so this makes it explicit
+          rather than asserting it away. */}
+      {token && <Stream token={token} onUnauthorized={() => setToken(null)} />}
     </main>
   );
 }
