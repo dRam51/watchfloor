@@ -12,8 +12,9 @@
  */
 
 import type { Db } from '../db/connection.ts';
-import { assertCanonicalTimestamp } from './item.ts';
+import { assertCanonicalTimestamp, deriveItemKey } from './item.ts';
 import { getItemState } from './itemState.ts';
+import { canonicalizeUrl } from '../normalize/url.ts';
 
 // ---------------------------------------------------------------------------
 // The excerpt cap
@@ -124,4 +125,200 @@ export function toExcerpt(raw: string | null | undefined): Excerpt | null {
   }
 
   return cut.trimEnd() as Excerpt;
+}
+
+// ---------------------------------------------------------------------------
+// The repo itself
+// ---------------------------------------------------------------------------
+
+export class InvalidRepoError extends Error {
+  constructor(field: string, value: unknown, why: string) {
+    super(`repo field ${field} = ${JSON.stringify(value)} is invalid: ${why}`);
+    this.name = 'InvalidRepoError';
+  }
+}
+
+/**
+ * One GitHub repository as this project models it: §4's named enrichment
+ * fields, plus the identity and the two suppression flags.
+ *
+ * Construct with {@link makeRepo} — never as an object literal. `description`
+ * and `readmeExcerpt` are {@link Excerpt}, so a literal cannot supply them
+ * without going through {@link toExcerpt} or an explicit, reviewable cast.
+ *
+ * ## Two identities, and why both are here
+ * `githubId` is GitHub's own numeric repository id: stable across renames and
+ * ownership transfers. `owner`/`name` (and therefore `fullName`, `htmlUrl`,
+ * and {@link repoItemKey}) are not — renaming `old/thing` to `new/thing`
+ * produces a different `item_key`, which under append-only storage means a new
+ * item chain rather than a continuation of the old one, and a dismissal
+ * recorded against the old name does not carry over. That is the same
+ * permanent-identity hazard `src/normalize/url.ts` documents, arriving through
+ * a new door; `githubId` is kept so a later milestone can detect a rename
+ * (same id, different `fullName`) rather than having to infer it.
+ *
+ * ## `openIssuesAndPullRequests` is named the way it is on purpose
+ * §4 asks for "open issue count", and the obvious REST field —
+ * `open_issues_count` on the repository object — is documented by GitHub as
+ * the number of open issues **and open pull requests**. A busy repo with 3
+ * issues and 90 open PRs reports 93. Calling the field `openIssues` would make
+ * every downstream reader (and every glance at the rendered row) quietly wrong
+ * in a way nothing would ever flag. Task 8 must not label this bare "issues";
+ * separating the two costs an extra search request per repo, which Task 6
+ * should decide against the rate-limit budget rather than this module deciding
+ * for it.
+ */
+export interface Repo {
+  /** GitHub's numeric repository id. Stable across renames; see the doc comment. */
+  githubId: number;
+  owner: string;
+  name: string;
+  /** `${owner}/${name}` — derived, never supplied, so it cannot disagree. */
+  fullName: string;
+  /** `https://github.com/${fullName}`, canonicalized — derived, never supplied. */
+  htmlUrl: string;
+  /** GitHub's one-line repo description (§7's repo row). Capped like any excerpt. */
+  description: Excerpt | null;
+  /** GitHub's detected primary language, or `null` when it detects none. */
+  language: string | null;
+  /** SPDX id (`MIT`, `Apache-2.0`), or `null` — including for `NOASSERTION`. */
+  licenseSpdxId: string | null;
+  stars: number;
+  /** See the doc comment: this counts open PRs too, because GitHub's field does. */
+  openIssuesAndPullRequests: number;
+  /** Canonical UTC timestamp, or `null` for a repo that has never been pushed to. */
+  lastCommitAt: string | null;
+  isFork: boolean;
+  isArchived: boolean;
+  /** First paragraph of the README, capped. `null` means no README worth the name. */
+  readmeExcerpt: Excerpt | null;
+}
+
+/**
+ * What a caller supplies to {@link makeRepo}: the same fields, but with plain
+ * strings for the capped text (the cap is applied here, not by the caller) and
+ * without the two derived identity fields.
+ */
+export interface RepoInput {
+  githubId: number;
+  owner: string;
+  name: string;
+  description: string | null;
+  language: string | null;
+  licenseSpdxId: string | null;
+  stars: number;
+  openIssuesAndPullRequests: number;
+  lastCommitAt: string | null;
+  isFork: boolean;
+  isArchived: boolean;
+  /**
+   * The README's first paragraph as Task 6's enrichment pass extracted it —
+   * raw, uncapped, possibly hard-wrapped. Blank or absent means the repo has
+   * no README prose, which {@link intrinsicSuppressionReasons} treats as
+   * README-less.
+   */
+  readmeFirstParagraph: string | null;
+}
+
+// GitHub reports this spdx_id when licensee finds a LICENSE file it cannot
+// identify -- rendered as "Other" on the web UI. It is the ABSENCE of a known
+// license, not a license, and storing the literal would render as one.
+const NO_LICENSE_ASSERTION = 'NOASSERTION';
+
+function requireIdentitySegment(field: string, value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === '') throw new InvalidRepoError(field, value, 'must not be empty');
+  // A slash here would make `${owner}/${name}` ambiguous and would silently
+  // point htmlUrl (and therefore item_key) at a different resource.
+  if (/[\s/]/.test(trimmed)) {
+    throw new InvalidRepoError(field, value, 'must not contain a slash or whitespace');
+  }
+  return trimmed;
+}
+
+function requireCount(field: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new InvalidRepoError(field, value, 'must be a non-negative safe integer');
+  }
+  return value;
+}
+
+function nullIfBlank(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * The only sanctioned way to build a {@link Repo}. Validates, normalizes, and
+ * caps — so every `Repo` in the system carries the same guarantees regardless
+ * of which of Tasks 4, 6 or 9 constructed it.
+ *
+ * Rejects rather than coerces, for the reason `src/domain/item.ts` gives: a
+ * loud failure is recoverable (skip the repo), a plausible-but-wrong stored
+ * value is not.
+ *
+ * `htmlUrl` is DERIVED from `owner`/`name` rather than taken from GitHub's
+ * `html_url`. GitHub's repo URL scheme is exactly `https://github.com/
+ * {full_name}`, so this is not a guess; deriving it makes {@link repoItemKey}
+ * a pure function of identity, which is what Tasks 4 and 7 need it to be. The
+ * derived URL is passed through `canonicalizeUrl` — the same function the
+ * ingest path applies — so the key computed here and the key `insertItem`
+ * stores for the same repo are identical by construction rather than by
+ * convention.
+ */
+export function makeRepo(input: RepoInput): Repo {
+  const githubId = input.githubId;
+  if (!Number.isSafeInteger(githubId) || githubId <= 0) {
+    throw new InvalidRepoError('githubId', githubId, 'must be a positive safe integer');
+  }
+
+  const owner = requireIdentitySegment('owner', input.owner);
+  const name = requireIdentitySegment('name', input.name);
+  const fullName = `${owner}/${name}`;
+
+  if (input.lastCommitAt !== null) assertCanonicalTimestamp('lastCommitAt', input.lastCommitAt);
+
+  const license = nullIfBlank(input.licenseSpdxId);
+
+  return {
+    githubId,
+    owner,
+    name,
+    fullName,
+    htmlUrl: canonicalizeUrl(`https://github.com/${fullName}`),
+    description: toExcerpt(input.description),
+    language: nullIfBlank(input.language),
+    licenseSpdxId: license === NO_LICENSE_ASSERTION ? null : license,
+    stars: requireCount('stars', input.stars),
+    openIssuesAndPullRequests: requireCount(
+      'openIssuesAndPullRequests',
+      input.openIssuesAndPullRequests,
+    ),
+    lastCommitAt: input.lastCommitAt,
+    isFork: input.isFork,
+    isArchived: input.isArchived,
+    readmeExcerpt: toExcerpt(input.readmeFirstParagraph),
+  };
+}
+
+/**
+ * The `item_key` this repo has (or would have) as an ingested item:
+ * `sha256(canonicalUrl)`, exactly as `src/domain/item.ts` derives it.
+ *
+ * This is what makes the dismissal check below a READ against the existing
+ * mechanism rather than a second one. It is a pure function of `owner`/`name`,
+ * so it can be computed before the repo has ever been ingested — which is the
+ * point: Task 4 can ask "has this been dismissed?" before spending an
+ * enrichment request on it.
+ *
+ * **It identifies the repo's own page and nothing else.** A link to a file,
+ * issue, release, or PR inside the same repo canonicalizes to a different URL
+ * and therefore a different key — verified in the test file against the one
+ * real github.com row in the archived first-run corpus. Task 7's "already seen
+ * on HN" signal consequently cannot be a bare `item_key` equality check; that
+ * real row is a link INTO `github/dmca`, not to `github/dmca`.
+ */
+export function repoItemKey(repo: Repo): string {
+  return deriveItemKey(repo.htmlUrl);
 }
