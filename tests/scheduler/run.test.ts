@@ -114,6 +114,7 @@ function makeSource(overrides: Partial<Source> & { url: string }): Source {
     weight: 1,
     poll_interval: '15m',
     enabled: true,
+    enrichment: true,
     ...overrides,
   };
 }

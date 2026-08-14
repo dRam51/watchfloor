@@ -36,6 +36,7 @@ function source(overrides: Partial<Source> = {}): Source {
     weight: 1.0,
     poll_interval: '1h',
     enabled: true,
+    enrichment: true,
     ...overrides,
   };
 }

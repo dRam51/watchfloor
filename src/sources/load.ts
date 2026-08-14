@@ -71,16 +71,19 @@ const FileSchema = z.object({ sources: z.array(SourceSchema).min(1) });
 
 // `enrichment`'s `.default(true)` above makes it required in z.infer's raw output -- every
 // Source that actually came from loadSources()/loadSourcesFile() always carries a concrete
-// true/false, never undefined. Widened back to optional here, deliberately: a repo-wide grep
-// (fix-enrichment-field task) found five `tests/**/*.test.ts` files building `Source` fixtures
-// by hand via `{ ...base, ...overrides }` with no base `enrichment`, none of them touchable by
-// this task (out of scope) or owned by the field's addition. Requiring the property there
-// would force an unrelated edit in every one of those files for a field nothing yet consumes.
-// A required `boolean` always satisfies an optional `boolean | undefined` slot, so this costs
-// real callers of the loader nothing. Do not read the `?` as "the loader may omit this" --
-// it never does. Treat a hand-built Source that skips this field as `?? true`, matching the
-// loader's own default, the same way you would for any other optional field on this type.
-export type Source = Omit<z.infer<typeof SourceSchema>, 'enrichment'> & { enrichment?: boolean };
+// true/false, never undefined. The exported type is the plain inferred type below, NOT widened
+// to `enrichment?: boolean` -- a required boolean would satisfy that wider optional slot, but
+// the type would then be claiming a possibility (`undefined`) the loader never actually
+// produces. That understatement is a real future cost, not a hypothetical one: when the
+// enrichment pass lands in a later milestone, a consumer reading `source.enrichment` as
+// `boolean | undefined` would reach for a defensive `?? true` -- silently re-implementing this
+// schema's own default at the call site. That duplicated default is exactly where drift
+// starts: change `.default(true)` above later and the call-site fallback disagrees with it,
+// silently. Keeping the type exact instead costs six hand-built `Source` fixtures across
+// `tests/**/*.test.ts` one added field each (fix-enrichment-field follow-up task) -- a one-time
+// price, paid once, versus a type that quietly understates its own guarantee to every future
+// reader.
+export type Source = z.infer<typeof SourceSchema>;
 
 export function loadSources(yamlText: string): Source[] {
   let raw: unknown;
