@@ -9,6 +9,7 @@ import {
   FetchTimeoutError,
   UnsupportedCharsetError,
   USER_AGENT,
+  MAX_BYTES_OVERRIDES,
 } from '../../src/fetch/http.ts';
 
 type Handler = RequestListener;
@@ -420,5 +421,79 @@ describe('politeFetch', () => {
       expect((e as PoliteFetchError).status).toBeNull();
       expect((e as PoliteFetchError).retryable).toBe(true);
     }
+  });
+
+  // ---------------------------------------------------------------------
+  // Per-source byte-ceiling overrides (fix: disabled sources, M1 follow-up).
+  //
+  // project-zero (config/sources.yaml) is a real, permitted, ~12.6 MiB feed
+  // with no bounded url of any kind (see MAX_BYTES_OVERRIDES's own doc
+  // comment in src/fetch/http.ts for what was actually tried before
+  // reaching for a byte-ceiling override instead of a bounded url). The
+  // override lives inside politeFetch itself, keyed by exact url, rather
+  // than as an option threaded through from src/adapters/rss.ts -- that
+  // adapter calls politeFetch(source.url, { etag, lastModified }) with no
+  // maxBytes of its own and is out of scope for this change, so the only
+  // place this can be resolved without touching it is here.
+  // ---------------------------------------------------------------------
+  describe('per-source maxBytes overrides (MAX_BYTES_OVERRIDES)', () => {
+    it('is explicit and narrow: exactly the one project-zero entry, never a blanket raise of the 5 MiB default', () => {
+      expect(MAX_BYTES_OVERRIDES).toEqual({
+        'https://projectzero.google/feed.xml': 20 * 1024 * 1024,
+      });
+    });
+
+    it('applies a table override when no explicit maxBytes is given, allowing a body over the ordinary 5 MiB default', async () => {
+      const sixMiB = 6 * 1024 * 1024;
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('x'.repeat(sixMiB));
+      });
+      const url = `${baseUrl}/`;
+      // Test-only: temporarily register this loopback url the same way the
+      // real table registers project-zero's, to prove politeFetch actually
+      // CONSULTS MAX_BYTES_OVERRIDES -- not just that the constant holds the
+      // right data, which the test above already proves in isolation.
+      // Always removed again below, success or failure -- this module is a
+      // singleton shared by every test in this file.
+      (MAX_BYTES_OVERRIDES as Record<string, number>)[url] = 7 * 1024 * 1024;
+      try {
+        const result = await politeFetch(url);
+        expect(result.body).toHaveLength(sixMiB);
+      } finally {
+        delete (MAX_BYTES_OVERRIDES as Record<string, number>)[url];
+      }
+    });
+
+    it('a url absent from the table still gets the ordinary 5 MiB default -- the override never leaks to a neighbour', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('x'.repeat(6 * 1024 * 1024));
+      });
+
+      try {
+        await politeFetch(`${baseUrl}/`);
+        expect.unreachable('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(ResponseTooLargeError);
+      }
+    });
+
+    it('an explicit opts.maxBytes still wins over a table override for the same url', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('x'.repeat(500));
+      });
+      const url = `${baseUrl}/`;
+      (MAX_BYTES_OVERRIDES as Record<string, number>)[url] = 10 * 1024 * 1024;
+      try {
+        await politeFetch(url, { maxBytes: 100 });
+        expect.unreachable('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(ResponseTooLargeError);
+      } finally {
+        delete (MAX_BYTES_OVERRIDES as Record<string, number>)[url];
+      }
+    });
   });
 });

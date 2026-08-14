@@ -40,6 +40,58 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  */
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Per-source byte-ceiling overrides, keyed by the EXACT configured source
+ * url (the same string a caller passes as politeFetch's own `url` argument
+ * -- config/sources.yaml's `url:` field, verbatim, for whichever adapter
+ * ends up fetching it). Exists for exactly one reason: a real, permitted,
+ * worth-polling feed whose provider offers no bounded variant of any kind
+ * -- see the one entry below for what was actually tried first. This is
+ * NOT a general per-source config knob and NOT a way to raise
+ * DEFAULT_MAX_BYTES broadly: every url absent from this table keeps the
+ * ordinary 5 MiB ceiling exactly as before this existed, and an explicit
+ * `maxBytes` passed via PoliteFetchOptions always wins over a table entry
+ * (see the destructuring default in politeFetch below) -- a caller that
+ * genuinely wants a different ceiling for a listed url can still ask for
+ * one directly.
+ *
+ * Resolved HERE, inside politeFetch itself, rather than as an option
+ * threaded through from the call site, because the one entry below is
+ * fetched by src/adapters/rss.ts, which calls
+ * `politeFetch(source.url, { etag, lastModified })` with no maxBytes of its
+ * own -- rss.ts has no per-source config concept to hang an override off
+ * of today, and was out of scope for the change that needed this. Keying
+ * strictly on url, inside politeFetch, means the one caller that needs a
+ * bigger ceiling gets it with zero changes anywhere else.
+ *
+ * project-zero (Google Project Zero's research blog; config/sources.yaml,
+ * disabled pending this override): migrated off Blogger to a static Jekyll
+ * site in 2026. Verified live (2026-08-13/14) before reaching for this --
+ * a bounded url is always preferable to a bigger ceiling, per this
+ * project's own politeness rule -- and none exists:
+ *   - every Blogger-era bounding param is inert on the new host: `?max-
+ *     results=N`, `?start-index=N`, and `&alt=rss` all return the
+ *     byte-identical 13,212,453-byte response with or without them
+ *     (Jekyll serves one static file regardless of query string)
+ *   - no alternate bounded path exists either: /feeds/posts/default,
+ *     /rss.xml, /atom.xml, /feed.json, and /sitemap.xml all 404; the
+ *     homepage's own `<link rel=alternate>` tag points at this same
+ *     feed.xml, not at anything smaller
+ *   - the feed is a complete, ever-growing history dump by design, not a
+ *     paginated "recent posts" feed with a bug
+ * 20 MiB gives >7.7 MiB of headroom over the observed 13,212,453 bytes
+ * (~12.6 MiB) -- room for years of future posts at this blog's historical
+ * growth rate (~1.1 MB/year averaged over its ~12-year archive) -- while
+ * still firmly rejecting a truly pathological response, the same spirit as
+ * DEFAULT_MAX_BYTES's own headroom above. This is a deliberate, disclosed
+ * trade-off, not a permanent fix: the archive only grows, and this value
+ * will eventually need raising again -- there is no bounded url to fall
+ * back to instead.
+ */
+export const MAX_BYTES_OVERRIDES: Readonly<Record<string, number>> = {
+  'https://projectzero.google/feed.xml': 20 * 1024 * 1024,
+};
+
 /** Per-host minimum spacing between request starts, per the brief. */
 const DEFAULT_MIN_INTERVAL_MS = 2_000;
 
@@ -58,7 +110,12 @@ export interface PoliteFetchOptions {
   lastModified?: string;
   /** Whole-request deadline in ms. Default 10000. */
   timeoutMs?: number;
-  /** Streaming byte ceiling. Default 5 MiB. */
+  /**
+   * Streaming byte ceiling. Default 5 MiB, unless `url` has an entry in
+   * MAX_BYTES_OVERRIDES (see that constant), in which case its value is the
+   * default instead. Either way, explicitly passing this always wins over
+   * both.
+   */
   maxBytes?: number;
   /**
    * Minimum spacing enforced between request *starts* to the same host,
@@ -272,7 +329,11 @@ export async function politeFetch(url: string, opts: PoliteFetchOptions = {}): P
     etag,
     lastModified,
     timeoutMs = DEFAULT_TIMEOUT_MS,
-    maxBytes = DEFAULT_MAX_BYTES,
+    // See MAX_BYTES_OVERRIDES's doc comment above: this only ever widens
+    // the ceiling for the handful of urls explicitly listed there, and an
+    // opts.maxBytes the caller actually passed always short-circuits this
+    // default entirely (destructuring defaults only apply to `undefined`).
+    maxBytes = MAX_BYTES_OVERRIDES[url] ?? DEFAULT_MAX_BYTES,
     minIntervalMs = DEFAULT_MIN_INTERVAL_MS,
   } = opts;
 
