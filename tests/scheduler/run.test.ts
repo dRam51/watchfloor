@@ -149,7 +149,18 @@ function unusedAdapter(type: Source['type']): Adapter {
   });
 }
 
-/** A full five-key SchedulerAdapterRegistry, every key defaulting to an adapter that throws if actually called -- override only the key(s) a given test needs. */
+/**
+ * A COMPLETE SchedulerAdapterRegistry, every key defaulting to an adapter that
+ * throws if actually called -- override only the key(s) a given test needs.
+ *
+ * Deliberately spelled out key-by-key rather than built from a loop over the
+ * type list: that is what makes adding a source type to
+ * `IMPLEMENTED_SOURCE_TYPES` without registering its adapter a COMPILE error
+ * here as well as in the two composition roots. `github_search` (M4a) was added
+ * to the union in M1 and only got an adapter three milestones later; in the
+ * meantime nothing failed to build, so the gap was invisible until a live poll
+ * hit it. A loop would have quietly absorbed exactly that.
+ */
 function registry(overrides: Partial<SchedulerAdapterRegistry> = {}): SchedulerAdapterRegistry {
   return {
     rss: unusedAdapter('rss'),
@@ -157,6 +168,7 @@ function registry(overrides: Partial<SchedulerAdapterRegistry> = {}): SchedulerA
     json: unusedAdapter('json'),
     news_sitemap: unusedAdapter('news_sitemap'),
     google_news: unusedAdapter('google_news'),
+    github_search: unusedAdapter('github_search'),
     ...overrides,
   };
 }

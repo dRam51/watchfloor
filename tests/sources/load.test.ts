@@ -343,8 +343,13 @@ sources:
     // and for fresh, parseable content, not trusted on the old claim. See
     // fix-news-sources-and-kind-report.md (.superpowers/sdd/2026-08-14-m3-api-dashboard/,
     // gitignored, local-only) for the full evidence.
-    it('has exactly 27 configured sources', () => {
-      expect(sources.length).toBe(27);
+    //
+    // M4a task 9 (2026-08-14): 27 -> 28. `github-topics`, the repos beat's first and
+    // only source and the first `github_search` entry in the file. That type had been
+    // in the SourceType union since M1 with no adapter behind it; task 4 shipped the
+    // adapter and task 9's live run found the registry wiring still missing.
+    it('has exactly 28 configured sources', () => {
+      expect(sources.length).toBe(28);
     });
 
     it('has no duplicate ids', () => {
@@ -356,18 +361,31 @@ sources:
       expect(new Set(ids).size).toBe(ids.length);
     });
 
-    it('only uses source types that have a registered M1 adapter', () => {
-      // src/adapters/*.ts implement exactly these four; type is a wider enum
-      // (src/sources/load.ts) that also reserves 'atom', 'github_search', 'api', and
-      // 'market_data' for adapters M1 does not ship (M4a/M4b), or -- 'atom' -- for a
-      // type string no M1 source is configured to use (rss.ts content-sniffs Atom vs
+    it('only uses source types that have a registered adapter', () => {
+      // `type` is a wider enum (src/sources/load.ts) than the set of adapters that
+      // exist: it still reserves 'api' and 'market_data' for M4b, and 'atom' for a
+      // type string no source is configured to use (rss.ts content-sniffs Atom vs
       // RSS 2.0 from the parsed body and is registered under 'rss', not 'atom'; see
-      // that file's own doc comment). A source configured with any of the other four
-      // would load fine here and then have no adapter to route to at poll time.
-      const adapterBackedTypes = new Set(['rss', 'json', 'news_sitemap', 'google_news']);
+      // that file's own doc comment). A source configured with one of those would
+      // load fine here and then have no adapter to route to at poll time.
+      //
+      // 'github_search' moved into this set in M4a. It is the precise failure this
+      // test is meant to catch and did NOT: the type was in the union from M1, a
+      // source using it would have loaded cleanly, and the poll-time error was the
+      // only signal. The reason it stayed silent for three milestones is that no
+      // source used the type -- so keep this assertion driven by the REAL config
+      // file, never by a fixture, since a fixture cannot go stale in the one way
+      // that matters.
+      const adapterBackedTypes = new Set([
+        'rss',
+        'json',
+        'news_sitemap',
+        'google_news',
+        'github_search',
+      ]);
       const usedTypes = new Set(sources.map((s) => s.type));
       for (const type of usedTypes) {
-        expect(adapterBackedTypes.has(type), `type "${type}" has no M1 adapter`).toBe(true);
+        expect(adapterBackedTypes.has(type), `type "${type}" has no adapter`).toBe(true);
       }
     });
 

@@ -9,6 +9,8 @@ import { rssAdapter } from '../adapters/rss.ts';
 import { jsonAdapter } from '../adapters/json.ts';
 import { newsSitemapAdapter } from '../adapters/newsSitemap.ts';
 import { googleNewsAdapter } from '../adapters/googleNews.ts';
+import { githubSearchAdapter } from '../adapters/github.ts';
+import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 
 // Resolved relative to this module, not the process cwd: a process
 // supervisor (§12) may launch us from any working directory -- same pattern
@@ -28,6 +30,10 @@ const adapters: SchedulerAdapterRegistry = {
   json: jsonAdapter,
   news_sitemap: newsSitemapAdapter,
   google_news: googleNewsAdapter,
+  // M4a task 9. The adapter landed in task 4 but this registry belonged to no
+  // M4a task, so github_search compiled fine and failed at POLL time, once per
+  // cycle -- found only by the live run.
+  github_search: githubSearchAdapter,
 };
 
 /**
@@ -81,14 +87,27 @@ try {
     const now = new Date().toISOString();
     try {
       const report = await runPollCycle(db, sources, adapters, now);
+
+      // M4a task 9. Mirrors src/bin/ingest.ts's own call at the same point in
+      // the cycle -- the daemon is the path that will ACTUALLY accumulate the
+      // seven days of history §4's star velocity needs, so omitting it here
+      // would leave velocity permanently uncomputable in production while a
+      // hand-run `npm run ingest` looked fine. See src/ingest/starSnapshots.ts.
+      const stars = recordStarSnapshots(db, sources, report.finishedAt, env.WF_TZ);
+
       const counts = new Map<string, number>();
       for (const outcome of report.sources) {
         counts.set(outcome.kind, (counts.get(outcome.kind) ?? 0) + 1);
       }
       const summary = [...counts.entries()].map(([kind, n]) => `${kind}=${n}`).join(' ');
+      const starSummary =
+        stars.examined > 0
+          ? ` -- stars: ${stars.inserted} new, ${stars.updated} updated` +
+            (stars.unusable > 0 ? `, ${stars.unusable} unusable` : '')
+          : '';
       console.log(
         `poll cycle finished at ${formatLocal(report.finishedAt, env.WF_TZ)} ` +
-          `(${report.durationMs}ms): ${summary || 'no sources'}`,
+          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}`,
       );
     } catch (err) {
       // runPollCycle itself only ever rejects on a contract violation (e.g.

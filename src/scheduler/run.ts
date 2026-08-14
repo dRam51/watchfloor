@@ -204,27 +204,52 @@ import type { Adapter, AdapterRegistry } from '../adapters/types.ts';
 // ---------------------------------------------------------------------------
 
 /**
- * The 5 source types M1 actually ships an adapter for (docs/superpowers/
- * plans/2026-08-13-m1-ingest.md, Tasks 6-9 plus the 'atom' routing note in
- * src/adapters/types.ts). `github_search`, `api`, and `market_data` are the
- * remaining 3 values `Source['type']` legally allows (M4a/M4b territory,
- * explicitly out of scope for M1 per the plan's own acceptance table) -- see
- * `resolveAdapter` for how a source carrying one of those is handled instead
- * of being a type error.
+ * The source types that actually ship an adapter today.
+ *
+ * M1 shipped the first 5 (docs/superpowers/plans/2026-08-13-m1-ingest.md,
+ * Tasks 6-9 plus the 'atom' routing note in src/adapters/types.ts). **M4a
+ * task 4 added `github_search`**, which had sat in `Source['type']`'s union
+ * since M1 with no adapter behind it -- so a `github_search` source did not
+ * fail to *compile*, it failed at *poll time*, once per cycle, forever.
+ *
+ * That gap outlived the adapter that was meant to close it: task 4 owned
+ * src/adapters/github.ts and src/sources/load.ts, and this file belonged to
+ * no M4a task at all, so the adapter existed, was tested, and was still
+ * unreachable from `npm run ingest`. Found by M4a task 9's live run, which is
+ * exactly the kind of thing only a live run finds -- every unit test passed.
+ *
+ * `api` and `market_data` are the remaining 2 values the union legally allows
+ * (M4b territory) -- see `resolveAdapter` for how a source carrying one of
+ * those is handled instead of being a type error.
  */
-const M1_SOURCE_TYPES = ['rss', 'atom', 'json', 'news_sitemap', 'google_news'] as const;
-export type M1SourceType = (typeof M1_SOURCE_TYPES)[number];
+const IMPLEMENTED_SOURCE_TYPES = [
+  'rss',
+  'atom',
+  'json',
+  'news_sitemap',
+  'google_news',
+  'github_search',
+] as const;
+export type ImplementedSourceType = (typeof IMPLEMENTED_SOURCE_TYPES)[number];
 
 /**
- * A complete registry needs exactly these 5 keys -- a missing one is a
- * COMPILE error, the same enforcement `AdapterRegistry` itself provides,
- * without that type's demand for 3 out-of-scope stub adapters. See the
- * module doc comment, constraint 4.
+ * Retained as an alias because M1's reports and plans name it. New code should
+ * use `ImplementedSourceType`: the set is no longer "what M1 shipped".
  */
-export type SchedulerAdapterRegistry = Pick<AdapterRegistry, M1SourceType>;
+export type M1SourceType = ImplementedSourceType;
 
-function isM1SourceType(type: Source['type']): type is M1SourceType {
-  return (M1_SOURCE_TYPES as readonly string[]).includes(type);
+/**
+ * A complete registry needs exactly these keys -- a missing one is a COMPILE
+ * error, the same enforcement `AdapterRegistry` itself provides, without that
+ * type's demand for out-of-scope stub adapters. Adding a type above without
+ * adding its adapter to every composition root (src/bin/ingest.ts,
+ * src/bin/scheduler.ts) therefore breaks the build rather than failing at
+ * runtime. See the module doc comment, constraint 4.
+ */
+export type SchedulerAdapterRegistry = Pick<AdapterRegistry, ImplementedSourceType>;
+
+function isImplementedSourceType(type: Source['type']): type is ImplementedSourceType {
+  return (IMPLEMENTED_SOURCE_TYPES as readonly string[]).includes(type);
 }
 
 /**
@@ -238,15 +263,15 @@ function isM1SourceType(type: Source['type']): type is M1SourceType {
 export class UnsupportedSourceTypeError extends Error {
   constructor(sourceId: string, type: string) {
     super(
-      `source "${sourceId}" has type "${type}", which has no M1 adapter registered ` +
-        `(github_search/api/market_data are out of scope for M1 -- see the plan's own exclusion list)`,
+      `source "${sourceId}" has type "${type}", which has no adapter registered ` +
+        `(api/market_data are M4b territory -- see the milestone plans' exclusion lists)`,
     );
     this.name = 'UnsupportedSourceTypeError';
   }
 }
 
 function resolveAdapter(adapters: SchedulerAdapterRegistry, source: Source): Adapter {
-  if (!isM1SourceType(source.type)) {
+  if (!isImplementedSourceType(source.type)) {
     throw new UnsupportedSourceTypeError(source.id, source.type);
   }
   return adapters[source.type];

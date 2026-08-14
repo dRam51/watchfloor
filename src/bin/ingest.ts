@@ -25,6 +25,8 @@ import { rssAdapter } from '../adapters/rss.ts';
 import { jsonAdapter } from '../adapters/json.ts';
 import { newsSitemapAdapter } from '../adapters/newsSitemap.ts';
 import { googleNewsAdapter } from '../adapters/googleNews.ts';
+import { githubSearchAdapter } from '../adapters/github.ts';
+import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 
 // Resolved relative to this module, not the process cwd -- matches
 // src/bin/api.ts / src/bin/scheduler.ts exactly.
@@ -40,6 +42,10 @@ const adapters: SchedulerAdapterRegistry = {
   json: jsonAdapter,
   news_sitemap: newsSitemapAdapter,
   google_news: googleNewsAdapter,
+  // M4a task 9. The adapter landed in task 4 but this registry belonged to no
+  // M4a task, so github_search compiled fine and failed at POLL time, once per
+  // cycle -- found only by the live run.
+  github_search: githubSearchAdapter,
 };
 
 /** Mirrors src/bin/scheduler.ts's own formatLocal exactly -- WF_TZ governs any human-readable local-time display, never the host clock's zone. Duplicated rather than imported: scheduler.ts keeps it private, and each bin/*.ts here is already an independent composition root (api.ts and scheduler.ts share none of this boilerplate with each other either). */
@@ -66,6 +72,19 @@ try {
 
     const now = new Date().toISOString();
     const report = await runPollCycle(db, sources, adapters, now);
+
+    // M4a task 9. Runs AFTER the cycle, over what was actually persisted --
+    // `stargazers_count` rides along in items.raw_json, so a snapshot costs no
+    // extra HTTP request. Without this the repos lane's velocity would return
+    // `no_snapshots` forever rather than for seven days, and would look
+    // correct while being permanently inert. See src/ingest/starSnapshots.ts.
+    const stars = recordStarSnapshots(db, sources, report.finishedAt, env.WF_TZ);
+    if (stars.examined > 0) {
+      console.log(
+        `  star snapshots (${env.WF_TZ}): examined=${stars.examined} inserted=${stars.inserted} ` +
+          `updated=${stars.updated} ignored=${stars.ignored} unusable=${stars.unusable}`,
+      );
+    }
 
     const counts = new Map<string, number>();
     for (const outcome of report.sources) counts.set(outcome.kind, (counts.get(outcome.kind) ?? 0) + 1);
