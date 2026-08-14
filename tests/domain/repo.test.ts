@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, type Db } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
-import { deriveItemKey } from '../../src/domain/item.ts';
+import { InvalidTimestampError, deriveItemKey } from '../../src/domain/item.ts';
 import { dismissItem, markItemRead, saveItem } from '../../src/domain/itemState.ts';
 import {
   InvalidRepoError,
@@ -16,9 +16,11 @@ import {
   isFork,
   isRepoDismissed,
   isSuppressed,
+  lastCommitAgeMs,
   repoItemKey,
   suppressionReasons,
   toExcerpt,
+  type Repo,
   type RepoInput,
 } from '../../src/domain/repo.ts';
 
@@ -184,7 +186,9 @@ describe('makeRepo', () => {
   });
 
   it('rejects a non-canonical lastCommitAt instead of coercing it', () => {
-    expect(() => makeRepo(dmcaInput({ lastCommitAt: '2026-08-13T04:00:00Z' }))).toThrow();
+    expect(() => makeRepo(dmcaInput({ lastCommitAt: '2026-08-13T04:00:00Z' }))).toThrow(
+      InvalidTimestampError,
+    );
   });
 
   it('rejects an owner or name that is empty, or that contains a slash', () => {
@@ -421,5 +425,75 @@ describe('this module never writes', () => {
   it('contains no SQL write statement anywhere in its source', () => {
     const source = readFileSync(join(process.cwd(), 'src', 'domain', 'repo.ts'), 'utf8');
     expect(source).not.toMatch(/insert\s+into|update\s+\w+\s+set|delete\s+from/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §7: the repo row shows "last-commit age". `now` is injected, never read from
+// the wall clock -- matching every other domain and scoring module.
+// ---------------------------------------------------------------------------
+
+describe('lastCommitAgeMs', () => {
+  it('is the elapsed milliseconds between the last commit and the injected now', () => {
+    const repo = makeRepo(dmcaInput({ lastCommitAt: '2026-08-14T00:00:00.000Z' }));
+    expect(lastCommitAgeMs(repo, '2026-08-14T06:00:00.000Z')).toBe(6 * 60 * 60 * 1000);
+  });
+
+  it('is null -- not zero -- for a repo that has never been pushed to', () => {
+    // A confident zero would render as "committed just now", which is the
+    // opposite of the truth. Same contract Task 5's velocity module owes for
+    // insufficient history.
+    expect(lastCommitAgeMs(makeRepo(dmcaInput({ lastCommitAt: null })), NOW)).toBeNull();
+  });
+
+  it('is exactly zero when the last commit is the injected instant', () => {
+    expect(lastCommitAgeMs(makeRepo(dmcaInput({ lastCommitAt: NOW })), NOW)).toBe(0);
+  });
+
+  it('returns a negative age rather than clamping when the commit postdates now', () => {
+    // GitHub's timestamps come from GitHub's clock and `now` from ours, so a
+    // commit a few seconds in "the future" is real and observable. Clamping to
+    // zero would hide a genuine clock problem; the sign is the caller's to
+    // render (Task 8 should show "just now", not "-3h").
+    const repo = makeRepo(dmcaInput({ lastCommitAt: '2026-08-14T12:00:05.000Z' }));
+    expect(lastCommitAgeMs(repo, NOW)).toBe(-5000);
+  });
+
+  it('rejects a non-canonical now instead of coercing it', () => {
+    expect(() => lastCommitAgeMs(makeRepo(dmcaInput()), '2026-08-14T12:00:00Z')).toThrow(
+      InvalidTimestampError,
+    );
+  });
+
+  it('never reads the wall clock', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'domain', 'repo.ts'), 'utf8');
+    expect(source).not.toMatch(/Date\.now\(\)|new Date\(\s*\)/);
+  });
+});
+
+describe('the cap cannot be bypassed', () => {
+  it('rejects an uncapped string in the excerpt fields, including via a spread', () => {
+    // These two `@ts-expect-error` directives ARE the assertion, and they are
+    // checked by `npm run typecheck` (tsc -p tsconfig.test.json), not by
+    // vitest -- esbuild strips types without checking them. If the Excerpt
+    // brand were ever relaxed to a plain `string`, both directives would
+    // become unused and tsc would fail with TS2578, so this cannot rot into a
+    // silent no-op.
+    //
+    // The spread case is the one a plain interface would miss: the caller
+    // already holds a valid Repo, so every other field typechecks.
+    const base = makeRepo(dmcaInput());
+
+    // @ts-expect-error a raw string is not an Excerpt -- the cap is not optional
+    const spread: Repo = { ...base, readmeExcerpt: 'r'.repeat(9000) };
+    // @ts-expect-error same for the description field
+    const alsoSpread: Repo = { ...base, description: 'd'.repeat(9000) };
+
+    // Runtime half: TypeScript refused, but nothing stops a JS caller, so
+    // record what such an object actually is -- an over-cap value that only
+    // the type system was ever going to catch.
+    expect(spread.readmeExcerpt!.length).toBe(9000);
+    expect(alsoSpread.description!.length).toBe(9000);
+    expect(base.readmeExcerpt!.length).toBeLessThanOrEqual(MAX_EXCERPT_LENGTH);
   });
 });

@@ -512,3 +512,46 @@ export function suppressionReasons(db: Db, repo: Repo): SuppressionReason[] {
 export function isSuppressed(db: Db, repo: Repo): boolean {
   return suppressionReasons(db, repo).length > 0;
 }
+
+// ---------------------------------------------------------------------------
+// Last-commit age (§7's repo row)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long before `now` this repo was last pushed to, in milliseconds, or
+ * `null` if it has never been pushed to at all.
+ *
+ * `now` is injected and validated, never read from the wall clock — the same
+ * contract every other domain and scoring module in this project keeps
+ * (`src/domain/itemState.ts`, `src/score/decay.ts`). That is what makes a
+ * historical read truthful: asking what the lane looked like last Tuesday
+ * applies Tuesday's clock, not today's.
+ *
+ * ## `null`, never a confident zero
+ * An empty repo (created, never pushed) has no last commit. Returning `0`
+ * would render as "committed just now" — the exact inversion of the truth, and
+ * the same trap M4a's plan flags for velocity on a fresh database. The absent
+ * case gets its own value so a caller cannot fail to handle it.
+ *
+ * ## The sign is real, and deliberately not clamped
+ * GitHub's `pushed_at` comes from GitHub's clock; `now` comes from ours. A
+ * commit a few seconds into "the future" is ordinary skew, and a negative
+ * result is the honest report of it. Clamping to zero here would hide a
+ * genuine clock problem from the only code positioned to notice. Task 8 should
+ * render a small negative age as "just now" rather than "-3s".
+ *
+ * `Date.parse` is used on two values already validated as the fixed-width
+ * `YYYY-MM-DDTHH:mm:ss.sssZ` form, which is the one shape the ECMAScript spec
+ * pins exactly — not the implementation-defined fallback `src/normalize/item.ts`
+ * exists to avoid.
+ */
+export function lastCommitAgeMs(repo: Repo, now: string): number | null {
+  assertCanonicalTimestamp('now', now);
+  if (repo.lastCommitAt === null) return null;
+  // Re-validated rather than trusted: makeRepo guarantees this, but a caller
+  // spreading an existing Repo (`{ ...repo, lastCommitAt: x }`) can reach here
+  // with anything, and a silent NaN would propagate as a plausible-looking
+  // age.
+  assertCanonicalTimestamp('lastCommitAt', repo.lastCommitAt);
+  return Date.parse(now) - Date.parse(repo.lastCommitAt);
+}
