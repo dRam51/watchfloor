@@ -72,24 +72,6 @@ same treatment as the NWS adapter. If a publisher ever needs that shape and perm
 **Revisit if:** Reuters restores a public feed or adds a general crawler allowance; or a different
 intermediary that permits us carries their wire.
 
-**Why:** Reuters' `robots.txt` is an allowlist. It names roughly sixty permitted crawlers, then
-closes with:
-
-```
-User-agent: *
-Allow: /plus/
-Disallow: /
-```
-
-Watchfloor is not on that list, so every path except `/plus/` is off-limits — including the
-sitemaps they declare, since a `Sitemap:` directive does not override a `Disallow:`.
-
-**Also rejected:** RSSHub and rss-bridge. Both are self-hostable and free, but both work by
-scraping. Pointing one at Reuters produces exactly the requests their `robots.txt` forbids — it
-only moves the fetching to our server. The tool does not change the permission.
-
-**Revisit if:** Reuters restores a public feed, or adds a general-purpose crawler allowance.
-
 ---
 
 ## SCOTUS slip opinions
