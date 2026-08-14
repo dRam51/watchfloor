@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { openDb, closeDb } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
 import { recordStarSnapshot } from '../../src/db/repoSnapshots.ts';
-import { computeStarVelocity } from '../../src/score/velocity.ts';
+import { computeStarVelocity, DEFAULT_MIN_SPAN_DAYS } from '../../src/score/velocity.ts';
 
 const open: Array<ReturnType<typeof openDb>> = [];
 function migratedDb() {
@@ -85,5 +85,78 @@ describe('computeStarVelocity on a fresh database', () => {
       '2026-08-13',
       '2026-08-14',
     ]);
+  });
+});
+
+describe('computeStarVelocity with too little history to state a rate', () => {
+  it('refuses a single reading -- a rate needs two points, not one', () => {
+    // One reading is not "zero growth". It is one number with nothing to
+    // subtract from it, and dividing by a zero span would produce NaN or
+    // Infinity, either of which sorts somewhere in a ranking.
+    const db = migratedDb();
+    snap(db, 400, AT('2026-08-14'));
+
+    const result = computeStarVelocity(db, AGENTKIT.repoId, { now: NOW, tz: NY });
+
+    expect(result.status).toBe('insufficient_history');
+    if (result.status !== 'insufficient_history') return;
+    expect(result.reason).toBe('single_snapshot');
+    expect(result.observedDays).toBe(1);
+    expect(result.spanDays).toBe(0);
+  });
+
+  it('refuses two readings whose real elapsed span is only hours', () => {
+    // The case day-label arithmetic gets wrong: a poll at 23:00 and the next
+    // at 01:00 sit on two different calendar days, so counting DAY LABELS
+    // says one day and reports 200 stars/day. The readings are two hours
+    // apart. Measured from the instants the span is 0.083 days, which is
+    // below any sane floor -- so the honest answer is that there is not
+    // enough history yet, not a rate 12x too high.
+    const db = migratedDb();
+    snap(db, 200, '2026-08-14T03:00:00.000Z'); // 23:00 Aug 13 in New York
+    snap(db, 400, '2026-08-14T05:00:00.000Z'); // 01:00 Aug 14 in New York
+
+    const result = computeStarVelocity(db, AGENTKIT.repoId, { now: NOW, tz: NY });
+
+    expect(result.status).toBe('insufficient_history');
+    if (result.status !== 'insufficient_history') return;
+    expect(result.reason).toBe('span_too_short');
+    expect(result.observedDays).toBe(2);
+    expect(result.spanDays).toBeCloseTo(2 / 24, 6);
+    expect(result.minSpanDays).toBe(DEFAULT_MIN_SPAN_DAYS);
+  });
+
+  it('refuses a noisy two-day sample rather than letting it outrank a real trend', () => {
+    // The plan's own question: "Is a repo with 2 days of history ranked
+    // against one with 7, and if so, how -- without letting a noisy 2-day
+    // sample outrank a real 7-day trend?" A 2-day span gaining 200 stars
+    // computes to 100/day, which would beat the §4 example's 60/day. It is
+    // refused instead of ranked.
+    const db = migratedDb();
+    snap(db, 200, AT('2026-08-12'));
+    snap(db, 400, AT('2026-08-14'));
+
+    const result = computeStarVelocity(db, AGENTKIT.repoId, { now: NOW, tz: NY });
+
+    expect(result.status).toBe('insufficient_history');
+    if (result.status !== 'insufficient_history') return;
+    expect(result.reason).toBe('span_too_short');
+    expect(result.spanDays).toBe(2);
+  });
+
+  it('accepts a span of exactly the minimum', () => {
+    // The boundary is inclusive: DEFAULT_MIN_SPAN_DAYS is the smallest span
+    // that yields a number, so a repo becomes rankable on day 4 of operation
+    // rather than day 8.
+    const db = migratedDb();
+    snap(db, 100, AT('2026-08-11'));
+    snap(db, 400, AT('2026-08-14'));
+
+    const result = computeStarVelocity(db, AGENTKIT.repoId, { now: NOW, tz: NY });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.spanDays).toBe(3);
+    expect(result.starsPerDay).toBe(100);
   });
 });
