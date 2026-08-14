@@ -1,0 +1,274 @@
+# Boost and suppress terms that drive the interest-profile component of M2 scoring
+# (docs/superpowers/plans/2026-08-14-m2-scoring.md, Task 1 -- quoting the spec's §5
+# for boosts and §4/§5 for suppressions). Adding or tuning a term is a config edit,
+# never a code change. Validated by src/interests/load.ts at startup; a malformed
+# entry stops the process rather than failing silently at scoring time.
+#
+# Shape:
+#
+#   boosts:        terms whose presence pushes an item's interest score UP
+#   suppressions:  terms whose presence pushes an item's interest score DOWN
+#
+# Each entry:
+#
+#   term    the word or phrase to look for (see MATCHING RULES below)
+#   weight  0.1-2.0, magnitude of the effect in that entry's direction. Mirrors
+#           src/sources/load.ts's trust-multiplier bound exactly -- one mental
+#           model for "weight" across the whole config tree, and every value
+#           chosen below already fits comfortably inside it. How boosts and
+#           suppressions combine into an actual score is Task 5's job
+#           (src/score/mechanical.ts, not yet built); this file and its loader
+#           only load and match terms.
+#
+# Weight bands used below (a term's specificity/ambiguity, not its topic, sets
+# the band -- see task-1-report.md for the reasoning on every one):
+#   1.8   unambiguous multi-word phrases central to the AI-security beat
+#   1.6   named products/protocols with near-zero collision risk; hard-currency
+#         crypto suppressions (equally unambiguous the other direction)
+#   1.5   sports league/org acronyms (NFL, NBA, ...) -- essentially zero
+#         collision risk once whole-word matched
+#   1.4   the local-inference cluster; generic-but-real sports vocabulary;
+#         lower-specificity crypto terms (NFT, web3)
+#   1.3   short/generic-shaped acronyms with residual real-world ambiguity
+#         even after whole-word matching (MCP, eval, RAG); funding-round
+#         phrases; minor sports vocabulary
+#   1.2   entertainment, opinion, horse-race-polling markers -- real category,
+#         thin real-corpus evidence either way (see report)
+#   1.0   listicle phrasing -- weakest signal in the file
+#
+# MATCHING RULES (the substantive part of this file -- full reasoning and the
+# real-corpus evidence behind each choice is in src/interests/load.ts's
+# buildTermRegex doc comment and in task-1-report.md):
+#
+#   - Case-insensitive.
+#   - Whole-word / whole-phrase only -- a term must NOT match inside a longer
+#     word. "eval" does not match "evaluation", "RAG" does not match "storage",
+#     "MCP"/"BGP" do not match a longer identifier. Verified against the real
+#     M1 corpus: a naive substring search for "eval" hits 71 real titles;
+#     whole-word matching narrows that to the 3 that are genuinely about "eval".
+#   - Unicode-aware boundary, not ASCII \b. AP's wire copy is roughly a quarter
+#     Spanish-language, and ASCII \b treats an accented letter as a separator.
+#     That bug was real, not hypothetical: it made "eval" match inside the
+#     Spanish word "evalúan" ("Bears evalúan 2 sitios para estadio en
+#     Indiana...", a real ap-news title) until fixed.
+#   - Hyphens and whitespace are interchangeable word separators, both inside
+#     a term's own punctuation and between the words of a multi-word phrase.
+#     So "no-hitter" also matches "no hitter", "front-runner" also matches
+#     "front runner", and "prompt injection" also matches
+#     "prompt-injection-resistant".
+#   - No stemming or pluralization. "homer" does not match "homers", "Hall of
+#     Fame" does not match "Hall of Famers" -- each inflected form that
+#     matters needs its own entry below. Deliberate scope limit, not an
+#     oversight.
+#
+# WHAT THIS FILE DOES NOT SOLVE (see task-1-report.md for the full writeup):
+#
+#   - Spanish-language content. Roughly a quarter of ap-news's real titles are
+#     Spanish-language wire copy (verified against
+#     attic/wf-m1-firstrun-2026-08-14.db). No English keyword list matches
+#     Spanish prose -- that needs a language-detection mechanism, a different
+#     kind of component entirely, not more keywords. Left unaddressed here
+#     deliberately rather than papered over with a half-working heuristic.
+#   - Sports headlines carried entirely by team/player names with no generic
+#     sports vocabulary ("Ionescu scores 20 points and Liberty avoid record
+#     collapse to hold off Sparks") are invisible to any keyword list; that
+#     needs a team/player-name taxonomy or real classification, out of scope
+#     here.
+#   - Press-release tone ("X launches AI-powered Y", §4's spec wording). Tried
+#     and reverted: "AI-powered" as a proxy term matched real, legitimate
+#     ai/aisec research headlines (a radiology leaderboard, a pharma-R&D
+#     writeup) at least as often as it would have caught actual low-value
+#     press releases. No keyword-shaped proxy survived real-corpus validation,
+#     so this category ships with zero seed terms rather than one that
+#     actively suppresses good content. Likely needs source-tier / item_type
+#     signal (Task 7) rather than title keywords.
+#
+# Terms that look obvious but were deliberately EXCLUDED, because real corpus
+# data showed them actively wrong rather than merely imprecise:
+#
+#   "crypto"   Collides with legitimate cybersecurity content. CISA advisory
+#              titles routinely say "Cryptographic"/"CryptoAPI"
+#              (whole-word-safe already -- not the issue), but a real ap-news
+#              title, "Hackers breach govt webmail while running parallel
+#              crypto fraud", uses the bare word "crypto" inside an actual
+#              breach story. Suppressing on bare "crypto" would hide real
+#              cyber-beat news. Using "cryptocurrency"/"bitcoin"/"ethereum"
+#              instead, which don't share that ambiguity.
+#   "opinion"  Collides with a real huggingface-blog title, "Opinion
+#              Classification with Kili and HuggingFace AutoTrain" (an ML
+#              technique, not editorial content) -- and would also catch
+#              legitimate judicial "opinions" in usnews coverage (a SCOTUS or
+#              appellate opinion is hard news, not an editorial). Using the
+#              narrower "op-ed" instead.
+#   "editorial" Same ambiguity class as "opinion" (an "editorial decision" or
+#              "editorial process" is generic usage unrelated to an opinion
+#              column) with zero real-corpus evidence either way to justify
+#              the risk. Left out.
+#   "top 10"   Collides with two real OWASP GenAI Security Project titles
+#              ("OWASP Top 10 for Agentic Applications...", "...Releases Top
+#              10 Risks and Mitigations for Agentic AI Security") -- exactly
+#              the aisec-beat content this profile exists to boost. "Top N" is
+#              a standard security-industry list format (OWASP Top 10, CWE Top
+#              25), not a listicle. Dropped from the listicle category.
+#
+# See .superpowers/sdd/2026-08-14-m2-scoring/task-1-report.md for full
+# real-corpus match counts, the false-positive/false-negative tables, and the
+# reasoning behind every weight assignment.
+
+boosts:
+  # Core AI-security phrases named in the spec -- unambiguous as whole
+  # phrases, near-zero false-positive risk.
+  - term: "prompt injection"
+    weight: 1.8
+  - term: "agent security"
+    weight: 1.8
+
+  # Networking cluster -- named products/protocols, near-zero collision risk.
+  - term: "Juniper"
+    weight: 1.6
+  - term: "Junos"
+    weight: 1.6
+  - term: "BGP"
+    weight: 1.6
+  - term: "network automation"
+    weight: 1.6
+
+  # Local-inference cluster.
+  - term: "local inference"
+    weight: 1.4
+  - term: "Ollama"
+    weight: 1.4
+
+  # Short, generic-shaped acronyms/words -- real signal once whole-word
+  # matched, but genuinely more ambiguous than the terms above even so (e.g.
+  # "eval" as a standalone word also shows up in plain CI/shell contexts,
+  # "RAG" is rare-but-real outside ML, "MCP" alone could be several things).
+  - term: "MCP"
+    weight: 1.3
+  - term: "eval"
+    weight: 1.3
+  - term: "RAG"
+    weight: 1.3
+
+suppressions:
+  # --- funding rounds ---
+  - term: "Series A"
+    weight: 1.3
+  - term: "Series B"
+    weight: 1.3
+  - term: "Series C"
+    weight: 1.3
+  - term: "seed funding"
+    weight: 1.3
+  - term: "funding round"
+    weight: 1.3
+
+  # --- listicles ---
+  # "top 10" deliberately excluded -- see header.
+  - term: "best of"
+    weight: 1.0
+  - term: "things you need to know"
+    weight: 1.0
+
+  # --- crypto ---
+  # Bare "crypto"/"cryptocurrency"-adjacent generic terms deliberately
+  # excluded where they'd collide with cybersecurity's legitimate use of
+  # "crypto" -- see header. These are specific enough to avoid that.
+  - term: "cryptocurrency"
+    weight: 1.6
+  - term: "bitcoin"
+    weight: 1.6
+  - term: "ethereum"
+    weight: 1.6
+  - term: "NFT"
+    weight: 1.4
+  - term: "web3"
+    weight: 1.4
+
+  # --- usnews: sports (§4) ---
+  # League/org acronyms and formal names -- essentially zero collision risk.
+  - term: "NFL"
+    weight: 1.5
+  - term: "NBA"
+    weight: 1.5
+  - term: "MLB"
+    weight: 1.5
+  - term: "NHL"
+    weight: 1.5
+  - term: "NASCAR"
+    weight: 1.5
+  # "PGA Tour" deliberately not a separate entry -- whole-word "PGA" already
+  # matches everywhere "PGA Tour" would (the phrase strictly contains the
+  # shorter term plus a boundary), so a second entry would be dead weight.
+  - term: "PGA"
+    weight: 1.5
+  - term: "WTA"
+    weight: 1.5
+  - term: "WAFCON"
+    weight: 1.5
+  # Generic sports vocabulary, real hits in the M1 AP corpus (see report).
+  # Deliberately excludes common words that are ALSO ordinary English words
+  # with real non-sports usage elsewhere (e.g. "beat", "score", "coach",
+  # "reliever", "pitcher") -- precision over recall; see report.
+  - term: "preseason"
+    weight: 1.4
+  - term: "playoff"
+    weight: 1.4
+  - term: "playoffs"
+    weight: 1.4
+  - term: "touchdown"
+    weight: 1.4
+  - term: "quarterback"
+    weight: 1.4
+  - term: "cornerback"
+    weight: 1.4
+  - term: "linebacker"
+    weight: 1.4
+  - term: "shortstop"
+    weight: 1.4
+  - term: "no-hitter"
+    weight: 1.4
+  - term: "home run"
+    weight: 1.4
+  - term: "homer"
+    weight: 1.4
+  - term: "homers"
+    weight: 1.4
+  - term: "inning"
+    weight: 1.4
+  - term: "innings"
+    weight: 1.4
+  - term: "training camp"
+    weight: 1.3
+  - term: "Hall of Fame"
+    weight: 1.3
+  - term: "All-Star"
+    weight: 1.3
+
+  # --- usnews: entertainment (§4) ---
+  - term: "red carpet"
+    weight: 1.2
+  - term: "box office"
+    weight: 1.2
+  - term: "Grammy"
+    weight: 1.2
+  - term: "Oscar"
+    weight: 1.2
+  - term: "Academy Award"
+    weight: 1.2
+
+  # --- usnews: opinion / editorial (§4) ---
+  # Bare "opinion"/"editorial" deliberately excluded -- see header.
+  - term: "op-ed"
+    weight: 1.2
+
+  # --- usnews: horse-race polling (§4) ---
+  # Zero real hits in the sampled corpus (this AP snapshot's day didn't carry
+  # election horse-race coverage) -- kept per spec, flagged as unconfirmed in
+  # task-1-report.md rather than silently assumed correct.
+  - term: "front-runner"
+    weight: 1.2
+  - term: "leads in the polls"
+    weight: 1.2
+  - term: "horse race"
+    weight: 1.2
