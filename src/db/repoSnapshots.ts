@@ -47,6 +47,21 @@ export interface StarObservation {
   tz: string;
 }
 
+/**
+ * What a `recordStarSnapshot` call actually did.
+ *
+ * `ignored` is the one a caller must not treat as success-by-default: it
+ * means a FRESHER reading for that day was already stored and this one was
+ * discarded. Returned rather than thrown because an out-of-order retry is
+ * ordinary operational noise, not an error worth failing an ingest cycle
+ * over -- but a caller that logs "recorded" unconditionally would be lying.
+ */
+export interface RecordOutcome {
+  action: 'inserted' | 'updated' | 'ignored';
+  /** The calendar day in `obs.tz` the reading was bucketed into. */
+  snapshotDay: string;
+}
+
 const INSERT_SNAPSHOT = `
   insert into github_repo_star_snapshots
     (repo_id, snapshot_day, stars, observed_at, tz, created_at)
@@ -78,7 +93,7 @@ const INSERT_NAME = `
  * which is what keeps a double-polled day from inflating velocity's
  * denominator. See db/migrations/0007_repo_star_snapshots.sql, section 1.
  */
-export function recordStarSnapshot(db: Db, obs: StarObservation): void {
+export function recordStarSnapshot(db: Db, obs: StarObservation): RecordOutcome {
   assertCanonicalTimestamp('observedAt', obs.observedAt);
   const day = localDay(obs.observedAt, obs.tz);
 
@@ -91,6 +106,17 @@ export function recordStarSnapshot(db: Db, obs: StarObservation): void {
       obs.observedAt,
       obs.observedAt,
     );
+
+    // Read the day's existing reading to name the outcome. `.run()`'s
+    // `changes` cannot: an INSERT and a conflict-resolving UPDATE both report
+    // 1, and only the WHERE-filtered no-op reports 0. The guarded upsert
+    // below still does the real deciding -- this read only labels it.
+    const existing = db
+      .prepare(
+        'select observed_at from github_repo_star_snapshots where repo_id = ? and snapshot_day = ?',
+      )
+      .get(obs.repoId, day) as { observed_at: string } | undefined;
+
     db.prepare(INSERT_SNAPSHOT).run(
       obs.repoId,
       day,
@@ -100,6 +126,12 @@ export function recordStarSnapshot(db: Db, obs: StarObservation): void {
       obs.observedAt,
     );
     db.exec('commit');
+
+    if (existing === undefined) return { action: 'inserted', snapshotDay: day };
+    return {
+      action: obs.observedAt > existing.observed_at ? 'updated' : 'ignored',
+      snapshotDay: day,
+    };
   } catch (cause) {
     if (db.isTransaction) db.exec('rollback');
     throw cause;

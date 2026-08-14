@@ -86,3 +86,82 @@ describe('recordStarSnapshot', () => {
     ]);
   });
 });
+
+describe('recordStarSnapshot, polled more than once in a day', () => {
+  it('replaces the day rather than adding a second row, and says so', () => {
+    // The invariant the whole migration exists for: a day polled twice must
+    // not become two rows, or every consumer that counts rows to get its
+    // per-day denominator is silently ~12% low over a 7-day window.
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-08T13:00:00.000Z',
+      tz: NY,
+    });
+    const second = recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 47,
+      observedAt: '2026-08-08T19:00:00.000Z',
+      tz: NY,
+    });
+
+    expect(second.action).toBe('updated');
+    expect(getStarSnapshots(db, AGENTKIT.repoId)).toEqual([
+      {
+        repoId: AGENTKIT.repoId,
+        snapshotDay: '2026-08-08',
+        stars: 47,
+        observedAt: '2026-08-08T19:00:00.000Z',
+        tz: NY,
+      },
+    ]);
+  });
+
+  it('ignores a reading that arrives out of order instead of clobbering a fresher one', () => {
+    // The retry that lands after the poll it was retrying already succeeded.
+    // The later reading is closer to the end of the day the row represents,
+    // so it wins -- and the caller is told the write was a no-op rather than
+    // being left to assume it landed.
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 47,
+      observedAt: '2026-08-08T19:00:00.000Z',
+      tz: NY,
+    });
+    const stale = recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-08T13:00:00.000Z',
+      tz: NY,
+    });
+
+    expect(stale.action).toBe('ignored');
+    expect(getStarSnapshots(db, AGENTKIT.repoId)[0]?.stars).toBe(47);
+  });
+
+  it('keeps one local day as one row even when it straddles UTC midnight', () => {
+    // 20:00 and 21:00 on one New York evening are 00:00 and 01:00 the NEXT
+    // day in UTC. Bucketing by UTC would file them as two days and halve the
+    // apparent velocity; bucketing by WF_TZ files them as the one day they
+    // actually were.
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-09T00:00:00.000Z',
+      tz: NY,
+    });
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 42,
+      observedAt: '2026-08-09T01:00:00.000Z',
+      tz: NY,
+    });
+
+    const snapshots = getStarSnapshots(db, AGENTKIT.repoId);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.snapshotDay).toBe('2026-08-08');
+  });
+});
