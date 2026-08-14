@@ -33,9 +33,24 @@ export interface VelocityWindowFacts {
 
 export interface VelocityOk extends VelocityWindowFacts {
   status: 'ok';
+  /** Signed. Negative is real data -- see the module doc comment, point 3. */
   starsPerDay: number;
+  /** `last.stars - first.stars`, so `starsPerDay` is auditable, not opaque. */
   starsGained: number;
+  /** Elapsed days between the two observation INSTANTS. Fractional. */
   spanDays: number;
+  /**
+   * `spanDays` as a fraction of the most the window could possibly span,
+   * clamped to [0, 1]. The lever a ranker uses to stop a barely-qualifying
+   * sample beating a full one on equal terms. Not a statistical confidence.
+   */
+  spanCoverage: number;
+  /**
+   * Whole days between the newest reading and the end of the window. Nonzero
+   * means this rate describes an interval that stopped `staleDays` ago.
+   * Reported, never gated -- see the module doc comment, point 4.
+   */
+  staleDays: number;
   first: VelocityEndpoint;
   last: VelocityEndpoint;
   mixedTimezone: boolean;
@@ -98,9 +113,21 @@ export function starVelocityFromWindow(
   return {
     ...facts(window),
     status: 'ok',
+    // No clamp, in either direction -- module doc comment, point 3.
     starsPerDay: starsGained / spanDays,
     starsGained,
     spanDays,
+    // A `days`-day window holds `days` day LABELS, so the furthest apart two
+    // of them can be is `days - 1`. Real observation instants can exceed that
+    // by up to a day (00:30 on the first, 23:30 on the last), hence the clamp
+    // -- a coverage above 1 would be a fraction that is not one.
+    spanCoverage: Math.min(1, spanDays / (window.expectedDays - 1)),
+    // No date arithmetic: `missingDays` already covers exactly this window,
+    // and `last.snapshotDay` is its newest OBSERVED day, so every window day
+    // after it is by definition missing. Lexicographic `>` is chronological
+    // at this fixed YYYY-MM-DD width -- the same property every read in
+    // src/db/repoSnapshots.ts relies on.
+    staleDays: window.missingDays.filter((day) => day > last.snapshotDay).length,
     first: { day: first.snapshotDay, stars: first.stars, observedAt: first.observedAt },
     last: { day: last.snapshotDay, stars: last.stars, observedAt: last.observedAt },
     mixedTimezone: window.mixedTimezone,
@@ -124,9 +151,25 @@ export function computeStarVelocity(
 ): VelocityResult {
   assertCanonicalTimestamp('now', opts.now);
   const days = opts.windowDays ?? DEFAULT_WINDOW_DAYS;
+  const minSpanDays = opts.minSpanDays ?? DEFAULT_MIN_SPAN_DAYS;
+
+  // Both of these make velocity permanently uncomputable rather than merely
+  // unavailable-for-now, so they fail loudly at the call rather than
+  // returning an insufficient_history a reader would take for "not yet".
+  if (!Number.isInteger(days) || days < 2) {
+    throw new RangeError(
+      `windowDays must be an integer >= 2 (a shorter window holds no two days to measure between), got ${days}`,
+    );
+  }
+  if (minSpanDays > days - 1) {
+    throw new RangeError(
+      `minSpanDays ${minSpanDays} exceeds the ${days - 1} days a ${days}-day window can span`,
+    );
+  }
+
   const window = getSnapshotWindow(db, repoId, {
     throughDay: localDay(opts.now, opts.tz),
     days,
   });
-  return starVelocityFromWindow(window, opts.minSpanDays ?? DEFAULT_MIN_SPAN_DAYS);
+  return starVelocityFromWindow(window, minSpanDays);
 }
