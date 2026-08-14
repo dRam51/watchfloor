@@ -1,0 +1,122 @@
+/**
+ * Styling for SearchView.tsx (M3 task 11). A standalone file rather than an
+ * addition to web/src/styles/global.css -- that directory is owned by the
+ * sibling building the six-lane layout for the duration of this wave (Wave
+ * 4 concurrency note). Every value below is a design token
+ * (web/src/styles/tokens.css custom property); nothing here is a literal
+ * color, size, or timing of its own.
+ */
+
+.search-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.search-view__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.search-view__submit,
+.search-view__close {
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.search-view__submit:hover,
+.search-view__close:hover {
+  border-color: var(--color-accent);
+}
+
+.search-view__scope-hint {
+  margin: 0;
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.search-view__status {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.search-view__status--error {
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.search-view__results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.search-view__result {
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.search-view__result-title {
+  color: var(--color-text-primary);
+  font-size: var(--text-md);
+  text-decoration: none;
+  /* A link is the whole title -- its own underline is the always-visible
+     affordance (§7.1: nothing may rely on hover to convey information), not
+     just a hover-only color change. */
+  text-decoration-line: underline;
+  text-decoration-color: var(--color-border-strong);
+  text-underline-offset: 2px;
+}
+
+.search-view__result-title:hover {
+  text-decoration-color: var(--color-accent);
+}
+
+.search-view__result-meta {
+  display: flex;
+  gap: var(--space-3);
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+}
+
+.search-view__snippet {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* The matched span -- emphasis, not the server's literal `[` … `]`
+   markers. Accent color/glow (the same "ops-wall" accent used for focus
+   rings and links elsewhere), not a browser-default yellow highlight,
+   which is not one of this app's tokens. */
+.search-view__match {
+  background: var(--color-accent-glow);
+  color: var(--color-accent);
+  font-weight: var(--weight-medium);
+  padding: 0 0.1em;
+  border-radius: var(--radius-sm);
+}

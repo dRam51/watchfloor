@@ -1,0 +1,211 @@
+/**
+ * Styling for SourceHealthPage.tsx (M3 task 11). Standalone file, same
+ * reasoning as SearchView.css -- web/src/styles/** is sibling-owned for
+ * this wave. Tokens only, no literal colors/sizes.
+ */
+
+.source-health {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.source-health__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.source-health__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+}
+
+.source-health__toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.source-health__refresh,
+.source-health__close,
+.source-health__retry {
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.source-health__refresh:hover,
+.source-health__close:hover {
+  border-color: var(--color-accent);
+}
+
+.source-health__status {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.source-health__status--error {
+  color: var(--color-error);
+}
+
+.source-health__retry {
+  margin-left: var(--space-2);
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+/* The summary banner -- the "impossible to miss" requirement made literal.
+   Uses --color-error (a broken/degraded system state), deliberately NOT
+   --color-alert (documented in tokens.css as "a watchfloor signal, not a UI
+   failure" -- a hard-override item pulse is a signal about the world; a
+   silently-dead ingest feed is an error about THIS system). Bold border +
+   background tint + a role="alert" (announced by assistive tech without
+   depending on sight at all), not color alone. */
+.source-health__summary {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.source-health__summary--failing {
+  background: color-mix(in srgb, var(--color-error) 12%, var(--color-surface));
+  border: 2px solid var(--color-error);
+  color: var(--color-error);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-base);
+}
+
+.source-health__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.source-health__row {
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The loud treatment -- a persistent, always-visible left-edge accent PLUS
+   the badge PLUS the reason paragraph below, not just a color that could be
+   missed. Every one of these three is independent of hover. */
+.source-health__row--failing {
+  border-left-color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 6%, var(--color-surface));
+}
+
+/* Disabled overrides failing visually too -- a disabled source never gets
+   the failing treatment even if its raw history has errors on it (task
+   brief: "Disabled sources must not read as broken"). */
+.source-health__row--disabled {
+  border-left-color: transparent;
+  background: var(--color-surface);
+  opacity: 0.7;
+}
+
+.source-health__row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.source-health__badge {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.05em;
+  border: 1px solid transparent;
+}
+
+.source-health__badge--failing {
+  background: color-mix(in srgb, var(--color-error) 20%, transparent);
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.source-health__badge--ok {
+  border-color: var(--color-border-strong);
+  color: var(--color-text-dim);
+}
+
+.source-health__badge--disabled {
+  border-color: var(--color-border-strong);
+  color: var(--color-text-dim);
+}
+
+.source-health__name {
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+.source-health__id,
+.source-health__interval,
+.source-health__beats {
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+}
+
+/* The reason a failing source is failing -- ALWAYS rendered in the flow
+   (never a tooltip) whenever `.failing` is true, including the zero-error
+   stale case, whose sentence names "stale" explicitly rather than leaving
+   a bare badge with no explanation. */
+.source-health__reason {
+  margin: 0;
+  color: var(--color-error);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.source-health__facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.source-health__facts dt {
+  color: var(--color-text-dim);
+}
+
+.source-health__facts dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}
+
+.source-health__error-text {
+  color: var(--color-error);
+  font-family: var(--font-mono);
+}
+
+.source-health__hint {
+  color: var(--color-text-dim);
+}
