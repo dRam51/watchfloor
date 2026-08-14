@@ -817,7 +817,29 @@ describe('countFailingSources', () => {
 
     // 3 failing: silent-failure, explicit-error, never-polled.
     // NOT failing: healthy (recent success), disabled-but-stale (disabled).
-    expect(countFailingSources(db, sources)).toBe(3);
+    // `now` is pinned to NOW, like every other staleness assertion in this
+    // file. Before countFailingSources took a `now`, this call read the wall
+    // clock while every timestamp above was built relative to NOW -- so the
+    // test passed only while real time stayed within 'healthy''s 12h
+    // poll_interval of NOW, and began failing on its own hours later with no
+    // code change. See that function's doc comment.
+    expect(countFailingSources(db, sources, NOW)).toBe(3);
+  });
+
+  it('honours the injected now rather than the wall clock -- the same reading at a later instant counts one more', () => {
+    // The regression guard for the bug the test above documents. If
+    // countFailingSources ever goes back to reading `new Date()`, BOTH
+    // assertions here collapse to the same wall-clock answer and this fails,
+    // whereas the test above would only fail during part of the day.
+    const db = migratedDb();
+    const sources = [buildSource({ id: 'healthy', poll_interval: '12h' })];
+    insertFetchState(db, { sourceId: 'healthy', lastSuccessAt: iso(-30 * MIN) });
+
+    // 30 minutes since success, against a 12h interval: not overdue.
+    expect(countFailingSources(db, sources, NOW)).toBe(0);
+    // The identical row read 12h later: overdue, and therefore failing. Only
+    // the injected instant differs -- nothing about the database changed.
+    expect(countFailingSources(db, sources, iso(12 * HOUR))).toBe(1);
   });
 
   it('accepts a readonly array, matching DashboardDeps.countFailingSources exactly', () => {

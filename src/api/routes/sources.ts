@@ -540,9 +540,34 @@ export function getSourcesHealth(
  * `dashboard.ts` or `headerStrip.ts` required, matching that report's own
  * stated intent ("that gap should close via `DashboardDeps.countFailingSources`
  * once Task 5 exports something, not by editing `headerStrip.ts`").
+ *
+ * ## `now` is injected here too — it was the one hole in that convention
+ * Added M4a. `computeSourceHealth` and `getSourcesHealth` both take `now`
+ * explicitly, for the reason `computeSourceHealth`'s own doc comment gives:
+ * it is "the only way `tests/api/sources.test.ts` can assert
+ * staleness/backoff deterministically rather than racing real time." This
+ * function was the single exception, and it read the wall clock.
+ *
+ * That was not theoretical. `tests/api/sources.test.ts` builds every timestamp
+ * relative to a pinned `NOW` of 2026-08-14T12:00Z, including a `healthy`
+ * source last successful 30 minutes before it on a 12h `poll_interval`. With
+ * the wall clock in play, `healthy` read as stale — and therefore failing — the
+ * moment real time passed 2026-08-14T23:30Z. The suite went red **12 hours
+ * after the test was written, with no code change**, on a test whose whole
+ * subject is distinguishing a genuinely stale source from a healthy one.
+ *
+ * The optional-parameter shape keeps the function assignable to
+ * `DashboardDeps.countFailingSources`'s `(db, sources) => number`, so the
+ * one-line wiring above still holds. `dashboard.ts` passes its own `now()`,
+ * so the header strip's failing count and its `enrichmentSpend` — computed on
+ * the very next line — now agree about what time it is.
  */
-export function countFailingSources(db: Db, sources: readonly Source[]): number {
-  return getSourcesHealth(db, sources).filter((health) => health.failing).length;
+export function countFailingSources(
+  db: Db,
+  sources: readonly Source[],
+  now: string = new Date().toISOString(),
+): number {
+  return getSourcesHealth(db, sources, now).filter((health) => health.failing).length;
 }
 
 // ---------------------------------------------------------------------------

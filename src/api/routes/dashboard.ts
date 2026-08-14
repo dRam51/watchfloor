@@ -41,7 +41,7 @@ export interface DashboardDeps {
    * source-health module, once it exports one, to be wired in here without
    * touching this file's logic. Defaults to the minimal definition.
    */
-  countFailingSources?: (db: Db, sources: readonly Source[]) => number;
+  countFailingSources?: (db: Db, sources: readonly Source[], now?: string) => number;
   /** Overridable clock for tests; defaults to the wall clock. */
   now?: () => string;
 }
@@ -88,6 +88,7 @@ export function registerDashboard(server: FastifyInstance, deps: DashboardDeps):
   // -------------------------------------------------------------------
   server.get('/dashboard/header', () => {
     const env = deps.env ?? process.env;
+    const at = now();
     const refreshStatus = getBeatRefreshStatus(deps.db, deps.sources);
 
     const beats: Record<string, { lastRefreshAt: string | null; sourceCount: number }> = {};
@@ -97,8 +98,15 @@ export function registerDashboard(server: FastifyInstance, deps: DashboardDeps):
 
     return {
       beats,
-      failingSources: countFailingSources(deps.db, deps.sources),
-      enrichmentSpend: getEnrichmentSpendToday(env, now()),
+      // One instant for the whole response: `now()` is read once and passed to
+      // both. Before M4a these disagreed -- `enrichmentSpend` honoured the
+      // injected clock while the failing count silently read the wall clock,
+      // so a test pinning `now` got a header whose two halves were computed at
+      // different times. See countFailingSources' doc comment in
+      // ./sources.ts for how that surfaced (a suite that went red 12 hours
+      // after it was written, with no code change).
+      failingSources: countFailingSources(deps.db, deps.sources, at),
+      enrichmentSpend: getEnrichmentSpendToday(env, at),
     };
   });
 
