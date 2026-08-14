@@ -164,6 +164,90 @@ describe('normalizeItem', () => {
       );
       expect(item.publishedAt).toBe('2024-02-29T12:00:00.000Z');
     });
+
+    // Sampled directly from the M1 live corpus (data/wf.db): cisa-kev's
+    // `dateAdded` and federal-register's `publication_date` both emit a bare
+    // calendar date with no time component at all, e.g. "2026-08-11". The
+    // DATE is unambiguous; the TIME of day is not stated anywhere in the
+    // source. See `parseDateOnly`'s doc comment for why this parser picks
+    // midnight UTC as its one explicit, always-applied convention, and the
+    // cost that convention carries for same-day ordering.
+    it('parses a bare calendar date (YYYY-MM-DD) as midnight UTC (cisa-kev dateAdded / federal-register publication_date shape)', () => {
+      const item = normalizeItem(rawItem({ publishedAt: '2026-08-11' }), source(), FETCHED_AT);
+      expect(item.publishedAt).toBe('2026-08-11T00:00:00.000Z');
+    });
+
+    // Verbatim from the M1 live corpus: cisa-advisories emits RFC-822 with a
+    // TWO-DIGIT year ("26"), which the original RFC822_RE (four digits only)
+    // rejected outright. RFC 822's own successor, RFC 2822 §4.3, windows
+    // 00-49 to 2000-2049 -- see `resolveRfc822Year`'s doc comment for the
+    // full citation.
+    it('parses RFC-822 with a two-digit year (verbatim cisa-advisories pubDate shape)', () => {
+      const item = normalizeItem(
+        rawItem({ publishedAt: 'Thu, 13 Aug 26 12:00:00 +0000' }),
+        source(),
+        FETCHED_AT,
+      );
+      expect(item.publishedAt).toBe('2026-08-13T12:00:00.000Z');
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // publishedAt: RFC-822 two-digit year windowing boundary (RFC 2822 §4.3)
+  // ---------------------------------------------------------------------
+  describe('publishedAt: RFC-822 two-digit year windowing (RFC 2822 §4.3)', () => {
+    // RFC 822's own successor, RFC 2822 §4.3 ("Obsolete Date and Time"),
+    // fixes the interpretation of a two-digit year: values 00-49 window to
+    // 2000-2049 (add 2000); values 50-99 window to 1950-1999 (add 1900).
+    // Quoted in full in `resolveRfc822Year`'s doc comment. It is a FIXED
+    // mapping (not a sliding window re-derived from "today"), so exercising
+    // both ends and the midpoint below proves the actual rule, not a
+    // coincidence for the one value ("26") the live corpus happens to emit.
+
+    it('windows two-digit year 00 to 2000 (low edge of the 00-49 branch)', () => {
+      const item = normalizeItem(
+        rawItem({ publishedAt: 'Sat, 01 Jan 00 00:00:00 +0000' }),
+        source(),
+        FETCHED_AT,
+      );
+      expect(item.publishedAt).toBe('2000-01-01T00:00:00.000Z');
+    });
+
+    it('windows two-digit year 49 to 2049 (high edge of the 00-49 branch)', () => {
+      const item = normalizeItem(
+        rawItem({ publishedAt: 'Mon, 01 Jan 49 00:00:00 +0000' }),
+        source(),
+        FETCHED_AT,
+      );
+      expect(item.publishedAt).toBe('2049-01-01T00:00:00.000Z');
+    });
+
+    it('windows two-digit year 95 to 1995 -- inside the 50-99 branch AND inside the plausible-year window, proving that branch actually produces an accepted parse rather than being dead code', () => {
+      const item = normalizeItem(
+        rawItem({ publishedAt: 'Wed, 01 Feb 95 00:00:00 +0000' }),
+        source(),
+        FETCHED_AT,
+      );
+      expect(item.publishedAt).toBe('1995-02-01T00:00:00.000Z');
+    });
+
+    it('windows two-digit year 50 to 1950 per RFC 2822 -- correctly windowed, but 1950 is before the plausible-year floor (1990), so the existing guard still fails it closed rather than trusting the windowing blindly', () => {
+      const item = normalizeItem(
+        rawItem({ publishedAt: 'Sun, 01 Jan 50 00:00:00 +0000' }),
+        source(),
+        FETCHED_AT,
+      );
+      expect(item.publishedAt).toBeNull();
+    });
+
+    it('is null for a three-digit year -- RFC 2822 §4.3 also defines a rule for these ("any three digit year... adding 1900"), but this parser deliberately implements only the two-digit case named in the brief and observed in the live corpus, so a three-digit year is rejected rather than silently extended to', () => {
+      const item = normalizeItem(
+        rawItem({ publishedAt: 'Thu, 13 Aug 126 14:22:00 +0000' }),
+        source(),
+        FETCHED_AT,
+      );
+      expect(item.publishedAt).toBeNull();
+    });
   });
 
   // ---------------------------------------------------------------------
@@ -266,6 +350,25 @@ describe('normalizeItem', () => {
         source(),
         FETCHED_AT,
       );
+      expect(item.publishedAt).toBeNull();
+    });
+
+    // Same calendar-validation rule as the RFC-822 case above (Feb 30 /
+    // non-leap Feb 29), applied to the bare-date shape: reject a
+    // nonexistent calendar date rather than letting `Date.UTC` normalize
+    // month 13 into next year or day 45 into a rolled-forward date.
+    it('is null for a bare calendar date whose month does not exist (2026-13-45), rather than letting Date.UTC normalize it into a different date', () => {
+      const item = normalizeItem(rawItem({ publishedAt: '2026-13-45' }), source(), FETCHED_AT);
+      expect(item.publishedAt).toBeNull();
+    });
+
+    it('is null for a bare calendar date that does not exist (2026-02-30)', () => {
+      const item = normalizeItem(rawItem({ publishedAt: '2026-02-30' }), source(), FETCHED_AT);
+      expect(item.publishedAt).toBeNull();
+    });
+
+    it('is null for a bare date with a non-zero-padded month (2026-8-11) -- a different, non-conforming shape, not something the parser leniently accepts', () => {
+      const item = normalizeItem(rawItem({ publishedAt: '2026-8-11' }), source(), FETCHED_AT);
       expect(item.publishedAt).toBeNull();
     });
 
@@ -686,6 +789,18 @@ describe('normalizeItem', () => {
         '100000000000000',
         // Fix round 1, bundled minor: an offset beyond the new +/-14:00 bound.
         '2026-08-12T14:30:00+2200',
+        // Fix round 2 (M1 live-ingest gap): bare YYYY-MM-DD dates and
+        // RFC-822 two-digit years, plus their rejection/boundary cases.
+        '2026-08-11',
+        '2026-13-45',
+        '2026-02-30',
+        '2026-8-11',
+        'Thu, 13 Aug 26 12:00:00 +0000',
+        'Sat, 01 Jan 00 00:00:00 +0000',
+        'Mon, 01 Jan 49 00:00:00 +0000',
+        'Wed, 01 Feb 95 00:00:00 +0000',
+        'Sun, 01 Jan 50 00:00:00 +0000',
+        'Thu, 13 Aug 126 14:22:00 +0000',
       ];
 
       for (const publishedAt of inputs) {

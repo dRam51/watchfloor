@@ -199,7 +199,48 @@ function parseZoneOffsetMinutes(zone: string): number | null {
  * good dates for a cosmetic mismatch that carries no ambiguity of its own.
  */
 const RFC822_RE =
-  /^(?:[A-Za-z]{3},\s+)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+([+-]\d{4}|[A-Za-z]{1,5})$/;
+  /^(?:[A-Za-z]{3},\s+)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4}|\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s+([+-]\d{4}|[A-Za-z]{1,5})$/;
+
+/**
+ * Windows an RFC-822 year string into a four-digit year. Four-digit years
+ * pass through unchanged. A two-digit year is windowed per RFC 822's own
+ * successor, RFC 2822 §4.3 ("Obsolete Date and Time"), quoted here in full
+ * because this is exactly the kind of rule this module insists on citing
+ * rather than inventing:
+ *
+ *   "If a two digit year is encountered whose value is between 00 and 49,
+ *   the year is interpreted by adding 2000, ending up with a value between
+ *   2000 and 2049. If a two digit year is encountered with a value between
+ *   50 and 99, or any three digit year is encountered, the year is
+ *   interpreted by adding 1900."
+ *   -- RFC 2822 §4.3, https://www.rfc-editor.org/rfc/rfc2822#section-4.3
+ *
+ * This is a FIXED mapping, not a sliding window re-derived from today's
+ * date the way some libc `strptime("%y")` implementations pick a floating
+ * +/-50-year window around "now". A fixed rule means this function's
+ * answer for a given two-digit year never changes as time passes and needs
+ * no notion of "the current date" -- so reading "26" as 2026 is not this
+ * code guessing what year it probably is; it is applying a windowing rule
+ * fixed by spec decades before this feed existed, which happens to place
+ * "26" in 2000-2049. `RFC822_RE` accepts exactly 2 or exactly 4 digits, so
+ * this function is never asked to resolve anything else -- RFC 2822 §4.3
+ * also defines a rule for three-digit years, but that shape does not occur
+ * in the M1 live corpus and is not part of what this task asked this
+ * parser to widen, so it stays unmatched (and thus `null`) by deliberate
+ * choice, not oversight.
+ *
+ * This function only WINDOWS the year; it does not judge plausibility.
+ * `toCanonical`'s existing MIN/MAX_PLAUSIBLE_YEAR check runs afterward on
+ * every path through this parser exactly as it always has, so a
+ * correctly-windowed-but-implausible result (e.g. two-digit "50" -> 1950,
+ * below the 1990 floor) still fails closed instead of being trusted just
+ * because the windowing arithmetic was followed correctly.
+ */
+function resolveRfc822Year(yearStr: string): number {
+  if (yearStr.length === 4) return Number(yearStr);
+  const twoDigit = Number(yearStr);
+  return twoDigit <= 49 ? 2000 + twoDigit : 1900 + twoDigit;
+}
 
 function parseRfc822(value: string): string | null {
   const m = RFC822_RE.exec(value);
@@ -209,7 +250,7 @@ function parseRfc822(value: string): string | null {
   const monthIndex0 = MONTHS[monStr!.toLowerCase()];
   if (monthIndex0 === undefined) return null;
 
-  const year = Number(yearStr);
+  const year = resolveRfc822Year(yearStr!);
   const day = Number(dayStr);
   const hour = Number(hourStr);
   const minute = Number(minStr);
@@ -263,6 +304,62 @@ function parseIso8601(value: string): string | null {
 }
 
 /**
+ * Bare calendar date, no time component at all, e.g. "2026-08-11"
+ * (cisa-kev's `dateAdded`, federal-register's `publication_date` -- both
+ * sampled verbatim from the M1 live corpus). The DATE here is unambiguous;
+ * the TIME of day is not -- the source simply never states one. Rejecting
+ * the whole value over a missing time is what produced the gap this
+ * function fixes: 1,715 of 3,325 items (51.6%) in the first live ingest had
+ * a null `publishedAt`, entirely from three sources emitting this shape or
+ * the two-digit-year RFC-822 shape above.
+ *
+ * Convention chosen: midnight UTC (00:00:00.000Z) on the given date.
+ * Reasons, and the cost, stated plainly rather than left implicit:
+ *
+ *   - It is the standard, unsurprising reading -- it is what the ECMA-262
+ *     Date Time String Format itself assigns to a date-only ISO string
+ *     (`new Date("2026-08-11")` means exactly this instant), so adopting it
+ *     here does not introduce a new, project-specific convention.
+ *   - It is reproducible from the string alone, with no other input (not
+ *     `fetchedAt`, not a guess at the source's publishing habits).
+ *   - It never rolls into the previous or next calendar day in any
+ *     timezone the way "local midnight" or "noon in some assumed zone"
+ *     could -- there is no zone conversion involved at all.
+ *
+ *   THE COST: an item dated this way sorts as if it were published at the
+ *   very first instant of that day. A same-day item from another source
+ *   carrying a real intraday timestamp (e.g. "2026-08-11T14:22:00Z") will
+ *   always sort as NEWER than a same-day cisa-kev/federal-register item
+ *   stamped "2026-08-11T00:00:00.000Z" by this convention -- even if the
+ *   cisa-kev entry was actually added later that same day. Recency ranking
+ *   is therefore trustworthy at day granularity for these sources, but NOT
+ *   at intraday granularity. That is a real trade, accepted here because
+ *   the alternative -- leaving the date null, as before -- discarded the
+ *   date entirely rather than merely losing sub-day precision on it.
+ *
+ * Calendar components are validated the same way, and by the same
+ * function, as every other parser in this module: `isValidCalendarDateTime`
+ * rejects an impossible month/day (e.g. "2026-13-45") outright rather than
+ * handing it to `Date.UTC`, which would silently normalize it into a
+ * different, valid-looking date instead of failing.
+ */
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function parseDateOnly(value: string): string | null {
+  const m = DATE_ONLY_RE.exec(value);
+  if (!m) return null;
+  const [, yearStr, monStr, dayStr] = m;
+
+  const year = Number(yearStr);
+  const monthIndex0 = Number(monStr) - 1;
+  const day = Number(dayStr);
+  if (!isValidCalendarDateTime(year, monthIndex0, day, 0, 0, 0)) return null;
+
+  const millis = Date.UTC(year, monthIndex0, day, 0, 0, 0, 0);
+  return toCanonical(millis);
+}
+
+/**
  * Bare epoch seconds, e.g. "1786545000" (Hacker News via Algolia's
  * `created_at_i`). A bare digit string is indistinguishable from epoch
  * MILLISECONDS by shape alone -- there is nothing in "1786545000000" that
@@ -288,7 +385,12 @@ function parsePublishedAt(value: string | null | undefined): string | null {
   if (value == null) return null;
   const trimmed = value.trim();
   if (trimmed === '') return null;
-  return parseIso8601(trimmed) ?? parseRfc822(trimmed) ?? parseEpochSeconds(trimmed);
+  return (
+    parseIso8601(trimmed) ??
+    parseDateOnly(trimmed) ??
+    parseRfc822(trimmed) ??
+    parseEpochSeconds(trimmed)
+  );
 }
 
 // ---------------------------------------------------------------------------
