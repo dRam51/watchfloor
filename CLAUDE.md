@@ -248,6 +248,23 @@ malformed `weight`, `beat`, or `poll_interval` fails at load, not at fetch time.
 
 ## Portability debt
 
+**The frontend is served by `vite preview`, which Vite documents as not a production
+server.** Decided in M3 task 7 and **awaiting the owner's explicit sign-off** — recorded here
+because §12's migration runbook has to state what actually runs on the target host, and
+"whatever the dev machine happened to do" is not an answer.
+
+The reasoning is better than it first sounds. Fastify cannot serve the bundle, because
+`src/api/auth.ts` registers its bearer-token hook at the **root** instance so that every route
+is protected by default — and that would 401 every static asset. Browsers cannot attach an
+`Authorization` header to a page navigation, so there is no way for the SPA's own HTML to
+carry one. Exempting static paths would reintroduce exactly the allowlist-you-must-remember
+that task 1 was built to avoid.
+
+Accepted for a single-user, loopback-bound, Tailscale-only deployment. **The upgrade path, if
+that changes:** a second, unauthenticated Fastify instance with `@fastify/static` for the
+bundle, with `/api` reached via `tailscale serve`'s path routing or `@fastify/http-proxy` —
+two more dependencies, which is why it was not done pre-emptively.
+
 **The Obsidian vault is on iCloud Drive** — `~/Library/Mobile Documents/iCloud~md~obsidian/
 Documents/Obsidian-Vault`, with Watchfloor owning `01 Tech Projects/Watchfloor/`. iCloud does
 not exist on Linux, so if the always-on host is Linux the §8.1 integration cannot run there.
