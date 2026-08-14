@@ -253,17 +253,44 @@ sources:
     poll_interval: 6h
     enabled: true
 
+  # FIXED 2026-08-14 (fix-hn-algolia-sort task) — Algolia's plain /search endpoint sorts by
+  # RELEVANCE, and with no query term (tags=story alone is not a query, just a filter) that
+  # means all-time popularity: this url returned the same handful of all-time-classic
+  # stories on EVERY poll, forever, regardless of poll_interval — the same defect class as
+  # nvd-cve's wrong-sort trap above (a plausible-looking parameter that quietly never
+  # surfaces new content). Live-verified 2026-08-14 against the OLD url
+  # (search?tags=story&hitsPerPage=20):
+  #   3075d old | 6015 pts | Stephen Hawking has died
+  #   3831d old | 5771 pts | A Message to Our Customers
+  #   5426d old | 4338 pts | Steve Jobs has passed away.
+  #   1105d old | 4310 pts | Bram Moolenaar has died
+  # Nothing recent, and — on a source whose beat is `ai` — nothing AI-related either.
+  #
+  # /search_by_date sorts by recency instead, but alone swings to the opposite failure:
+  # brand-new submissions minutes old, usually 0-1 points, with no signal yet either way.
+  # numericFilters=points%3E50 (URL-encoded points>50) restores a quality floor — exactly
+  # what this source's own `filters: min_points: 50` below already documented as intended,
+  # now actually enforced (via the url, not adapter code — src/adapters/json.ts still reads
+  # no filter keys itself). Live-verified 2026-08-14 against the NEW url below, substantive
+  # and organically AI-heavy with no keyword filtering needed at all:
+  #    0.6h old | 108 pts | Qwen3.8-27B
+  #    5.4h old | 353 pts | Why does Opus 5 feel worse to work with?
+  #    5.7h old | 170 pts | DeepSeek peak/off-peak pricing update
+  #   10.3h old | 834 pts | GLM-5.3: Frontier coding with emergent cyber capabilities
   - id: hn-algolia
     name: Hacker News (via Algolia)
     type: json
-    url: https://hn.algolia.com/api/v1/search?tags=story&hitsPerPage=20
+    url: https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points%3E50&hitsPerPage=20
     beats: [ai]
     weight: 0.9
     poll_interval: 1h
     filters:
-      # Not yet consumed by src/adapters/json.ts (M1) — forward documentation for M2,
-      # matching this source's plan note ("points threshold + keyword filter"). This
-      # beat is `ai`; unfiltered results are every trending HN story regardless of topic.
+      # min_points is now CONSUMED — via numericFilters=points>50 in the url above, not by
+      # any adapter code (src/adapters/json.ts still reads no filter keys for this source;
+      # Algolia itself does the filtering, server-side). Recorded here so the decision
+      # stays documented even though the enforcement mechanism is the url, not this field.
+      # keywords remains NOT YET CONSUMED by any adapter — still forward documentation for
+      # later M2 filtering work, matching this source's plan note.
       min_points: 50
       keywords: [ai, llm, "large language model", agent, anthropic, openai, gemini, claude, gpt]
     enabled: true
