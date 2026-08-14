@@ -118,19 +118,37 @@ Returns `{ query, unsearchable, hits: [{ itemKey, title, sourceId, canonicalUrl,
 Per-source health. §7: *"Silent-failing feeds are the main failure mode of a system like this;
 make them loud."*
 
-Each entry carries `id`, `name`, `beats`, `enabled`, `pollInterval`, `lastSuccessAt`,
-`lastFailureAt`, `lastError`, `consecutiveFailures`, `nextEligibleAt`, `itemsYielded7d`,
-plus derived `failing` and `stale`.
+Each entry carries, verified against the running route:
+
+```
+id  name  beats  weight  kind?  enabled
+pollInterval  pollIntervalMs  everPolled
+lastSuccessAt  lastFailureAt  lastError
+consecutiveFailures  nextEligibleAt  inBackoff
+itemsYieldedSinceWindowStart  windowStartedAt  updatedAt
+stale  failing
+```
 
 - **`failing` = enabled AND (an error streak OR stale).** The second branch is the important
   one: a feed that last succeeded weeks ago with *zero* errors, because nothing is polling it,
-  is the silent failure. A naive `consecutiveFailures > 0` check reports it as healthy.
+  is the silent failure. A naive `consecutiveFailures > 0` check reports it as healthy. Two
+  sources are in exactly that state on the live corpus right now.
 - **`stale` is measured against each source's own `pollInterval`**, not a global threshold. A
-  `1d` source at 25 hours is overdue; a `12h` source at 30 minutes is fine.
-- **`itemsYielded7d` is a *tumbling* window, not a sliding one** — it resets rather than
-  continuously trailing 7 days. Treat it as an at-a-glance signal, not an analytic.
-- A source configured but never polled has no fetch-state row; it appears with nulls rather
-  than being omitted.
+  `1d` source at 25 hours is overdue; a `12h` source at 30 minutes is fine. `pollIntervalMs` is
+  the same value pre-parsed so a client need not parse `"30m"`.
+- **`itemsYieldedSinceWindowStart` is named for what it is.** The underlying counter is a
+  *tumbling* window that resets, not a sliding 7-day trail — so it is deliberately **not**
+  called `itemsYielded7d`, and `windowStartedAt` tells you which window the number belongs to.
+  Read them together or the number means little.
+  *(An earlier revision of this file called it `itemsYielded7d` and omitted `weight`,
+  `pollIntervalMs`, `everPolled`, `inBackoff`, and `updatedAt`. That was written from
+  expectation rather than from the response, and a frontend task caught it. The route was
+  always right.)*
+- **`everPolled` distinguishes never-polled from polled-and-failed.** A source configured but
+  never fetched has no fetch-state row at all; without this flag, its nulls look identical to a
+  source that has failed since the beginning.
+- **`inBackoff`** is derived from `nextEligibleAt` being in the future — surfaced so a client
+  need not re-implement the comparison.
 
 ### `GET /api/dashboard/header`
 
