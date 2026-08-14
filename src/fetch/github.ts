@@ -53,6 +53,64 @@
  * JSON serialization.
  */
 
+import { PoliteFetchError, USER_AGENT } from './http.ts';
+
+/**
+ * ## Why this does not call `politeFetch` directly
+ *
+ * It reuses `USER_AGENT` and the `PoliteFetchError` taxonomy from ./http.ts
+ * -- so a caller's existing retryable/permanent handling works unchanged --
+ * but performs its own `fetch`, for three reasons that are properties of
+ * `politeFetch`'s signature, not preferences:
+ *
+ *  - it accepts no extra REQUEST headers, and this client must send
+ *    `Accept`, `X-GitHub-Api-Version`, and (when authenticated) an
+ *    `Authorization` header;
+ *  - it exposes only `etag`/`lastModified` from the RESPONSE, and every
+ *    `x-ratelimit-*` header -- the entire point of requirement 3 -- would be
+ *    discarded;
+ *  - it THROWS on 403 and 429 with no access to the response body or
+ *    headers, which is exactly where GitHub puts the rate-limit signal that
+ *    has to be read rather than retried past.
+ *
+ * Widening `politeFetch` to cover all three was the alternative and was not
+ * taken: src/fetch/http.ts is outside this task's file ownership, and
+ * every one of ~20 existing feed sources routes through it. This is a
+ * deliberate, documented duplication of roughly thirty lines of transport
+ * handling. **If http.ts's timeout, byte-ceiling, or host-spacing behavior
+ * changes, this file does not inherit it.**
+ */
+
+/** Whole-request deadline. Matches src/fetch/http.ts's own default. */
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+/**
+ * Streaming byte ceiling. Lower than http.ts's 5 MiB because a GitHub API
+ * response is bounded by `per_page` (max 100): the largest plausible one is
+ * a 100-item search page at roughly 1 KB of JSON per repo. 2 MiB is ~20x
+ * that and still firmly rejects a pathological response.
+ */
+const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Per-host minimum spacing between request starts, matching the project's
+ * politeness default. Never the binding constraint in practice -- 60
+ * core requests per hour is one per 60s unauthenticated, and 30 search
+ * requests per minute is one per 2s authenticated -- so this is a floor
+ * that the rate-limit budget below is normally stricter than.
+ *
+ * Deliberately a SEPARATE gate from `politeFetch`'s: that one's `hostSlot`
+ * map is module-private and unexported, so it cannot be shared without
+ * editing http.ts. Consequence, stated rather than hidden: a GitHub
+ * request and an RSS poll to the same host would not space against each
+ * other. No configured source shares api.github.com, so this is currently
+ * theoretical -- but it stops being theoretical if one ever does.
+ */
+const DEFAULT_MIN_INTERVAL_MS = 2_000;
+
+/** The REST API version this client pins. Sent on every request. */
+const API_VERSION = '2022-11-28';
+
 /**
  * GitHub's published ceilings, by mode. Readable WITHOUT making a request,
  * which is the whole point: the failure this exists to prevent is a poll
@@ -70,6 +128,49 @@ export const RATE_LIMITS = {
 
 export type GitHubAuthMode = keyof typeof RATE_LIMITS;
 
+/**
+ * One resource's budget as GitHub last reported it. Every field is
+ * nullable because a proxy or a future API change can omit any of them,
+ * and reporting `null` is honest where inventing a `0` would trip the
+ * exhaustion guard for no reason.
+ *
+ * `resource` is GitHub's own `x-ratelimit-resource` -- `core`, `search`,
+ * `graphql`, and others. These are SEPARATE budgets, confirmed live: one
+ * client saw `resource: core, limit: 60` and `resource: search, limit: 10`
+ * within seconds of each other. A single global counter would misreport
+ * both.
+ */
+export interface GitHubRateLimit {
+  resource: string;
+  limit: number | null;
+  remaining: number | null;
+  used: number | null;
+  /** Parsed from `x-ratelimit-reset`, which GitHub sends as epoch SECONDS. */
+  resetAt: Date | null;
+}
+
+export interface GitHubResponse<T = unknown> {
+  status: number;
+  /** Parsed JSON, or null on a 304 (which by definition carries no body). */
+  data: T | null;
+  etag: string | null;
+  lastModified: string | null;
+  notModified: boolean;
+  rateLimit: GitHubRateLimit | null;
+  mode: GitHubAuthMode;
+}
+
+export interface GitHubRequestOptions {
+  /** Prior ETag — sent as If-None-Match. See `request` for the 304 caveat. */
+  etag?: string;
+  /** Prior Last-Modified — sent as If-Modified-Since. */
+  lastModified?: string;
+  timeoutMs?: number;
+  maxBytes?: number;
+  /** Overridable only so tests need not wait 2s per request. */
+  minIntervalMs?: number;
+}
+
 export interface GitHubClientOptions {
   /**
    * The PAT, or undefined/empty for unauthenticated mode. Optional by
@@ -83,10 +184,56 @@ export interface GitHubClientOptions {
   baseUrl?: string;
 }
 
+/** Reads a header as a base-10 integer, or null when absent/unparseable. */
+function intHeader(headers: Headers, name: string): number | null {
+  const raw = headers.get(name);
+  if (raw === null) return null;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Builds a GitHubRateLimit from a response, or null when the response
+ * carried no `x-ratelimit-*` headers at all.
+ *
+ * `resource` falls back to a path-derived guess when the header is absent,
+ * because `budget()` has to key the observation by something -- GitHub
+ * always sends it in practice (observed on every live response, including
+ * a 404 and a 403), so this fallback is defensive rather than routine.
+ */
+function readRateLimit(headers: Headers, path: string): GitHubRateLimit | null {
+  const limit = intHeader(headers, 'x-ratelimit-limit');
+  const remaining = intHeader(headers, 'x-ratelimit-remaining');
+  const used = intHeader(headers, 'x-ratelimit-used');
+  const resetSeconds = intHeader(headers, 'x-ratelimit-reset');
+  const resource = headers.get('x-ratelimit-resource');
+
+  if (limit === null && remaining === null && used === null && resetSeconds === null && resource === null) {
+    return null;
+  }
+
+  return {
+    resource: resource ?? (path.startsWith('/search') ? 'search' : 'core'),
+    limit,
+    remaining,
+    used,
+    // GitHub sends epoch SECONDS; Date wants milliseconds.
+    resetAt: resetSeconds === null ? null : new Date(resetSeconds * 1000),
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class GitHubClient {
   /** Never read by anything that formats output. See the module doc comment. */
   readonly #token: string | null;
   readonly #baseUrl: string;
+  /** Last observed budget per `x-ratelimit-resource`. */
+  readonly #budgets = new Map<string, GitHubRateLimit>();
+  /** Gates when the next request to this client's host may start. */
+  #hostSlot: Promise<number> = Promise.resolve(0);
 
   constructor(opts: GitHubClientOptions = {}) {
     const token = opts.token?.trim();
@@ -103,4 +250,185 @@ export class GitHubClient {
   get limits(): (typeof RATE_LIMITS)[GitHubAuthMode] {
     return RATE_LIMITS[this.mode];
   }
+
+  /**
+   * The most recently observed budget for one resource (`core`, `search`,
+   * …), or null if this client has not yet seen a response for it. A
+   * caller deciding whether it can afford a poll reads this; combined with
+   * `mode` and `limits` above, it never has to learn its ceiling by
+   * hitting it.
+   */
+  budget(resource: string): GitHubRateLimit | null {
+    return this.#budgets.get(resource) ?? null;
+  }
+
+  async #acquireSlot(minIntervalMs: number): Promise<void> {
+    const slot = this.#hostSlot.then(async (previousStart) => {
+      const wait = previousStart + minIntervalMs - Date.now();
+      if (wait > 0) await sleep(wait);
+      return Date.now();
+    });
+    // Replaced synchronously, before awaiting, so a concurrent caller
+    // chains onto THIS slot rather than the one it replaced — the same
+    // shape politeFetch's hostSlot map uses.
+    this.#hostSlot = slot;
+    await slot;
+  }
+
+  /**
+   * Performs one GET against `path` (an API path such as
+   * `/repos/owner/name`, or a full URL on this client's base).
+   *
+   * Resolves for 2xx and 304. Throws `GitHubApiError` (a `PoliteFetchError`
+   * subclass, so existing retry classification applies) for everything
+   * else.
+   *
+   * **The 304 caveat, measured rather than assumed.** GitHub documents a
+   * 304 as exempt from the rate limit. That was NOT observed on the
+   * unauthenticated path: replaying a valid ETag four times drove
+   * `x-ratelimit-used` 1 → 2 → 3 → 4. A conditional request still saves
+   * the whole response body, so it remains worth sending — but it does not
+   * buy budget in the mode that has the 60/hour ceiling, and code must not
+   * be written as though it does. See tests/fixtures/github/captured-headers.json.
+   */
+  async request<T = unknown>(path: string, opts: GitHubRequestOptions = {}): Promise<GitHubResponse<T>> {
+    const {
+      etag,
+      lastModified,
+      timeoutMs = DEFAULT_TIMEOUT_MS,
+      maxBytes = DEFAULT_MAX_BYTES,
+      minIntervalMs = DEFAULT_MIN_INTERVAL_MS,
+    } = opts;
+
+    const url = new URL(path, this.#baseUrl).toString();
+
+    await this.#acquireSlot(minIntervalMs);
+
+    const headers = new Headers({
+      'User-Agent': USER_AGENT,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': API_VERSION,
+    });
+    if (this.#token !== null) headers.set('Authorization', `Bearer ${this.#token}`);
+    if (etag) headers.set('If-None-Match', etag);
+    if (lastModified) headers.set('If-Modified-Since', lastModified);
+
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch(url, { headers, signal: timeoutSignal, redirect: 'follow' });
+    } catch (err) {
+      if (timeoutSignal.aborted) {
+        throw new GitHubApiError(`request to ${path} timed out after ${timeoutMs}ms`, {
+          status: null,
+          retryable: true,
+          rateLimit: null,
+        });
+      }
+      // `err` is a transport failure (DNS, refused, reset). It is built by
+      // undici from the URL and never contains a request header, so the
+      // token cannot reach this message — the URL carries no credential.
+      const message = err instanceof Error ? err.message : String(err);
+      throw new GitHubApiError(`request to ${path} failed: ${message}`, {
+        status: null,
+        retryable: true,
+        rateLimit: null,
+        cause: err,
+      });
+    }
+
+    const rateLimit = readRateLimit(response.headers, path);
+    if (rateLimit !== null) this.#budgets.set(rateLimit.resource, rateLimit);
+
+    if (response.status === 304) {
+      await response.body?.cancel().catch(() => {});
+      return {
+        status: 304,
+        data: null,
+        etag: response.headers.get('etag'),
+        lastModified: response.headers.get('last-modified'),
+        notModified: true,
+        rateLimit,
+        mode: this.mode,
+      };
+    }
+
+    if (response.status >= 400) {
+      throw await this.#buildError(response, path, rateLimit);
+    }
+
+    const body = await readBodyWithCeiling(response, maxBytes, path);
+    return {
+      status: response.status,
+      data: JSON.parse(body) as T,
+      etag: response.headers.get('etag'),
+      lastModified: response.headers.get('last-modified'),
+      notModified: false,
+      rateLimit,
+      mode: this.mode,
+    };
+  }
+
+  async #buildError(response: Response, path: string, rateLimit: GitHubRateLimit | null): Promise<GitHubApiError> {
+    await response.body?.cancel().catch(() => {});
+    const retryable = response.status === 429 || response.status >= 500;
+    return new GitHubApiError(`${path} responded ${response.status} ${response.statusText}`, {
+      status: response.status,
+      retryable,
+      rateLimit,
+    });
+  }
+}
+
+/**
+ * Any non-2xx, non-304 outcome. Extends `PoliteFetchError` so a caller's
+ * existing `retryable` handling (src/scheduler/run.ts's backoff) applies
+ * with no changes.
+ *
+ * **The message is constructed from the request PATH and the response
+ * status only.** It never includes request headers, so the token cannot
+ * reach it — pinned by a test that fails a real authenticated request and
+ * asserts the token appears in neither the message, the stack, the own
+ * properties, nor the JSON serialization.
+ */
+export class GitHubApiError extends PoliteFetchError {
+  readonly rateLimit: GitHubRateLimit | null;
+
+  constructor(
+    message: string,
+    opts: { status: number | null; retryable: boolean; rateLimit: GitHubRateLimit | null; cause?: unknown },
+  ) {
+    super(message, { status: opts.status, retryable: opts.retryable, cause: opts.cause });
+    this.name = 'GitHubApiError';
+    this.rateLimit = opts.rateLimit;
+  }
+}
+
+/**
+ * Streams the body, aborting the moment `maxBytes` is crossed so a
+ * pathological response is never fully buffered. Mirrors
+ * `readBodyWithCeiling` in src/fetch/http.ts, which is not exported.
+ */
+async function readBodyWithCeiling(response: Response, maxBytes: number, path: string): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new GitHubApiError(`response from ${path} exceeded the ${maxBytes}-byte ceiling`, {
+        status: null,
+        retryable: false,
+        rateLimit: null,
+      });
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
