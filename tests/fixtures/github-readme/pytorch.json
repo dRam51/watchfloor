@@ -1,0 +1,18 @@
+{
+ "name": "README.md",
+ "path": "README.md",
+ "sha": "d32cd08ebce8a35e0b2e0436c0b60deb7870e470",
+ "size": 29981,
+ "url": "https://api.github.com/repos/pytorch/pytorch/contents/README.md?ref=main",
+ "html_url": "https://github.com/pytorch/pytorch/blob/main/README.md",
+ "git_url": "https://api.github.com/repos/pytorch/pytorch/git/blobs/d32cd08ebce8a35e0b2e0436c0b60deb7870e470",
+ "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/main/README.md",
+ "type": "file",
+ "content": "PHBpY3R1cmU+CiAgPHNvdXJjZSBtZWRpYT0iKHByZWZlcnMtY29sb3Itc2No\nZW1lOiBkYXJrKSIgc3Jjc2V0PSJodHRwczovL2dpdGh1Yi5jb20vcHl0b3Jj\naC9weXRvcmNoL3Jhdy9tYWluL2RvY3Mvc291cmNlL19zdGF0aWMvaW1nL3B5\ndG9yY2gtbG9nby1saWdodC5wbmciIC8+CiAgPHNvdXJjZSBtZWRpYT0iKHBy\nZWZlcnMtY29sb3Itc2NoZW1lOiBsaWdodCkiIHNyY3NldD0iaHR0cHM6Ly9n\naXRodWIuY29tL3B5dG9yY2gvcHl0b3JjaC9yYXcvbWFpbi9kb2NzL3NvdXJj\nZS9fc3RhdGljL2ltZy9weXRvcmNoLWxvZ28tZGFyay5wbmciIC8+CiAgPGlt\nZyBzcmM9Imh0dHBzOi8vZ2l0aHViLmNvbS9weXRvcmNoL3B5dG9yY2gvcmF3\nL21haW4vZG9jcy9zb3VyY2UvX3N0YXRpYy9pbWcvcHl0b3JjaC1sb2dvLWRh\ncmsucG5nIiBhbHQ9IlB5VG9yY2ggbG9nbyIgLz4KPC9waWN0dXJlPgoKLS0t\nLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0t\nLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KClB5VG9yY2ggaXMg\nYSBQeXRob24gcGFja2FnZSB0aGF0IHByb3ZpZGVzIHR3byBoaWdoLWxldmVs\nIGZlYXR1cmVzOgotIFRlbnNvciBjb21wdXRhdGlvbiAobGlrZSBOdW1QeSkg\nd2l0aCBzdHJvbmcgR1BVIGFjY2VsZXJhdGlvbgotIERlZXAgbmV1cmFsIG5l\ndHdvcmtzIGJ1aWx0IG9uIGEgdGFwZS1iYXNlZCBhdXRvZ3JhZCBzeXN0ZW0K\nCllvdSBjYW4gcmV1c2UgeW91ciBmYXZvcml0ZSBQeXRob24gcGFja2FnZXMg\nc3VjaCBhcyBOdW1QeSwgU2NpUHksIGFuZCBDeXRob24gdG8gZXh0ZW5kIFB5\nVG9yY2ggd2hlbiBuZWVkZWQuCgpPdXIgdHJ1bmsgaGVhbHRoIChDb250aW51\nb3VzIEludGVncmF0aW9uIHNpZ25hbHMpIGNhbiBiZSBmb3VuZCBhdCBbaHVk\nLnB5dG9yY2gub3JnXShodHRwczovL2h1ZC5weXRvcmNoLm9yZy9jaS9weXRv\ncmNoL3B5dG9yY2gvbWFpbikuCgo8IS0tIHRvYyAtLT4KCi0gW01vcmUgQWJv\ndXQgUHlUb3JjaA==\n",
+ "encoding": "base64",
+ "_links": {
+  "self": "https://api.github.com/repos/pytorch/pytorch/contents/README.md?ref=main",
+  "git": "https://api.github.com/repos/pytorch/pytorch/git/blobs/d32cd08ebce8a35e0b2e0436c0b60deb7870e470",
+  "html": "https://github.com/pytorch/pytorch/blob/main/README.md"
+ }
+}

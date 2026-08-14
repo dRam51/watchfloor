@@ -197,6 +197,17 @@ describe('extractReadmeFirstParagraph — against real README content', () => {
       'the honest limit of the heuristic. Sponsor blurbs are skipped only because they are wholly inside <a> elements; the answer is the first real prose sentence, which is not a description of the project. That is what the README says first, so that is what is reported.',
     ],
     ['dify', 'the one capture whose first paragraph exceeds the 300-character cap.'],
+    // The two below were added AFTER the first live run against the real API.
+    // Neither shape appeared in the ten fixtures captured up front, and both
+    // produced a confidently wrong answer rather than an error.
+    [
+      'whisper',
+      'four [[Label]](url) nav links — a nested-bracket label the inline-link rule did not recognise, so only the bare URL was stripped and "[[Blog]]( [[Paper]](" came back as prose.',
+    ],
+    [
+      'pytorch',
+      'a bullet list directly under the opening sentence with NO blank line between them: blank-line splitting alone hands back the sentence and both bullets as one paragraph.',
+    ],
   ];
 
   for (const [name, why] of cases) {

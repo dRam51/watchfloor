@@ -121,6 +121,30 @@
     "real_size_bytes": 14606
    },
    "note": "The only capture out of 16 whose first paragraph exceeds the 300-character excerpt cap (318 chars) -- kept precisely because it is the one that proves the cap bites on real data."
+  },
+  "whisper.json": {
+   "repo": "openai/whisper",
+   "url": "https://api.github.com/repos/openai/whisper/readme",
+   "readme_path": "README.md",
+   "first_paragraph": "Whisper is a general-purpose speech recognition model. It is trained on a large dataset of diverse audio and is also a multitasking model that can perform multilingual speech recognition, speech translation, and language identification.",
+   "content_truncated": {
+    "kept_chars": 1000,
+    "real_chars": 8243,
+    "real_size_bytes": 8246
+   },
+   "note": "Added AFTER the first live run: this README broke the extractor on data no fixture covered. openai/whisper opens with four [[Label]](url) nav links -- a nested-bracket label the inline-link pattern did not recognise, so only the bare URL was removed and \"[[Blog]]( [[Paper]](\" was returned as prose."
+  },
+  "pytorch.json": {
+   "repo": "pytorch/pytorch",
+   "url": "https://api.github.com/repos/pytorch/pytorch/readme",
+   "readme_path": "README.md",
+   "first_paragraph": "PyTorch is a Python package that provides two high-level features:",
+   "content_truncated": {
+    "kept_chars": 1000,
+    "real_chars": 29972,
+    "real_size_bytes": 29981
+   },
+   "note": "Added AFTER the first live run: this README broke the extractor on data no fixture covered. pytorch/pytorch puts a bullet list directly under its opening sentence with NO blank line, so blank-line splitting alone returned the sentence and both bullets as one paragraph."
   }
  }
 }

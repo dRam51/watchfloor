@@ -189,6 +189,17 @@ const SEGMENT_TAG =
 const ANY_TAG = /<[^>]*>/g;
 
 /**
+ * A Markdown link label, allowing ONE level of nested square brackets.
+ *
+ * `[[Blog]](https://…)` is a common GitHub idiom (openai/whisper opens with
+ * four of them). A flat `[^\]]*` label cannot match it at all, so the link
+ * survived intact and only its bare URL was stripped — leaving `[[Blog]](` to
+ * be scored as prose. Kept as a source fragment rather than a RegExp because
+ * two patterns below embed it.
+ */
+const LINK_LABEL = '((?:[^[\\]]|\\[[^[\\]]{0,100}\\]){0,300})';
+
+/**
  * Block openings that are structurally not a paragraph. Each is matched against
  * the block's FIRST line.
  */
@@ -217,6 +228,30 @@ const UNDERLINE = /^ {0,3}(["'+*#=^~-])\1{2,} *$/;
 
 /** A GitHub-flavoured table's delimiter row. */
 const TABLE_DELIMITER = /^ {0,3}\|?[ :|-]+\|[ :|-]*$/;
+
+/**
+ * Constructs that END a paragraph when they appear on a later line of the same
+ * blank-line-separated block.
+ *
+ * These are exactly CommonMark's paragraph-interrupting constructs, and the
+ * list is short on purpose. `pytorch/pytorch` puts its bullet list directly
+ * under its opening sentence with no blank line between them, so a block is not
+ * reliably a paragraph — it is a paragraph followed by whatever interrupted it,
+ * and returning all of it yields "PyTorch is a Python package that provides two
+ * high-level features: - Tensor computation (like NumPy) with strong GPU
+ * acceleration - Deep neural networks…".
+ *
+ * Indented lines are deliberately NOT on this list even though an indented
+ * block *opens* as code: continuation lines inside real HTML banners are
+ * routinely tab-indented (`sindresorhus/awesome`), and treating one as a
+ * terminator would truncate the block to its opening `<p>` tag.
+ */
+const PARAGRAPH_INTERRUPTERS: readonly RegExp[] = [
+  /^ {0,3}#{1,6}(\s|$)/,
+  /^ {0,3}([-*+]|\d{1,9}[.)])(\s|$)/,
+  /^ {0,3}>/,
+  THEMATIC_BREAK,
+];
 
 const ENTITIES: ReadonlyArray<readonly [string, string]> = [
   ['&nbsp;', ' '],
@@ -289,6 +324,15 @@ function structuralReason(block: string): string | null {
   if (lines.length >= 2 && UNDERLINE.test(lines[1]!)) return 'setext-heading';
   if (lines.length >= 2 && first.includes('|') && TABLE_DELIMITER.test(lines[1]!)) return 'table';
   return null;
+}
+
+/** Cuts a block at the first line that interrupts a paragraph. */
+function toParagraph(block: string): string {
+  const lines = block.split('\n');
+  for (let i = 1; i < lines.length; i += 1) {
+    if (PARAGRAPH_INTERRUPTERS.some((re) => re.test(lines[i]!))) return lines.slice(0, i).join('\n');
+  }
+  return block;
 }
 
 /** One candidate paragraph, plus how much of it came from inside an `<a>`. */
@@ -387,19 +431,25 @@ function analyse(segment: string): Analysed {
   const linkTexts: string[] = [];
 
   const keep = (_all: string, label: string): string => {
-    const collapsed = label.replace(/\s+/g, ' ').trim();
+    let collapsed = label.replace(/\s+/g, ' ').trim();
+    // `[[Blog]](url)` -- see LINK_LABEL. The label really is `[Blog]`, and the
+    // brackets are decoration, not text.
+    if (collapsed.startsWith('[') && collapsed.endsWith(']')) collapsed = collapsed.slice(1, -1).trim();
     linkTexts.push(collapsed);
     return collapsed;
   };
 
   text = text.replace(/!\[[^\]]{0,300}\]\([^)]{0,2000}\)/g, ' '); // markdown image
   text = text.replace(/\|[^|\n]{1,80}\|/g, ' '); // rst substitution
-  text = text.replace(/\[([^\]]{0,300})\]\([^)]{0,2000}\)/g, keep); // inline link
-  text = text.replace(/\[([^\]]{0,300})\]\[[^\]]{0,200}\]/g, keep); // reference link
+  text = text.replace(new RegExp(`\\[${LINK_LABEL}\\]\\([^)]{0,2000}\\)`, 'g'), keep); // inline link
+  text = text.replace(new RegExp(`\\[${LINK_LABEL}\\]\\[[^\\]]{0,200}\\]`, 'g'), keep); // reference link
   text = text.replace(/`([^`\n]{0,300}?)\s<[^>]{0,500}>`__?/g, keep); // rst link
   text = text.replace(/<a\b[^>]*>([\s\S]{0,2000}?)<\/a\s*>/gi, keep); // html anchor
   text = text.replace(/<https?:\/\/[^>\s]{0,2000}>/g, ' '); // autolink
-  text = text.replace(/(?<!\w)https?:\/\/\S+/g, ' '); // bare url
+  // Excludes `)` from the URL: a greedy \S+ swallows the closing paren of a
+  // link whose label this pass did not recognise, which is exactly how
+  // openai/whisper produced `[[Blog]](` as prose.
+  text = text.replace(/(?<!\w)https?:\/\/[^\s<>()[\]]+/g, ' '); // bare url
   text = text.replace(ANY_TAG, ' '); // any tag left over
 
   for (const [entity, char] of ENTITIES) text = text.split(entity).join(char);
@@ -440,11 +490,13 @@ function asProse(segment: Segment): string | null {
  * §4's "README first paragraph": the first block of a README that a human would
  * read as a sentence about the project.
  *
- * **The literal first line is almost never the answer.** Of sixteen real
- * READMEs captured live for this task, the first line was a usable paragraph in
- * one. The rest opened with an ATX title, a centred logo, a `<picture>` element,
- * an HTML comment, a row of shields.io badges, an RST directive block, or a
- * `> [!IMPORTANT]` callout.
+ * **The literal first line is never the answer.** Measured, not assumed: across
+ * the eighteen real READMEs captured live for this task it was the answer
+ * ZERO times. They open with an ATX title (`# Whisper`), a centred `<div>` or
+ * `<picture>`, an HTML comment, a raw `![cover](…)` image, an `<a name>`
+ * anchor, or an RST mode line. The one that does open with a sentence
+ * (`octocat/Hello-World`'s `Hello World!`) is correctly reported as having no
+ * paragraph at all.
  *
  * So a paragraph here is defined by exclusion, in this order:
  *
@@ -452,9 +504,12 @@ function asProse(segment: Segment): string | null {
  *  2. Blocks opening as a heading (ATX, setext, or `<h1>`–`<h6>`), list,
  *     blockquote, table, thematic break, indented code, link-reference
  *     definition, or RST directive are skipped whole.
- *  3. What is left is segmented at HTML block boundaries, because real banners
+ *  3. A surviving block is cut at the first line that *interrupts* a paragraph
+ *     — a list, heading, blockquote or thematic break with no blank line before
+ *     it. See {@link PARAGRAPH_INTERRUPTERS}.
+ *  4. What is left is segmented at HTML block boundaries, because real banners
  *     put a whole header inside one `<div>` with no blank lines.
- *  4. A segment is prose if, once images/badges/tags/emphasis are stripped, it
+ *  5. A segment is prose if, once images/badges/tags/emphasis are stripped, it
  *     has at least {@link MIN_PROSE_WORDS} words and {@link MIN_PROSE_CHARS}
  *     characters and is not mostly link label.
  *
@@ -479,7 +534,7 @@ export function extractReadmeFirstParagraph(readme: string): string | null {
   for (let i = 0; i < limit; i += 1) {
     const block = blocks[i]!;
     if (structuralReason(block) !== null) continue;
-    for (const segment of toSegments(block)) {
+    for (const segment of toSegments(toParagraph(block))) {
       if (segment.text.trim() === '') continue;
       const prose = asProse(segment);
       if (prose === null) continue;

@@ -1,0 +1,18 @@
+{
+ "name": "README.md",
+ "path": "README.md",
+ "sha": "196b48f62d3b6f0b77bac2b7dbc2df5e4cfb070b",
+ "size": 8246,
+ "url": "https://api.github.com/repos/openai/whisper/contents/README.md?ref=main",
+ "html_url": "https://github.com/openai/whisper/blob/main/README.md",
+ "git_url": "https://api.github.com/repos/openai/whisper/git/blobs/196b48f62d3b6f0b77bac2b7dbc2df5e4cfb070b",
+ "download_url": "https://raw.githubusercontent.com/openai/whisper/main/README.md",
+ "type": "file",
+ "content": "IyBXaGlzcGVyCgpbW0Jsb2ddXShodHRwczovL29wZW5haS5jb20vYmxvZy93\naGlzcGVyKQpbW1BhcGVyXV0oaHR0cHM6Ly9hcnhpdi5vcmcvYWJzLzIyMTIu\nMDQzNTYpCltbTW9kZWwgY2FyZF1dKGh0dHBzOi8vZ2l0aHViLmNvbS9vcGVu\nYWkvd2hpc3Blci9ibG9iL21haW4vbW9kZWwtY2FyZC5tZCkKW1tDb2xhYiBl\neGFtcGxlXV0oaHR0cHM6Ly9jb2xhYi5yZXNlYXJjaC5nb29nbGUuY29tL2dp\ndGh1Yi9vcGVuYWkvd2hpc3Blci9ibG9iL21hc3Rlci9ub3RlYm9va3MvTGli\ncmlTcGVlY2guaXB5bmIpCgpXaGlzcGVyIGlzIGEgZ2VuZXJhbC1wdXJwb3Nl\nIHNwZWVjaCByZWNvZ25pdGlvbiBtb2RlbC4gSXQgaXMgdHJhaW5lZCBvbiBh\nIGxhcmdlIGRhdGFzZXQgb2YgZGl2ZXJzZSBhdWRpbyBhbmQgaXMgYWxzbyBh\nIG11bHRpdGFza2luZyBtb2RlbCB0aGF0IGNhbiBwZXJmb3JtIG11bHRpbGlu\nZ3VhbCBzcGVlY2ggcmVjb2duaXRpb24sIHNwZWVjaCB0cmFuc2xhdGlvbiwg\nYW5kIGxhbmd1YWdlIGlkZW50aWZpY2F0aW9uLgoKCiMjIEFwcHJvYWNoCgoh\nW0FwcHJvYWNoXShodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20v\nb3BlbmFpL3doaXNwZXIvbWFpbi9hcHByb2FjaC5wbmcpCgpBIFRyYW5zZm9y\nbWVyIHNlcXVlbmNlLXRvLXNlcXVlbmNlIG1vZGVsIGlzIHRyYWluZWQgb24g\ndmFyaW91cyBzcGVlY2ggcHJvY2Vzc2luZyB0YXNrcywgaW5jbHVkaW5nIG11\nbHRpbGluZ3VhbCBzcGVlY2ggcmVjb2duaXRpb24sIHNwZWVjaCB0cmFuc2xh\ndGlvbiwgc3Bva2VuIGxhbmd1YWdlIGlkZW50aWZpY2F0aW9uLCBhbmQgdm9p\nY2UgYWN0aXZpdHkgZGV0ZWN0aW9uLiBUaGVzZSB0YXNrcyBhcmUgam9pbnRs\neSByZXByZXNlbnRlZCBhcyBhIHNlcXVlbmNlIG9mIHRva2VucyB0byBiZSBw\ncmVkaWN0ZWQgYnkgdGhlIGRlY29kZXIsIGFsbG93aW5nIGEgc2luZ2xlIG1v\nZGVsIHRvIHJlcGxhY2UgbWFueSBzdGFnZXMgb2YgYSB0cmFkaXRpb25hbCBz\ncGVlY2gtcHJvYw==\n",
+ "encoding": "base64",
+ "_links": {
+  "self": "https://api.github.com/repos/openai/whisper/contents/README.md?ref=main",
+  "git": "https://api.github.com/repos/openai/whisper/git/blobs/196b48f62d3b6f0b77bac2b7dbc2df5e4cfb070b",
+  "html": "https://github.com/openai/whisper/blob/main/README.md"
+ }
+}
