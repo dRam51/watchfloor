@@ -18,7 +18,11 @@ export function registerHealth(server: FastifyInstance, deps: ServerDeps): void 
       migrations: row.c,
       tz: deps.env.WF_TZ,
       // Non-zero proves config/sources.yaml parsed and validated at boot.
-      sources: deps.sourceCount,
+      // Derived from the validated list rather than a separately-passed
+      // count: M3 gave ServerDeps the full `sources` array (the health and
+      // dashboard routes need each entry's beats and poll_interval), so a
+      // second `sourceCount` field would be a copy of a fact that can drift.
+      sources: deps.sources.length,
       costGates: gateStatus(),
     };
   });

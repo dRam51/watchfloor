@@ -568,9 +568,22 @@ describe('real corpus (data/wf.db)', () => {
     const scratchDir = mkdtempSync(join(tmpdir(), 'wf-feed-corpus-'));
     const scratchPath = join(scratchDir, 'wf-copy.db');
     const sourceDb = join(process.cwd(), 'data', 'wf.db');
-    // Read-only copy via VACUUM INTO, never writing to data/wf.db itself,
-    // and never calling runMigrations against it (constraints).
-    execFileSync('sqlite3', ['-readonly', sourceDb, `VACUUM INTO '${scratchPath}'`]);
+    // Snapshot via VACUUM INTO, which reads the source and writes only the
+    // new file — data/wf.db's contents are never altered, and runMigrations
+    // is never called against it (the constraints this test was written to).
+    //
+    // Deliberately NOT `-readonly`, despite that reading like the safer flag.
+    // The database is in WAL mode, and a WAL-mode database with an
+    // un-checkpointed WAL cannot be opened read-only at all: recovery needs
+    // write access, so sqlite3 fails with "unable to open database file (14)".
+    // A hot WAL is the *normal* state after any `npm run ingest` or
+    // `npm run score`, so `-readonly` made this test pass on a freshly
+    // checkpointed database and fail for anyone who had actually run the app
+    // — an environment dependency the test does not control, which is worse
+    // than the write it was trying to avoid. Verified both directions:
+    // `-readonly` errors with a hot WAL and succeeds after
+    // `PRAGMA wal_checkpoint(TRUNCATE)`.
+    execFileSync('sqlite3', [sourceDb, `VACUUM INTO '${scratchPath}'`]);
 
     const db = openDb(scratchPath);
     open.push(db);
@@ -585,7 +598,19 @@ describe('real corpus (data/wf.db)', () => {
     registerAuth(server, TOKEN);
     registerFeed(server, { db, decayConfig, overridesConfig });
 
-    const now = '2026-08-14T18:00:00.000Z'; // a few hours after the real ingest
+    // Derived from the corpus rather than hardcoded. This was
+    // `'2026-08-14T18:00:00.000Z'` ("a few hours after the real ingest"),
+    // which silently encoded *when the corpus happened to be built*: scores
+    // are read as-of `now`, so rebuilding `data/wf.db` any time after 18:00Z
+    // made every score invisible and the feed correctly returned zero items.
+    // That is a real property of as-of reads, not a bug — but a test that
+    // breaks whenever the corpus is regenerated is testing the clock. Taking
+    // the newest `computed_at` guarantees the stored scores are visible
+    // regardless of when the rebuild ran.
+    const scoredAt = db
+      .prepare('select max(computed_at) as latest from item_scores')
+      .get() as { latest: string | null };
+    const now = scoredAt.latest ?? '2026-08-14T18:00:00.000Z';
 
     return (async () => {
       const start = performance.now();

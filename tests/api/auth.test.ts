@@ -6,6 +6,9 @@ import { openDb, closeDb } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
 import { buildServer } from '../../src/api/server.ts';
 import { loadEnv } from '../../src/config/env.ts';
+import { loadSourcesFile } from '../../src/sources/load.ts';
+import { loadDecayConfig } from '../../src/score/decay.ts';
+import { loadOverridesConfig } from '../../src/score/overrides.ts';
 
 const TOKEN = 'a-real-token-that-is-long-enough';
 
@@ -25,6 +28,22 @@ function migratedDb() {
   return db;
 }
 
+// M3 wiring: ServerDeps gained the full validated `sources` array (the health
+// and dashboard routes need each entry's beats and poll_interval, which a bare
+// count cannot answer) plus the scoring configs the feed route applies on every
+// request. This helper builds a valid ServerDeps for `n` stub sources so the
+// shape lives in one place per file rather than at every call site.
+function testDeps(db: ReturnType<typeof openDb>, n: number) {
+  const all = loadSourcesFile(join(process.cwd(), 'config', 'sources.yaml'));
+  return {
+    db,
+    env,
+    sources: all.slice(0, n),
+    decayConfig: loadDecayConfig(join(process.cwd(), 'config', 'decay.yaml')),
+    overridesConfig: loadOverridesConfig(join(process.cwd(), 'config', 'overrides.yaml')),
+  };
+}
+
 afterEach(() => {
   while (open.length) closeDb(open.pop()!);
 });
@@ -32,7 +51,7 @@ afterEach(() => {
 describe('bearer token auth', () => {
   describe('default protection (the real deliverable)', () => {
     it('protects a brand-new route that nobody added to any allowlist', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       // Registered AFTER buildServer returns, by a hypothetical future task
       // author who did nothing auth-related. If this route is reachable
       // without a token, default-protection is broken.
@@ -58,7 +77,7 @@ describe('bearer token auth', () => {
     it('protects a brand-new route registered before any request has ever been made', async () => {
       // Same as above but proves the hook does not depend on request
       // ordering or lazy initialization triggered by an earlier request.
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.post('/another-new-route', () => ({ created: true }));
 
       const res = await server.inject({ method: 'POST', url: '/another-new-route' });
@@ -69,7 +88,7 @@ describe('bearer token auth', () => {
 
   describe('/health stays open', () => {
     it('serves /health with no Authorization header', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       const res = await server.inject({ method: 'GET', url: '/health' });
       expect(res.statusCode).toBe(200);
       await server.close();
@@ -78,7 +97,7 @@ describe('bearer token auth', () => {
 
   describe('failure indistinguishability', () => {
     it('returns 401 with no token supplied', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({ method: 'GET', url: '/protected-probe' });
       expect(res.statusCode).toBe(401);
@@ -86,7 +105,7 @@ describe('bearer token auth', () => {
     });
 
     it('returns 401 with a wrong token supplied', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -98,7 +117,7 @@ describe('bearer token auth', () => {
     });
 
     it('produces byte-identical responses for missing vs wrong token', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
 
       const missing = await server.inject({ method: 'GET', url: '/protected-probe' });
@@ -120,7 +139,7 @@ describe('bearer token auth', () => {
       // implementation would either 500 here or short-circuit before the
       // constant-time comparison runs, both of which are bugs this test
       // exists to catch.
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -132,7 +151,7 @@ describe('bearer token auth', () => {
     });
 
     it('never includes the configured token anywhere in a 401 response', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -146,7 +165,7 @@ describe('bearer token auth', () => {
 
   describe('accepted request shape', () => {
     it('accepts the standard "Bearer <token>" form', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -158,7 +177,7 @@ describe('bearer token auth', () => {
     });
 
     it('accepts a lowercase "bearer" scheme', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -170,7 +189,7 @@ describe('bearer token auth', () => {
     });
 
     it('accepts a mixed-case "BeArEr" scheme', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -182,7 +201,7 @@ describe('bearer token auth', () => {
     });
 
     it('accepts extra whitespace between scheme and token', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -194,7 +213,7 @@ describe('bearer token auth', () => {
     });
 
     it('rejects a "Basic" scheme even with the right credential value', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -206,7 +225,7 @@ describe('bearer token auth', () => {
     });
 
     it('rejects the bare token with no scheme at all', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -218,7 +237,7 @@ describe('bearer token auth', () => {
     });
 
     it('rejects "Bearer" with no token after it', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -230,7 +249,7 @@ describe('bearer token auth', () => {
     });
 
     it('rejects an empty Authorization header', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',
@@ -244,7 +263,7 @@ describe('bearer token auth', () => {
 
   describe('the token itself is never logged or leaked', () => {
     it('does not echo the token back on a successful authenticated request', async () => {
-      const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+      const server = buildServer(testDeps(migratedDb(), 1));
       server.get('/protected-probe', () => ({ ok: true }));
       const res = await server.inject({
         method: 'GET',

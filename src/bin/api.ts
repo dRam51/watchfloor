@@ -3,6 +3,8 @@ import { loadEnv } from '../config/env.ts';
 import { openDatabase } from '../db/openDatabase.ts';
 import { runMigrations } from '../db/migrate.ts';
 import { loadSourcesFile } from '../sources/load.ts';
+import { loadDecayConfig } from '../score/decay.ts';
+import { loadOverridesConfig } from '../score/overrides.ts';
 import { buildServer } from '../api/server.ts';
 import { closeDb } from '../db/connection.ts';
 
@@ -24,7 +26,14 @@ try {
   // that broke it. Fail here instead, while someone is still watching.
   const sources = loadSourcesFile(join(repoRoot, 'config', 'sources.yaml'));
 
-  const server = buildServer({ db, env, sourceCount: sources.length });
+  // Scoring config is loaded at boot for the same reason as sources.yaml: the
+  // feed route applies decay and hard overrides on every request, so a
+  // malformed decay.yaml or overrides.yaml should stop the process here,
+  // while someone is watching, rather than 500ing on the first page load.
+  const decayConfig = loadDecayConfig(join(repoRoot, 'config', 'decay.yaml'));
+  const overridesConfig = loadOverridesConfig(join(repoRoot, 'config', 'overrides.yaml'));
+
+  const server = buildServer({ db, env, sources, decayConfig, overridesConfig });
   // Bind to loopback only; external reach is via Tailscale (§2).
   await server.listen({ port: env.WF_API_PORT, host: '127.0.0.1' });
   console.log(

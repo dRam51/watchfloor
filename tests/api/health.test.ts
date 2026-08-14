@@ -6,6 +6,8 @@ import { openDb, closeDb } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
 import { buildServer } from '../../src/api/server.ts';
 import { loadEnv } from '../../src/config/env.ts';
+import { loadDecayConfig } from '../../src/score/decay.ts';
+import { loadOverridesConfig } from '../../src/score/overrides.ts';
 import { loadSourcesFile } from '../../src/sources/load.ts';
 
 const open: Array<ReturnType<typeof openDb>> = [];
@@ -24,13 +26,29 @@ function migratedDb() {
   return db;
 }
 
+// M3 wiring: ServerDeps gained the full validated `sources` array (the health
+// and dashboard routes need each entry's beats and poll_interval, which a bare
+// count cannot answer) plus the scoring configs the feed route applies on every
+// request. This helper builds a valid ServerDeps for `n` stub sources so the
+// shape lives in one place per file rather than at every call site.
+function testDeps(db: ReturnType<typeof openDb>, n: number) {
+  const all = loadSourcesFile(join(process.cwd(), 'config', 'sources.yaml'));
+  return {
+    db,
+    env,
+    sources: all.slice(0, n),
+    decayConfig: loadDecayConfig(join(process.cwd(), 'config', 'decay.yaml')),
+    overridesConfig: loadOverridesConfig(join(process.cwd(), 'config', 'overrides.yaml')),
+  };
+}
+
 afterEach(() => {
   while (open.length) closeDb(open.pop()!);
 });
 
 describe('GET /health', () => {
   it('reports ok, the configured timezone, and applied migrations', async () => {
-    const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+    const server = buildServer(testDeps(migratedDb(), 1));
     const res = await server.inject({ method: 'GET', url: '/health' });
 
     expect(res.statusCode).toBe(200);
@@ -49,7 +67,7 @@ describe('GET /health', () => {
     const sourceCount = loadSourcesFile(join(process.cwd(), 'config', 'sources.yaml')).length;
     expect(sourceCount).toBeGreaterThan(0);
 
-    const server = buildServer({ db: migratedDb(), env, sourceCount });
+    const server = buildServer(testDeps(migratedDb(), sourceCount));
     const res = await server.inject({ method: 'GET', url: '/health' });
 
     expect(res.json().sources).toBe(sourceCount);
@@ -57,7 +75,7 @@ describe('GET /health', () => {
   });
 
   it('shows cost-gated features as disabled so an off feature is visibly off', async () => {
-    const server = buildServer({ db: migratedDb(), env, sourceCount: 1 });
+    const server = buildServer(testDeps(migratedDb(), 1));
     const res = await server.inject({ method: 'GET', url: '/health' });
 
     expect(res.json().costGates).toEqual({

@@ -47,3 +47,7 @@ attic/AGENTS.md.corrupt-2026-08-14
 # Each non-matching file put there needs its own line here, or it stays visible
 # in `git status` as an untracked file forever.
 attic/overrides.ts.stray-2026-08-14
+
+# A sed backup left by a mutation-testing step during M3 task 5. Preserved
+# (never delete) but kept out of git, like the other attic strays above.
+attic/sources.ts.bak2-mutation-test-2026-08-14
