@@ -125,11 +125,11 @@ sources:
   # ENABLED — the plan's verified URL (googleprojectzero.blogspot.com, which needed
   # ?max-results=25 to stay under ~13 MB) now permanently 302-redirects to a new site,
   # https://projectzero.google/feed.xml (Blogger has been retired in favor of a static
-  # Jekyll site). The new feed.xml is a complete, ever-growing history dump with NO
-  # pagination/bounding mechanism of any kind — verified live that ?max-results=25,
-  # ?start-index=N, and &alt=rss are all inert on it (Jekyll serves one static file
-  # regardless of query string), and no alternate bounded path exists
-  # (/feeds/posts/default, /rss.xml, /atom.xml, /feed.json, /sitemap.xml all 404).
+  # Jekyll site). The new feed.xml has NO pagination/bounding mechanism of any kind —
+  # verified live that ?max-results=25, ?start-index=N, and &alt=rss are all inert on it
+  # (Jekyll serves one static file regardless of query string), and no alternate bounded
+  # path exists (/feeds/posts/default, /rss.xml, /atom.xml, /feed.json, /sitemap.xml all
+  # 404).
   #
   # src/fetch/http.ts's politeFetch now carries a per-source byte-ceiling override
   # (MAX_BYTES_OVERRIDES, keyed by this url's exact string) rather than a bounded url,
@@ -138,8 +138,18 @@ sources:
   # byte count suggests: this feed genuinely honors conditional GET (live-verified: a
   # real 304, 0 bytes downloaded), and src/adapters/rss.ts already sends state's own
   # etag/lastModified on every poll — the full ~12.6 MB body is only ever paid on a
-  # cold start or a poll where the feed's content genuinely changed, not every 12h. See
-  # MAX_BYTES_OVERRIDES's own doc comment for the full investigation and byte figures.
+  # cold start or a poll where the feed's content genuinely changed, not every 12h.
+  #
+  # CORRECTED 2026-08-14: an earlier version of this comment called the feed "a complete,
+  # ever-growing history dump". It is not. Live measurement: exactly 10 <entry> elements,
+  # spanning 2025-12-16 to 2026-05-13 — a ROLLING WINDOW of roughly five months, not the
+  # ~12-year archive Project Zero has actually published. The 13 MB is ~1.3 MB per post,
+  # and one single line of it is 3,586,934 bytes: an embedded data-URI image. So the
+  # ceiling's real risk is variance in a single post's size, not accumulation, and a
+  # rolling window also means posts published beyond the newest 10 fall off with no
+  # back-fill path. Neither matters at ~2 posts/month against a 12h poll, but both are
+  # different risks from the one originally written down here. Full figures and reasoning
+  # in MAX_BYTES_OVERRIDES's own doc comment.
   - id: project-zero
     name: Google Project Zero
     type: rss

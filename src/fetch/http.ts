@@ -87,13 +87,43 @@ const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
  *     /rss.xml, /atom.xml, /feed.json, and /sitemap.xml all 404; the
  *     homepage's own `<link rel=alternate>` tag points at this same
  *     feed.xml, not at anything smaller
- *   - the feed is a complete, ever-growing history dump by design, not a
- *     paginated "recent posts" feed with a bug
+ *   - no bounding param works, so the size is simply what it is
  * 20 MiB gives >7.7 MiB of headroom over the observed 13,212,453 bytes
- * (~12.6 MiB) -- room for years of future posts at this blog's historical
- * growth rate (~1.1 MB/year averaged over its ~12-year archive) -- while
- * still firmly rejecting a truly pathological response, the same spirit as
- * DEFAULT_MAX_BYTES's own headroom above.
+ * (~12.6 MiB) while still firmly rejecting a truly pathological response,
+ * the same spirit as DEFAULT_MAX_BYTES's own headroom above.
+ *
+ * ## Corrected 2026-08-14: this is NOT an ever-growing archive
+ *
+ * An earlier version of this comment (and config/sources.yaml's) called the
+ * feed "a complete, ever-growing history dump by design" and sized the
+ * headroom against a supposed ~1.1 MB/year growth rate over a ~12-year
+ * archive. **Both claims are wrong**, and the risk model that followed from
+ * them was wrong too. Measured live 2026-08-14:
+ *
+ *   - the feed carries **exactly 10 `<entry>` elements**, spanning
+ *     2025-12-16 to 2026-05-13 -- roughly five months, not twelve years.
+ *     Project Zero has published since 2014; almost none of that is here.
+ *     It is a **rolling window**, so it does not grow monotonically and the
+ *     ceiling will most likely never be reached by accumulation.
+ *   - the 13 MB therefore is not a long archive but ~1.3 MB per post. One
+ *     single line in the response is **3,586,934 bytes** -- an embedded blob
+ *     (a data-URI image) inside one entry.
+ *
+ * So the real risk is **variance in post size, not monotonic growth**. A
+ * single future post carrying several multi-MB embedded images could push
+ * one poll past 20 MiB with no prior trend to warn of it, while a decade of
+ * ordinary posts never would. Do not "size for growth" here; if this ceiling
+ * ever binds, inspect what one entry contains rather than assuming the
+ * archive got longer.
+ *
+ * A second consequence of the rolling window, unrelated to bytes: **posts
+ * are dropped off the end**. Anything published after the 10 currently in
+ * the feed pushes the oldest out, so a poll that misses more than 10 posts
+ * loses the excess permanently -- there is no back-fill path, since no
+ * bounded/paged url exists (above). At ~2 posts/month against a 12h
+ * poll_interval that is unreachable in normal operation, but a source stuck
+ * in prolonged backoff is exactly the case M1 widened nvd-cve's window for.
+ * Worth knowing; not worth engineering around at this cadence.
  *
  * This 20 MiB cost is also far rarer in practice than it first looks.
  * `rss.ts` already threads `state.etag`/`state.lastModified` into every
@@ -104,10 +134,16 @@ const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
  * body is only ever paid on a cold start (no prior state) or a poll where
  * the feed's content genuinely changed since last time -- an UNCHANGED poll,
  * the common case at this feed's real publishing cadence, costs a 304, not
- * a repeat of the full 20 MiB ceiling every 12h. The archive still only
- * grows and this ceiling will still need raising eventually, but "eventually"
- * is measured in however often Project Zero actually publishes, not every
- * poll -- worth not overstating.
+ * a repeat of the full 20 MiB ceiling every 12h. Re-verified 2026-08-14
+ * against Last-Modified as well as ETag: still a real 304, 0 bytes.
+ *
+ * On the wire a cold fetch is smaller than 12.6 MB but not by much: the
+ * origin does serve gzip, at **9,589,327 bytes** -- only ~27% off, which is
+ * itself evidence for the embedded-blob finding above, since already-
+ * compressed image data does not compress again. Note the ceiling here
+ * counts DECOMPRESSED bytes, because fetch decompresses transparently
+ * before the stream this reads, so 20 MiB is measured against 12.6 MB and
+ * not against 9.1 MiB.
  */
 export const MAX_BYTES_OVERRIDES: Readonly<Record<string, number>> = {
   'https://projectzero.google/feed.xml': 20 * 1024 * 1024,
