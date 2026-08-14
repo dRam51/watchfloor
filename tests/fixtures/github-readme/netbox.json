@@ -1,0 +1,18 @@
+{
+ "name": "README.md",
+ "path": "README.md",
+ "sha": "bd4ac992938bd385abf2c88a08886d55ac2bac56",
+ "size": 9718,
+ "url": "https://api.github.com/repos/netbox-community/netbox/contents/README.md?ref=main",
+ "html_url": "https://github.com/netbox-community/netbox/blob/main/README.md",
+ "git_url": "https://api.github.com/repos/netbox-community/netbox/git/blobs/bd4ac992938bd385abf2c88a08886d55ac2bac56",
+ "download_url": "https://raw.githubusercontent.com/netbox-community/netbox/main/README.md",
+ "type": "file",
+ "content": "PGRpdiBhbGlnbj0iY2VudGVyIj4KICA8aW1nIHNyYz0iaHR0cHM6Ly9yYXcu\nZ2l0aHVidXNlcmNvbnRlbnQuY29tL25ldGJveC1jb21tdW5pdHkvbmV0Ym94\nL21haW4vZG9jcy9uZXRib3hfbG9nb19saWdodC5zdmciIHdpZHRoPSI0MDAi\nIGFsdD0iTmV0Qm94IGxvZ28iIC8+CiAgPHA+PHN0cm9uZz5UaGUgY29ybmVy\nc3RvbmUgb2YgZXZlcnkgYXV0b21hdGVkIG5ldHdvcms8L3N0cm9uZz48L3A+\nCiAgPGEgaHJlZj0iaHR0cHM6Ly9naXRodWIuY29tL25ldGJveC1jb21tdW5p\ndHkvbmV0Ym94L3JlbGVhc2VzIj48aW1nIHNyYz0iaHR0cHM6Ly9pbWcuc2hp\nZWxkcy5pby9naXRodWIvdi9yZWxlYXNlL25ldGJveC1jb21tdW5pdHkvbmV0\nYm94IiBhbHQ9IkxhdGVzdCByZWxlYXNlIiAvPjwvYT4KICA8YSBocmVmPSJo\ndHRwczovL2dpdGh1Yi5jb20vbmV0Ym94LWNvbW11bml0eS9uZXRib3gvYmxv\nYi9tYWluL0xJQ0VOU0UudHh0Ij48aW1nIHNyYz0iaHR0cHM6Ly9pbWcuc2hp\nZWxkcy5pby9iYWRnZS9saWNlbnNlLUFwYWNoZV8yLjAtYmx1ZS5zdmciIGFs\ndD0iTGljZW5zZSIgLz48L2E+CiAgPGEgaHJlZj0iaHR0cHM6Ly9naXRodWIu\nY29tL25ldGJveC1jb21tdW5pdHkvbmV0Ym94L2dyYXBocy9jb250cmlidXRv\ncnMiPjxpbWcgc3JjPSJodHRwczovL2ltZy5zaGllbGRzLmlvL2dpdGh1Yi9j\nb250cmlidXRvcnMvbmV0Ym94LWNvbW11bg==\n",
+ "encoding": "base64",
+ "_links": {
+  "self": "https://api.github.com/repos/netbox-community/netbox/contents/README.md?ref=main",
+  "git": "https://api.github.com/repos/netbox-community/netbox/git/blobs/bd4ac992938bd385abf2c88a08886d55ac2bac56",
+  "html": "https://github.com/netbox-community/netbox/blob/main/README.md"
+ }
+}

@@ -1,0 +1,126 @@
+{
+ "_note": "Live captures of GET /repos/{owner}/{repo}/readme from api.github.com, made UNAUTHENTICATED on 2026-08-14 for tests/enrich/repo.test.ts. Bodies are served verbatim by a local http server in the test; where noted, the base64 `content` was re-encoded from a TRUNCATED PREFIX of the real file so this public repo does not mirror whole third-party documents. Every truncation was verified to leave the extracted first paragraph byte-identical to the full-file result.",
+ "_captured_at": "2026-08-14",
+ "_auth": "unauthenticated",
+ "files": {
+  "mcp-servers.json": {
+   "repo": "modelcontextprotocol/servers",
+   "url": "https://api.github.com/repos/modelcontextprotocol/servers/readme",
+   "first_paragraph": "This repository is a collection of reference implementations for the Model Context Protocol (MCP), as well as references to community-built servers and additional resources.",
+   "readme_path": "README.md",
+   "content_truncated": {
+    "kept_chars": 700,
+    "real_chars": 8576,
+    "real_size_bytes": 8609
+   }
+  },
+  "langchain.json": {
+   "repo": "langchain-ai/langchain",
+   "url": "https://api.github.com/repos/langchain-ai/langchain/readme",
+   "first_paragraph": "LangChain is a framework for building agents and LLM-powered applications. It helps you chain together interoperable components and third-party integrations to simplify AI application development \u2014 all while future-proofing decisions as the underlying technology evolves.",
+   "readme_path": "README.md",
+   "content_truncated": {
+    "kept_chars": 1900,
+    "real_chars": 5888,
+    "real_size_bytes": 5932
+   }
+  },
+  "llama-cpp.json": {
+   "repo": "ggml-org/llama.cpp",
+   "url": "https://api.github.com/repos/ggml-org/llama.cpp/readme",
+   "first_paragraph": "LLM inference in C/C++",
+   "readme_path": "README.md",
+   "content_truncated": {
+    "kept_chars": 600,
+    "real_chars": 7049,
+    "real_size_bytes": 7049
+   }
+  },
+  "scikit-learn-rst.json": {
+   "repo": "scikit-learn/scikit-learn",
+   "url": "https://api.github.com/repos/scikit-learn/scikit-learn/readme",
+   "redacted": "a third-party public codecov badge token in the source README",
+   "first_paragraph": "scikit-learn is a Python module for machine learning built on top of SciPy and is distributed under the 3-Clause BSD license.",
+   "readme_path": "README.rst",
+   "content_truncated": {
+    "kept_chars": 2800,
+    "real_chars": 7674,
+    "real_size_bytes": 7676
+   }
+  },
+  "netbox.json": {
+   "repo": "netbox-community/netbox",
+   "url": "https://api.github.com/repos/netbox-community/netbox/readme",
+   "first_paragraph": "The cornerstone of every automated network",
+   "readme_path": "README.md",
+   "content_truncated": {
+    "kept_chars": 700,
+    "real_chars": 9708,
+    "real_size_bytes": 9718
+   }
+  },
+  "awesome.json": {
+   "repo": "sindresorhus/awesome",
+   "url": "https://api.github.com/repos/sindresorhus/awesome/readme",
+   "first_paragraph": "Just type awesome.re to go here. Check out my apps and follow me on Twitter.",
+   "readme_path": "readme.md",
+   "content_truncated": {
+    "kept_chars": 2700,
+    "real_chars": 79604,
+    "real_size_bytes": 79614
+   }
+  },
+  "garak.json": {
+   "repo": "NVIDIA/garak",
+   "url": "https://api.github.com/repos/NVIDIA/garak/readme",
+   "first_paragraph": "Generative AI Red-teaming & Assessment Kit",
+   "readme_path": "README.md",
+   "content_truncated": {
+    "kept_chars": 600,
+    "real_chars": 20097,
+    "real_size_bytes": 20098
+   }
+  },
+  "llama-index.json": {
+   "repo": "run-llama/llama_index",
+   "url": "https://api.github.com/repos/run-llama/llama_index/readme",
+   "first_paragraph": "LlamaIndex OSS (by LlamaIndex) is an open-source framework to build agentic applications. Parse is our enterprise platform for agentic OCR, parsing, extraction, indexing and more. You can use LlamaParse with this framework or on its own; see LlamaParse below for signup and product links.",
+   "readme_path": "README.md",
+   "content_truncated": {
+    "kept_chars": 4900,
+    "real_chars": 13325,
+    "real_size_bytes": 13365
+   }
+  },
+  "hello-world-no-extension.json": {
+   "repo": "octocat/Hello-World",
+   "url": "https://api.github.com/repos/octocat/Hello-World/readme",
+   "first_paragraph": null,
+   "readme_path": "README"
+  },
+  "git-consortium.json": {
+   "repo": "octocat/git-consortium",
+   "url": "https://api.github.com/repos/octocat/git-consortium/readme",
+   "first_paragraph": "This repository is meant to provide an example for editing lists in Markdown. For some more information on Markdown, check out our guide, \"Markdown Basics\". Thanks! :sparkling_heart:",
+   "readme_path": "README.md"
+  },
+  "no-readme-404.json": {
+   "repo": "octocat/octocat.github.io",
+   "url": "https://api.github.com/repos/octocat/octocat.github.io/readme",
+   "http_status": 404,
+   "note": "A REAL 404 from a repo that REALLY EXISTS: octocat/octocat.github.io is id 17881631, 1145 stars, not a fork, not archived (verified with a separate GET /repos call the same day) and simply has no README. This is what \"no README\" looks like on the wire."
+  },
+  "dify.json": {
+   "repo": "langgenius/dify",
+   "url": "https://api.github.com/repos/langgenius/dify/readme",
+   "readme_path": "README.md",
+   "first_paragraph": "Dify is an open-source LLM app development platform. Its intuitive interface combines AI workflow, RAG pipeline, agent capabilities, model management, observability features (including Opik, Langfuse, and Arize Phoenix) and more, letting you quickly go from prototype to production. Here's a list of the core features:",
+   "content_truncated": {
+    "kept_chars": 6200,
+    "real_chars": 14477,
+    "real_size_bytes": 14606
+   },
+   "note": "The only capture out of 16 whose first paragraph exceeds the 300-character excerpt cap (318 chars) -- kept precisely because it is the one that proves the cap bites on real data."
+  }
+ }
+}

@@ -1,0 +1,18 @@
+{
+ "name": "README.md",
+ "path": "README.md",
+ "sha": "1b341e7fbc6ee203dc8b5d2333050d0ae8633250",
+ "size": 7049,
+ "url": "https://api.github.com/repos/ggml-org/llama.cpp/contents/README.md?ref=master",
+ "html_url": "https://github.com/ggml-org/llama.cpp/blob/master/README.md",
+ "git_url": "https://api.github.com/repos/ggml-org/llama.cpp/git/blobs/1b341e7fbc6ee203dc8b5d2333050d0ae8633250",
+ "download_url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/README.md",
+ "type": "file",
+ "content": "IyBsbGFtYS5jcHAKCiFbbGxhbWFdKGh0dHBzOi8vcmF3LmdpdGh1YnVzZXJj\nb250ZW50LmNvbS9nZ21sLW9yZy9sbGFtYS5icmFuZC9yZWZzL2hlYWRzL21h\nc3Rlci9jb3Zlci9sbGFtYS1jcHAvY292ZXItbGxhbWEtY3BwLWRhcmsuc3Zn\nKQoKPGRpdiBhbGlnbj0iY2VudGVyIj4KCjxiPkxMTSBpbmZlcmVuY2UgaW4g\nQy9DKys8L2I+CgpbIVtMaWNlbnNlOiBNSVRdKGh0dHBzOi8vaW1nLnNoaWVs\nZHMuaW8vYmFkZ2UvbGljZW5zZS1NSVQtYmx1ZS5zdmcpXShodHRwczovL29w\nZW5zb3VyY2Uub3JnL2xpY2Vuc2VzL01JVCkKWyFbUmVsZWFzZV0oaHR0cHM6\nLy9pbWcuc2hpZWxkcy5pby9naXRodWIvdi9yZWxlYXNlL2dnbWwtb3JnL2xs\nYW1hLmNwcCldKGh0dHBzOi8vZ2l0aHViLmNvbS9nZ21sLW9yZy9sbGFtYS5j\ncHAvcmVsZWFzZXMpClshW1NlcnZlcl0oaHR0cHM6Ly9naXRodWIuY29tL2dn\nbWwtb3JnL2xsYW1hLmNwcC9hY3Rpb25zL3dvcmtmbG93cy9zZXJ2ZXIueW1s\nL2JhZGdlLnN2ZyldKGh0dHBzOi8vZ2l0aHViLmNvbS9nZ21sLW9yZy9sbGFt\nYS5jcHAvYWN0aW9ucy93b3JrZmxvd3Mvc2VydmVyLnltbCkKWyFbRG9ja2Vy\nXShodHRwczovL2dpdGh1\n",
+ "encoding": "base64",
+ "_links": {
+  "self": "https://api.github.com/repos/ggml-org/llama.cpp/contents/README.md?ref=master",
+  "git": "https://api.github.com/repos/ggml-org/llama.cpp/git/blobs/1b341e7fbc6ee203dc8b5d2333050d0ae8633250",
+  "html": "https://github.com/ggml-org/llama.cpp/blob/master/README.md"
+ }
+}

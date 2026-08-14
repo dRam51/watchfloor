@@ -1,0 +1,18 @@
+{
+ "name": "README.md",
+ "path": "README.md",
+ "sha": "e74e6e16cb4f56afdb107d07c7c3a02b7378e171",
+ "size": 20098,
+ "url": "https://api.github.com/repos/NVIDIA/garak/contents/README.md?ref=main",
+ "html_url": "https://github.com/NVIDIA/garak/blob/main/README.md",
+ "git_url": "https://api.github.com/repos/NVIDIA/garak/git/blobs/e74e6e16cb4f56afdb107d07c7c3a02b7378e171",
+ "download_url": "https://raw.githubusercontent.com/NVIDIA/garak/main/README.md",
+ "type": "file",
+ "content": "IyBnYXJhaywgTExNIHZ1bG5lcmFiaWxpdHkgc2Nhbm5lcgoKKkdlbmVyYXRp\ndmUgQUkgUmVkLXRlYW1pbmcgJiBBc3Nlc3NtZW50IEtpdCoKCmBnYXJha2Ag\nY2hlY2tzIGlmIGFuIExMTSBjYW4gYmUgbWFkZSB0byBmYWlsIGluIGEgd2F5\nIHdlIGRvbid0IHdhbnQuIGBnYXJha2AgcHJvYmVzIGZvciBoYWxsdWNpbmF0\naW9uLCBkYXRhIGxlYWthZ2UsIHByb21wdCBpbmplY3Rpb24sIG1pc2luZm9y\nbWF0aW9uLCB0b3hpY2l0eSBnZW5lcmF0aW9uLCBqYWlsYnJlYWtzLCBhbmQg\nbWFueSBvdGhlciB3ZWFrbmVzc2VzLiBJZiB5b3Uga25vdyBgbm1hcGAgb3Ig\nYG1zZmAgLyBNZXRhc3Bsb2l0IEZyYW1ld29yaywgZ2FyYWsgZG9lcyBzb21l\nd2hhdCBzaW1pbGFyIHRoaW5ncyB0byB0aGVtLCBidXQgZm9yIExMTXMuIAoK\nYGdhcmFrYCBmb2N1c2VzIG9uIHdheXMgb2YgbWFraW5nIGFuIExMTSBvciBk\naWFsb2cgc3lzdGVtIGZhaWwuIEl0IGNvbWJpbmVzIHN0YXRpYywgZHluYW1p\nYywgYW5kIGFkYXB0aXZlIHByb2JlcyB0byBleHBsb3JlIHRoaXMuCgpgZ2Fy\nYWtgJ3MgYSBmcmVlIHRvb2wuIFdlIGxvdmUgZGV2ZWxvcGluZyBpdCBhbmQg\nYXJlIGFsd2F5cyBpbnRl\n",
+ "encoding": "base64",
+ "_links": {
+  "self": "https://api.github.com/repos/NVIDIA/garak/contents/README.md?ref=main",
+  "git": "https://api.github.com/repos/NVIDIA/garak/git/blobs/e74e6e16cb4f56afdb107d07c7c3a02b7378e171",
+  "html": "https://github.com/NVIDIA/garak/blob/main/README.md"
+ }
+}

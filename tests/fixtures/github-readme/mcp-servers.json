@@ -1,0 +1,18 @@
+{
+ "name": "README.md",
+ "path": "README.md",
+ "sha": "fe5351a890ab80f6d49b2b50f1e0732224313b24",
+ "size": 8609,
+ "url": "https://api.github.com/repos/modelcontextprotocol/servers/contents/README.md?ref=main",
+ "html_url": "https://github.com/modelcontextprotocol/servers/blob/main/README.md",
+ "git_url": "https://api.github.com/repos/modelcontextprotocol/servers/git/blobs/fe5351a890ab80f6d49b2b50f1e0732224313b24",
+ "download_url": "https://raw.githubusercontent.com/modelcontextprotocol/servers/main/README.md",
+ "type": "file",
+ "content": "IyBNb2RlbCBDb250ZXh0IFByb3RvY29sIHNlcnZlcnMKClRoaXMgcmVwb3Np\ndG9yeSBpcyBhIGNvbGxlY3Rpb24gb2YgKnJlZmVyZW5jZSBpbXBsZW1lbnRh\ndGlvbnMqIGZvciB0aGUgW01vZGVsIENvbnRleHQgUHJvdG9jb2xdKGh0dHBz\nOi8vbW9kZWxjb250ZXh0cHJvdG9jb2wuaW8vKSAoTUNQKSwgYXMgd2VsbCBh\ncyByZWZlcmVuY2VzIHRvIGNvbW11bml0eS1idWlsdCBzZXJ2ZXJzIGFuZCBh\nZGRpdGlvbmFsIHJlc291cmNlcy4KCj4gWyFJTVBPUlRBTlRdCj4gSWYgeW91\nIGFyZSBsb29raW5nIGZvciBhIGxpc3Qgb2YgTUNQIHNlcnZlcnMsIHlvdSBj\nYW4gYnJvd3NlIHB1Ymxpc2hlZCBzZXJ2ZXJzIG9uIFt0aGUgTUNQIFJlZ2lz\ndHJ5XShodHRwczovL3JlZ2lzdHJ5Lm1vZGVsY29udGV4dHByb3RvY29sLmlv\nLykuIFRoZSByZXBvc2l0b3J5IHNlcnZlZCBieSB0aGlzIFJFQURNRSBpcyBk\nZWRpY2F0ZWQgdG8gaG91c2luZyBqdXN0IHRoZSBzbWFsbCBudW1iZXIgb2Yg\ncmVmZXJlbmNlIHNlcnZlcnMgbWFpbnRhaW5lZCBieSB0aGUgTUNQIHN0ZWVy\naW5nIGdyb3VwLgoKPiBbIVdBUk5JTkddCj4gVGhlIHNlcnZlcnMgaW4gdGhp\ncyByZXBvc2l0b3J5IGFyZSBpbnRlbmRlZCBhcyAqKnJlZmVyZW5jZSBpbXBs\nZW1lbnRhdGlvbnMqKiB0byBkZW1vbnN0cmF0ZSBNQ1AgZmVhdHVyZXMgYW5k\nIFNESyB1c2FnZS4gVGhleSBhcmUgbWVhbg==\n",
+ "encoding": "base64",
+ "_links": {
+  "self": "https://api.github.com/repos/modelcontextprotocol/servers/contents/README.md?ref=main",
+  "git": "https://api.github.com/repos/modelcontextprotocol/servers/git/blobs/fe5351a890ab80f6d49b2b50f1e0732224313b24",
+  "html": "https://github.com/modelcontextprotocol/servers/blob/main/README.md"
+ }
+}

@@ -1,0 +1,18 @@
+{
+ "name": "README.md",
+ "path": "README.md",
+ "sha": "5687f2709fad262d3050e3f69b7e8fff67f7f4e2",
+ "size": 306,
+ "url": "https://api.github.com/repos/octocat/git-consortium/contents/README.md?ref=master",
+ "html_url": "https://github.com/octocat/git-consortium/blob/master/README.md",
+ "git_url": "https://api.github.com/repos/octocat/git-consortium/git/blobs/5687f2709fad262d3050e3f69b7e8fff67f7f4e2",
+ "download_url": "https://raw.githubusercontent.com/octocat/git-consortium/master/README.md",
+ "type": "file",
+ "content": "Z2l0LWNvbnNvcnRpdW0KPT09PT09PT09PT09PT0KClRoaXMgcmVwb3NpdG9y\neSBpcyBtZWFudCB0byBwcm92aWRlIGFuIGV4YW1wbGUgZm9yIGVkaXRpbmcg\nbGlzdHMgaW4gTWFya2Rvd24uIEZvciBzb21lIG1vcmUgaW5mb3JtYXRpb24g\nb24gTWFya2Rvd24sIFtjaGVjayBvdXQgb3VyIGd1aWRlLCAiTWFya2Rvd24g\nQmFzaWNzIl1bTWFya2Rvd25dLiBUaGFua3MhIDpzcGFya2xpbmdfaGVhcnQ6\nCgpbTWFya2Rvd25dOiBodHRwczovL2hlbHAuZ2l0aHViLmNvbS9hcnRpY2xl\ncy9tYXJrZG93bi1iYXNpY3MgIk1hcmtkb3duIEJhc2ljcyIK\n",
+ "encoding": "base64",
+ "_links": {
+  "self": "https://api.github.com/repos/octocat/git-consortium/contents/README.md?ref=master",
+  "git": "https://api.github.com/repos/octocat/git-consortium/git/blobs/5687f2709fad262d3050e3f69b7e8fff67f7f4e2",
+  "html": "https://github.com/octocat/git-consortium/blob/master/README.md"
+ }
+}
