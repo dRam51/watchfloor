@@ -110,6 +110,19 @@
   --motion-fast: 150ms;
   --motion-base: 200ms;
   --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---- alert pulse (M3 task 12, §7.4: "a brief glow-pulse ... one pulse,
+     not a blinking siren"). Deliberately its OWN token rather than reusing
+     --motion-base/--motion-fast: those two govern micro-transitions (150-
+     200ms) between two static UI states (row expand, lane collapse); this
+     is a one-shot attention flash on arrival, which the brief calls
+     "brief" but not "micro" -- ~900ms is long enough to actually be seen
+     against a dense, fast-scrolling stream without lingering. Zeroed below
+     in the SAME reduced-motion query as the other two, so
+     ItemRow.tsx's `prefersReducedMotion()` JS check (belt) and this token
+     (suspenders) both suppress it -- see ItemRow.tsx's own comment on why
+     both exist. ---- */
+  --motion-pulse: 900ms;
 }
 
 /* The default rather than an opt-in: any component that transitions via
@@ -121,5 +134,6 @@
   :root {
     --motion-fast: 0ms;
     --motion-base: 0ms;
+    --motion-pulse: 0ms;
   }
 }

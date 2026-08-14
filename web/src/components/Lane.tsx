@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import type { Beat, FeedItem } from '../api/types.ts';
 import { ItemRow } from './ItemRow.tsx';
+import { HeatStrip } from './HeatStrip.tsx';
 import { prefersReducedMotion } from '../lib/motion.ts';
 import { useItemFeed } from '../hooks/useItemFeed.ts';
 
@@ -241,6 +242,15 @@ export const Lane = forwardRef<LaneHandle, LaneProps>(function Lane(
 
       {!collapsed && (
         <div className="lane__body">
+          {/* M3 task 12, §7.4: "a thin 24h activity histogram at the top
+              of each lane". Rendered unconditionally on `loadState` (not
+              gated on `status === 'ready'` the way `.lane__count` is) --
+              it derives purely from whatever `items` this lane already
+              has (starts `[]` while loading, which reads as "quiet" via
+              HeatStrip's own zero-item handling), so there is nothing to
+              wait on and no extra request that could delay data (§7.4:
+              "nothing visual may block or delay data"). */}
+          <HeatStrip items={items} />
           <EmptyOrErrorStatus loadState={loadState} itemCount={items.length} onRetry={refresh} />
 
           {items.length > 0 && (

@@ -311,6 +311,47 @@ describe('Lane -- dismiss focus handoff stays WITHIN this lane, scoped by the co
   });
 });
 
+describe('Lane -- heat strip (M3 task 12, §7.4: "at the top of each lane")', () => {
+  it('renders the 24-bar heat strip above the item list when expanded', async () => {
+    const item = makeFeedItem({ publishedAt: '2026-08-14T17:30:00.000Z' });
+    const { fn } = fetchRouter([{ match: (url) => url.startsWith('/api/feed'), body: makeFeedResponse({ items: [item] }) }]);
+    vi.stubGlobal('fetch', fn);
+
+    renderLane({ beat: 'cyber' });
+    await flush();
+
+    const body = current!.container.querySelector('.lane__body')!;
+    const strip = body.querySelector('.heat-strip');
+    expect(strip).not.toBeNull();
+    // "At the top" -- the strip is the body's first child, ahead of the list.
+    expect(body.firstElementChild).toBe(strip);
+    expect(strip!.querySelectorAll('.heat-strip__bar')).toHaveLength(24);
+  });
+
+  it('a genuinely empty lane (repos/markets pre-M4) still shows a full, "quiet" heat strip, not a missing one', async () => {
+    const { fn } = fetchRouter([{ match: (url) => url.startsWith('/api/feed'), body: makeFeedResponse({ items: [] }) }]);
+    vi.stubGlobal('fetch', fn);
+
+    renderLane({ beat: 'repos' });
+    await flush();
+
+    const strip = current!.container.querySelector('.heat-strip')!;
+    expect(strip.getAttribute('aria-label')).toBe('No activity in the last 24 hours');
+    expect(strip.querySelectorAll('.heat-strip__bar')).toHaveLength(24);
+  });
+
+  it('the heat strip disappears along with the rest of the body while collapsed', async () => {
+    const item = makeFeedItem();
+    const { fn } = fetchRouter([{ match: (url) => url.startsWith('/api/feed'), body: makeFeedResponse({ items: [item] }) }]);
+    vi.stubGlobal('fetch', fn);
+
+    renderLane({ collapsed: true });
+    await flush();
+
+    expect(current!.container.querySelector('.heat-strip')).toBeNull();
+  });
+});
+
 describe('Lane -- roving tabindex: only the default-entry lane claims row 0 while nothing has real focus', () => {
   it('gives row 0 tabIndex 0 when isDefaultEntry is true and nothing is focused', async () => {
     const a = makeFeedItem({ title: 'Row A' });

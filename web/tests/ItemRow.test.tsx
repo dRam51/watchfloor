@@ -290,6 +290,127 @@ describe('ItemRow -- keyboard focus wiring (M3 task 9)', () => {
   });
 });
 
+describe('ItemRow -- alert pulse fires once on arrival (M3 task 12)', () => {
+  function pinnedUnreadItem(overrides: Partial<Parameters<typeof makeFeedItem>[0]> = {}) {
+    return makeFeedItem({
+      signalScore: 0,
+      override: {
+        signal: { pinned: true, priority: 1, label: 'CISA KEV' },
+        read: { pinned: false, priority: null, label: null },
+      },
+      state: { readAt: null, savedAt: null, dismissedAt: null },
+      ...overrides,
+    });
+  }
+
+  it('a freshly-mounted pinned, unread row gets the pulse class (jsdom has no matchMedia, so prefersReducedMotion() defaults to false)', () => {
+    const item = pinnedUnreadItem();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    const row = current.container.querySelector('li.item-row')!;
+    expect(row.classList.contains('item-row--pulse')).toBe(true);
+    expect(row.classList.contains('item-row--pinned')).toBe(true);
+  });
+
+  it('a pinned but ALREADY-READ row gets neither the pulse nor the persistent accent -- "until read" means both clear', () => {
+    const item = pinnedUnreadItem({ state: { readAt: '2026-08-14T17:00:00.000Z', savedAt: null, dismissedAt: null } });
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    const row = current.container.querySelector('li.item-row')!;
+    expect(row.classList.contains('item-row--pulse')).toBe(false);
+    expect(row.classList.contains('item-row--pinned')).toBe(false);
+    // The PINNED badge itself is a separate, non-animated fact and still
+    // shows -- only the attention-grabbing accent/pulse are read-gated.
+    expect(current.container.textContent).toContain('PINNED');
+  });
+
+  it('an unpinned row never gets the pulse, unread or not', () => {
+    const item = makeFeedItem({ state: { readAt: null, savedAt: null, dismissedAt: null } });
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    expect(current.container.querySelector('li.item-row')!.classList.contains('item-row--pulse')).toBe(false);
+  });
+
+  it('honours prefers-reduced-motion by omitting the pulse class entirely, while the persistent accent still renders', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('reduce'),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const item = pinnedUnreadItem();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    const row = current.container.querySelector('li.item-row')!;
+    expect(row.classList.contains('item-row--pulse')).toBe(false);
+    expect(row.classList.contains('item-row--pinned')).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('re-rendering an already-mounted pinned/unread row (e.g. a save toggle) does not remove or reapply the pulse class -- one DOM mutation, not a replay loop', () => {
+    const item = pinnedUnreadItem();
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    const row = current.container.querySelector('li.item-row')!;
+    expect(row.classList.contains('item-row--pulse')).toBe(true);
+    // Re-render with a new but state-equivalent item object (a fresh
+    // reference from a parent's setState, e.g. `handleToggleSave`'s
+    // `.map()` -- the exact shape useItemFeed.ts produces) -- the pulse
+    // condition (`pinned && !read`) evaluates identically, so the class
+    // STRING must stay identical across the re-render.
+    current.unmount();
+    current = mount(
+      <ItemRow item={{ ...item }} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    expect(current.container.querySelector('li.item-row')!.classList.contains('item-row--pulse')).toBe(true);
+  });
+});
+
+describe('ItemRow -- compact intensity bar (M3 task 12)', () => {
+  it('a pinned row at 0.000 gets a fixed, fully-filled "pinned" intensity indicator, never a score-scaled (and therefore empty) one', () => {
+    const item = makeFeedItem({
+      signalScore: 0,
+      override: {
+        signal: { pinned: true, priority: 1, label: 'CISA KEV' },
+        read: { pinned: false, priority: null, label: null },
+      },
+    });
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    const bar = current.container.querySelector('.item-row__intensity')!;
+    expect(bar.classList.contains('item-row__intensity--pinned')).toBe(true);
+    // No --fill custom property on the pinned variant -- its CSS rule is a
+    // flat, unconditional fill color, not score-scaled.
+    expect((bar as HTMLElement).style.getPropertyValue('--fill')).toBe('');
+  });
+
+  it('an unpinned row scales --fill from its active score (0..1, via scoreIntensity)', () => {
+    const item = makeFeedItem({ signalScore: 2.5, sortProfile: 'signal' });
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    const bar = current.container.querySelector('.item-row__intensity')!;
+    expect(bar.classList.contains('item-row__intensity--pinned')).toBe(false);
+    expect((bar as HTMLElement).style.getPropertyValue('--fill')).toBe('0.5'); // 2.5 / SCORE_INTENSITY_CEILING(5.0)
+  });
+
+  it('an unpinned row at 0.000 (no override involved) renders an empty-but-present bar, not a missing element', () => {
+    const item = makeFeedItem({ signalScore: 0 });
+    current = mount(
+      <ItemRow item={item} dismissing={false} focused={false} tabIndex={-1} onFocusRow={noop} onOpen={noop} onToggleSave={noop} onDismiss={noop} />,
+    );
+    const bar = current.container.querySelector('.item-row__intensity')!;
+    expect(bar).not.toBeNull();
+    expect((bar as HTMLElement).style.getPropertyValue('--fill')).toBe('0');
+  });
+});
+
 describe('ItemRow -- dismissing transition state', () => {
   it('marks the row aria-hidden and with the dismissing class while the fade plays, without implying undo', () => {
     const item = makeFeedItem();

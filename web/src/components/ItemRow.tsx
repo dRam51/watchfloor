@@ -1,6 +1,8 @@
-import { useId, useState } from 'react';
+import { useId, useState, type CSSProperties } from 'react';
 import { activeOverride, activeScore, type Beat, type FeedItem } from '../api/types.ts';
 import { relativeTime } from '../lib/relativeTime.ts';
+import { prefersReducedMotion } from '../lib/motion.ts';
+import { scoreIntensity } from '../lib/scoreIntensity.ts';
 
 /**
  * One item row -- §7's spec, verbatim: "score indicator, title, source,
@@ -54,6 +56,15 @@ export interface ItemRowProps {
  * masquerading as a (very low) score. The numeric value is still shown,
  * dimmed, so a pinned item's actual score is never hidden -- only
  * de-emphasized relative to the "why is this here" answer, which is the pin.
+ *
+ * M3 task 12 extends this with a compact intensity bar (§7.4: "score shown
+ * as a compact intensity bar", `lib/scoreIntensity.ts`). The SAME 0.000-pin
+ * problem applies to a score-scaled bar even more starkly than to the bare
+ * number: a bar driven by `score` would render completely EMPTY for the
+ * most important rows on the page. Pinned rows therefore get a fixed,
+ * always-full indicator instead of one driven by `score` -- the pin is the
+ * signal there, never the number, and that stays true whether the number is
+ * spelled out as text or as a bar's fill level.
  */
 function ScoreIndicator({ item }: { item: FeedItem }) {
   const override = activeOverride(item);
@@ -65,13 +76,16 @@ function ScoreIndicator({ item }: { item: FeedItem }) {
     return (
       <span className="item-row__score item-row__score--pinned" title={title}>
         <span className="item-row__pin-badge">PINNED</span>
+        <span className="item-row__intensity item-row__intensity--pinned" aria-hidden="true" />
         <span className="item-row__score-value item-row__score-value--dim">{formatted}</span>
       </span>
     );
   }
 
+  const intensity = scoreIntensity(score);
   return (
     <span className="item-row__score">
+      <span className="item-row__intensity" aria-hidden="true" style={{ '--fill': intensity } as CSSProperties} />
       <span className="item-row__score-value">{formatted}</span>
     </span>
   );
@@ -109,11 +123,50 @@ export function ItemRow({
   const read = item.state.readAt !== null;
   const extraBeats = item.beats.length > 1 ? item.beats.length - 1 : 0;
 
+  // M3 task 12, alert pulse (§7.4: "hard-override items ... arrive with a
+  // brief glow-pulse ... and a persistent left-edge accent until read").
+  // ONE condition drives both: `item-row--pinned` (the persistent left-edge
+  // accent, tokens.css) and `item-row--pulse` (the one-shot arrival glow)
+  // are both governed by "pinned AND not yet read", and BOTH clear the
+  // instant `state.readAt` is set -- the accent's disappearance IS "until
+  // read" made visible; the pulse, being a single `animation-iteration-
+  // count: 1` keyframe (global.css), has virtually always already finished
+  // playing by the time a read happens regardless.
+  //
+  // WHY THIS NEEDS NO "has it pulsed yet" state of its own: `item-row--pulse`
+  // is applied declaratively, from the SAME `alertActive` boolean every
+  // render, not toggled on/off by an effect. A CSS animation restarts only
+  // when an element is freshly mounted with the class already present, or
+  // when the class value actually flips between renders -- not merely by
+  // being present, unchanged, across many re-renders (React never touches a
+  // DOM attribute whose string value didn't change). Since `key={item.itemKey}`
+  // (Stream.tsx/Lane.tsx) means each row is a fresh component instance
+  // exactly when it is new to the list -- a genuinely new fetch page, a
+  // freshly loaded lane, an explicit refresh -- "the class is present at
+  // mount" and "this item just arrived in view" coincide, which is what
+  // makes a bare boolean condition (no ref, no timer, no useEffect) already
+  // "one pulse, not a blinking siren": an unrelated re-render of an
+  // ALREADY-MOUNTED row (a save toggle, a focus change elsewhere) leaves the
+  // class string identical to the previous render, so nothing replays.
+  //
+  // Reduced motion is honoured explicitly here (`prefersReducedMotion()`,
+  // `lib/motion.ts`) by omitting the pulse class outright -- not merely
+  // shortening it -- because even a fast flash is exactly the kind of
+  // motion that preference exists to suppress; the persistent (non-
+  // animated) accent still renders normally. This is on top of, not instead
+  // of, tokens.css's own `--motion-pulse` zeroing under the same media
+  // query (belt-and-suspenders: the same "default rather than an opt-in"
+  // mechanism motion.ts's module doc comment describes, used the same way
+  // `useItemFeed.ts`'s dismiss-timer already does with the identical call).
+  const alertActive = override.pinned && !read;
+  const pulseEnabled = alertActive && !prefersReducedMotion();
+
   return (
     <li
       className={[
         'item-row',
-        override.pinned ? 'item-row--pinned' : '',
+        alertActive ? 'item-row--pinned' : '',
+        pulseEnabled ? 'item-row--pulse' : '',
         read ? 'item-row--read' : '',
         dismissing ? 'item-row--dismissing' : '',
         focused ? 'item-row--focused' : '',

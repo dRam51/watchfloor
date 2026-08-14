@@ -349,13 +349,41 @@ a {
   border-left: 3px solid transparent;
 }
 
-/* Hard overrides pin regardless of score (task brief, point 1) -- this is
-   the STATIC foundation Task 12 animates (glow-pulse, then this same
-   persistent accent until read). No animation here; a flat, always-visible
-   accent is enough to make "why is this at the top with a 0.000" legible
-   on its own. */
+/* Hard overrides pin regardless of score (task brief, point 1). M3 task 12:
+   this class is now applied ONLY while the item is unread (ItemRow.tsx's
+   `alertActive = override.pinned && !read`) -- §7.4: "a persistent
+   left-edge accent until read". A flat, non-animated border is enough to
+   make "why is this at the top with a 0.000" legible on its own; the
+   arrival glow-pulse below is the separate, one-shot animated half of the
+   same signal. */
 .item-row--pinned {
   border-left-color: var(--color-alert);
+}
+
+/* The one-shot arrival glow (M3 task 12, §7.4: "arrive with a brief
+   glow-pulse ... one pulse, not a blinking siren"). `animation-iteration-
+   count: 1` (implicit default) plus ItemRow.tsx applying this class
+   declaratively from a stable boolean (never toggled by a timer/effect) is
+   what keeps this to exactly one play per arrival -- see that file's own
+   comment for the full reasoning. Uses --color-alert-glow (tokens.css:
+   "already exists for exactly this purpose") for both the wash and the
+   ring, matching --color-alert's persistent border above rather than
+   introducing a second hue. var(--motion-pulse) is zeroed under
+   prefers-reduced-motion (tokens.css) as a second, CSS-level guard on top
+   of ItemRow.tsx's own JS check. */
+.item-row--pulse {
+  animation: item-row-pulse var(--motion-pulse) var(--motion-ease) 1;
+}
+
+@keyframes item-row-pulse {
+  0% {
+    background-color: var(--color-alert-glow);
+    box-shadow: inset 0 0 0 1px var(--color-alert-glow), 0 0 18px 1px var(--color-alert-glow);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 1px transparent, 0 0 0 0 transparent;
+  }
 }
 
 /* Already-read rows recede slightly -- title drops from primary to
@@ -432,6 +460,36 @@ a {
 
 .item-row__score-value--dim {
   color: var(--color-text-dim);
+}
+
+/* Compact intensity bar (M3 task 12, §7.4: "score shown as a compact
+   intensity bar"). A single element rendered as a hard-stop two-color
+   gradient -- `--fill` (0..1, ItemRow.tsx's `scoreIntensity`) is the same
+   stop offset for both colors, which paints a flat "filled" segment from 0
+   to `--fill` and a "track" segment from `--fill` to 100%, with no second
+   DOM node needed. Decorative (the exact score is already text in
+   `.item-row__score-value`), so `aria-hidden` on the element itself. */
+.item-row__intensity {
+  --fill: 0;
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 6px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    to right,
+    var(--color-accent) calc(var(--fill) * 100%),
+    var(--color-border-strong) calc(var(--fill) * 100%)
+  );
+}
+
+/* Pinned rows never scale this bar by `score` (task brief, point 1: a
+   score-driven bar would render completely EMPTY for the most important
+   rows -- 21 of 50 pinned cyber rows round to exactly 0.000 on the real
+   corpus). A fixed, fully-filled amber bar says "maximum attention,
+   regardless of the number" -- the same substitution `.item-row__pin-badge`
+   already makes for the text label, applied to the bar. */
+.item-row__intensity--pinned {
+  background: var(--color-alert);
 }
 
 .item-row__pin-badge {
@@ -728,6 +786,40 @@ a {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+/* Heat strip (M3 task 12, §7.4: "a thin 24h activity histogram at the top
+   of each lane"). `HeatStrip.tsx` renders 24 bars (one per hour); this file
+   only styles the shared track. `align-items: flex-end` + per-bar `height`
+   is what makes each bar grow UP from a common baseline like a real
+   histogram. `flex-shrink: 0` keeps it pinned to a fixed thin strip rather
+   than being squeezed by the scrollable list below it -- `.lane__body`
+   itself scrolls (max-height above), so the strip needs to stay part of
+   that flex column's first, non-shrinking row for it to read as "at the
+   top of the lane" rather than scrolling away with the list. */
+.heat-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 18px;
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* `max(var(--heat, 0), 0.06)` -- a quiet or genuinely empty lane (repos/
+   markets pre-M4, task brief: "must read as quiet, not broken") still
+   shows a full row of small baseline slivers rather than an invisible or
+   missing strip; a busy hour still reads clearly taller than that
+   baseline since 0.06 is far below any real bucket's fraction of its
+   lane's own busiest hour. */
+.heat-strip__bar {
+  flex: 1 1 0;
+  min-width: 1px;
+  height: calc(max(var(--heat, 0), 0.06) * 100%);
+  background: var(--color-accent-dim);
+  border-radius: 1px 1px 0 0;
 }
 
 .lane__status {
