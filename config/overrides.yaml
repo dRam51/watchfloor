@@ -1,0 +1,259 @@
+# Hard-override categories for Watchfloor's scoring pass (§5, M2 task 6).
+# Consumed by src/score/overrides.ts's parseOverridesConfig/loadOverridesConfig
+# -- Zod-validated at load time, so a malformed entry fails the process
+# rather than silently never firing. Adding a category that reuses one of
+# the three existing matcher kinds below is a config edit, never a code
+# change; a genuinely new matching SHAPE (not represented here yet) would
+# need a new kind in src/score/overrides.ts, the same way a source of a
+# truly new protocol needs a new adapter in config/sources.yaml.
+#
+# ---------------------------------------------------------------------------
+# Shape
+# ---------------------------------------------------------------------------
+#
+# Every rule, regardless of kind, carries:
+#
+#   id            unique, stable, kebab-case
+#   label         human-readable, shown wherever a pinned item explains itself
+#   kind          source_match | source_json_threshold | portfolio_stub
+#   priority      positive integer; LOWER pins first when several rules match
+#                 the same item (see "Priority ordering" below)
+#   applies_to    which score profile(s) this rule bypasses -- see
+#                 "Signal-only, never read" below. Every rule here is
+#                 [signal] only.
+#   enabled       true | false -- false keeps the entry (legible, tested)
+#                 but never evaluates its matcher at all
+#   note          REQUIRED whenever enabled is false -- explains why. A
+#                 disabled rule with no note fails config load
+#                 (src/score/overrides.ts's assertDisabledRulesHaveNotes).
+#
+# kind: source_match additionally requires:
+#   source_id            every item from this source_id is a candidate
+#   recency_bound_days   see "The recency-bound decision" below -- mandatory,
+#                        not optional, on this kind
+#
+# kind: source_json_threshold additionally requires:
+#   source_id            same as source_match
+#   json_paths           list of dotted paths into the item's parsed raw_json,
+#                        tried in order; the first that resolves to a finite
+#                        number is used (e.g. prefer CVSS v3.1, fall back to
+#                        v3.0). A numeric array index is a plain digit
+#                        segment, e.g. "cve.metrics.cvssMetricV31.0.cvssData
+#                        .baseScore" reads index 0 of the cvssMetricV31 array.
+#   comparator           gte | gt
+#   threshold            the number `comparator` compares the extracted value
+#                        against
+#   recency_bound_days   same as source_match
+#
+# kind: portfolio_stub additionally requires:
+#   milestone            the milestone that will implement real matching
+#                        (currently "M4b" for both rules of this kind)
+#   portfolio_path       a RELATIVE path to a gitignored, machine-local
+#                        portfolio file -- shape only, see "Portfolio-linked
+#                        categories" below. Absolute paths are rejected at
+#                        load time (mirrors src/config/env.ts's
+#                        WF_*-path rule; CLAUDE.md's zero-absolute-paths rule
+#                        governs the committed tree, including this file).
+#
+# ---------------------------------------------------------------------------
+# The recency-bound decision (full numbers and reasoning: task report,
+# .superpowers/sdd/2026-08-14-m2-scoring/task-6-report.md)
+# ---------------------------------------------------------------------------
+#
+# "Pins to the top regardless of computed score" is dangerous unbounded: on
+# a cold start (or any future DB wipe), cisa-kev alone would dump its entire
+# 1,665-entry historical catalog above everything else -- half of M1's whole
+# 3,325-item first-run corpus, verified directly against
+# attic/wf-m1-firstrun-2026-08-14.db (read-only, gitignored, local evidence
+# only -- see CLAUDE.md). The dashboard would BE the KEV catalog.
+#
+# Every recency-boundable rule below is bound at READ TIME against the
+# item's own `publishedAt`, using the reader's `now` -- NEVER against when
+# *we* first fetched it (an item's own firstFetchedAt is ~now for literally
+# every item on a cold start, including a decade-old backfilled one, so
+# bounding on that would reproduce the exact flood with a delay rather than
+# fix it -- see src/score/overrides.ts's module doc comment for the full
+# argument). An item with no verifiable publishedAt (null) never qualifies,
+# full stop -- deliberately NOT the same null-handling as src/score/decay.ts,
+# which falls back to firstFetchedAt so every item still gets a graded rank;
+# a hard override's safe default under uncertainty is "do not bypass the
+# score", not "assume freshness". Real: 100% of the cold-start cisa-kev dump
+# (1,665 of 1,665) had published_at NULL before the bare-calendar-date parse
+# fix landed -- a firstFetchedAt fallback here would have done nothing.
+#
+# 30 days, the value shipped below for both enabled rules: real cisa-kev
+# dateAdded distribution against attic/wf-m1-firstrun-2026-08-14.db,
+# cumulative from 2026-08-14 (the corpus's own ingest date):
+#
+#   <=7 days:     4 / 1,665 (0.24%)
+#   <=30 days:   23 / 1,665 (1.38%)   <- shipped bound
+#   <=90 days:   73 / 1,665 (4.38%)
+#   <=365 days: 266 / 1,665 (15.98%)
+#
+# 30 days turns a 1,665-item cold-start flood into 23 (a 98.6% reduction)
+# while still catching a genuinely fresh catalog addition -- the "act now"
+# signal a hard override exists for. THE COST, stated plainly: a CVE added
+# to KEV more than 30 days ago never force-pins again, even if it's still
+# unpatched and still genuinely critical somewhere. It doesn't disappear --
+# it falls back to being scored (Task 5) like everything else, where
+# cisa-kev's weight-2.0 source-trust tier (config/sources.yaml) still counts
+# for something -- it just no longer bypasses the score outright.
+#
+# ---------------------------------------------------------------------------
+# Signal-only, never read (every rule's applies_to is [signal])
+# ---------------------------------------------------------------------------
+#
+# §5.1's own example: "filings and rule changes rank high [on signal];
+# essays rank near zero." Every category here -- a KEV entry, a critical
+# CVE, a SIRT advisory, a weather alert, an 8-K, an earnings date -- is a
+# terse, formulaic action item, not an explanatory, worth-reading piece.
+# Force-pinning it in read_score too would conflate "you must act on this"
+# with "this is worth reading", exactly what the two-score model (never
+# blended, per §5.1) exists to keep separate. read_score keeps computing
+# normally for an overridden item; the override just never applies there.
+#
+# ---------------------------------------------------------------------------
+# Priority ordering (lower pins first; gaps of 10 left for future insertion)
+# ---------------------------------------------------------------------------
+#
+#   10  nws-nhc-alerts          life-safety information, if it ever becomes
+#                                reachable
+#   20  juniper-sirt-advisory   the owner's own network infrastructure
+#   30  cisa-kev-catalog        broad known-exploited vulnerabilities
+#   40  cve-critical-cvss       broad critical-severity CVEs (NVD)
+#   50  8k-held-name            material to the owner's own holdings
+#   60  earnings-within-5-sessions
+#
+# Entirely retunable -- reorder any of these any time, config-only.
+#
+# ---------------------------------------------------------------------------
+# The two named-unreachable categories (Juniper SIRT, NWS/NHC)
+# ---------------------------------------------------------------------------
+#
+# `enabled: false` gates the rule off BEFORE its matcher ever runs -- not
+# relying solely on "the source_id never appears in real data" as the only
+# protection. Both carry a `source_id` value already, so a future feed
+# becoming reachable is `enabled: true` plus (if needed) correcting that id
+# -- zero code change, per this file's own header.
+#
+# ---------------------------------------------------------------------------
+# A third gap, found by tracing current code rather than assumed
+# ---------------------------------------------------------------------------
+#
+# cve-critical-cvss's matcher is fully built and correct, and nvd-cve's own
+# ingest window (src/adapters/json.ts) structurally cannot dump a KEV-style
+# full-history flood. But NVD's `cve.published` field carries no UTC offset,
+# and src/normalize/item.ts's ISO-8601 parser deliberately refuses to guess
+# one -- so every real nvd-cve item's published_at is null, PERMANENTLY, by
+# design, not as a side effect of the pagination fix currently in flight.
+# Combined with the fail-closed-on-null decision above, this rule cannot
+# currently produce a live pin on real data, even once nvd-cve is enabled.
+# `enabled: true` here reflects "the matcher is correct and ready", not "this
+# fires today" -- see the task report for the full finding.
+#
+# ---------------------------------------------------------------------------
+# Portfolio-linked categories (8k-held-name, earnings-within-5-sessions)
+# ---------------------------------------------------------------------------
+#
+# THIS REPOSITORY IS PUBLIC (CLAUDE.md). Nothing below, or anywhere else in
+# this tracked file, is portfolio content -- no ticker, holding, or weight.
+# `portfolio_path` names a relative path to a gitignored, machine-local file
+# (config/portfolio.yaml, which has no consumer anywhere in the codebase
+# yet -- its own .gitignore comment: "nothing in the codebase reads either
+# file at build or test time, so a clone is unaffected"); this config carries
+# only that path, never its contents. Both rules are `kind: portfolio_stub`:
+# an M4b no-op, mirroring Task 5's identical requirement for portfolio
+# proximity ("named, tested as a no-op, not silently absent") -- the markets
+# beat ingests nothing at all in M1/M2 (no SEC-filing source, no
+# earnings-calendar source in config/sources.yaml), so there is nothing in
+# `items` either rule could match against yet regardless of this file.
+
+overrides:
+  - id: cisa-kev-catalog
+    label: CISA Known Exploited Vulnerabilities
+    kind: source_match
+    source_id: cisa-kev
+    recency_bound_days: 30
+    applies_to: [signal]
+    priority: 30
+    enabled: true
+
+  - id: cve-critical-cvss
+    label: Critical-severity CVE (NVD, CVSS >= 9.0)
+    kind: source_json_threshold
+    source_id: nvd-cve
+    # v3.1 preferred, v3.0 fallback (an older CVE not yet rescored to v3.1).
+    # Deliberately NO v2 fallback: CVSS v2 has no official "Critical" band
+    # (its scale tops out at "High" for 7.0-10.0), so a v2 baseScore of, say,
+    # 10.0 is not the same claim as a v3.x "Critical" rating -- see
+    # src/score/overrides.ts's extractJsonThreshold test suite for the real
+    # NVD entry (CVE-1999-0095, tests/fixtures/adapters/nvd-cve.json) this
+    # was checked against. Paths modeled on NVD API 2.0's public schema plus
+    # that same in-repo fixture; UNVERIFIED against real ingested nvd-cve
+    # data, since none exists yet (source enabled: false in
+    # config/sources.yaml pending a sibling's pagination fix) -- spot-check
+    # once it is.
+    json_paths:
+      - cve.metrics.cvssMetricV31.0.cvssData.baseScore
+      - cve.metrics.cvssMetricV30.0.cvssData.baseScore
+    comparator: gte
+    threshold: 9.0
+    recency_bound_days: 30
+    applies_to: [signal]
+    priority: 40
+    enabled: true
+
+  - id: juniper-sirt-advisory
+    label: Juniper SIRT advisories
+    kind: source_match
+    source_id: juniper-sirt
+    recency_bound_days: 30
+    applies_to: [signal]
+    priority: 20
+    enabled: false
+    note: >-
+      No feed exists as of M1 -- Juniper publishes no SIRT RSS/JSON feed.
+      Wishlisted in docs/sources-wishlist.md. source_id above is a
+      placeholder for whenever one becomes reachable.
+
+  - id: nws-nhc-alerts
+    label: NWS/NHC alerts for my area
+    kind: source_match
+    source_id: nws-nhc-alerts
+    # Shorter than the other bound: an unacted weather alert is superseded
+    # or expired within days, not weeks -- provisional pending a real feed
+    # shape to validate against (see note).
+    recency_bound_days: 3
+    applies_to: [signal]
+    priority: 10
+    enabled: false
+    note: >-
+      api.weather.gov serves a blanket "Disallow: /" in robots.txt --
+      unreachable under this project's fetch policy. Wishlisted in
+      docs/sources-wishlist.md. source_id above is a placeholder.
+
+  - id: 8k-held-name
+    label: 8-K filing from a held name
+    kind: portfolio_stub
+    milestone: M4b
+    portfolio_path: config/portfolio.yaml
+    applies_to: [signal]
+    priority: 50
+    enabled: false
+    note: >-
+      M4b, not yet. No SEC-filing source is ingested anywhere in M1/M2 --
+      there is nothing in `items` this could match against regardless of
+      this rule's own state.
+
+  - id: earnings-within-5-sessions
+    label: Earnings within 5 trading sessions
+    kind: portfolio_stub
+    milestone: M4b
+    portfolio_path: config/portfolio.yaml
+    applies_to: [signal]
+    priority: 60
+    enabled: false
+    note: >-
+      M4b, not yet. No earnings-calendar source is ingested anywhere in
+      M1/M2, and "5 sessions" needs trading-calendar math this milestone
+      does not build.
