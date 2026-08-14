@@ -132,3 +132,33 @@ describe('WF_VAULT_ROOT path validation', () => {
     },
   );
 });
+
+describe('WF_GITHUB_TOKEN', () => {
+  // M4a task 1. Optional by design: the GitHub client supports a real
+  // unauthenticated mode (60 core req/hour, 10 search req/min), so an absent
+  // token is a supported configuration, not a misconfiguration. The owner
+  // creates the PAT; nothing here may attempt to.
+  it('is not required — an unauthenticated GitHub client is a supported mode', () => {
+    expect(loadEnv(valid).WF_GITHUB_TOKEN).toBeUndefined();
+  });
+
+  it('is returned verbatim when set', () => {
+    expect(loadEnv({ ...valid, WF_GITHUB_TOKEN: 'ghp_example' }).WF_GITHUB_TOKEN).toBe('ghp_example');
+  });
+
+  it('accepts an empty value rather than hard-failing boot on a blank .env line', () => {
+    // `WF_GITHUB_TOKEN=` in .env reads as '' rather than undefined. Rejecting
+    // it would make an OPTIONAL variable able to stop the process from
+    // starting, which is the opposite of optional. GitHubClient trims and
+    // treats '' as absent, so the resulting mode is honestly unauthenticated.
+    expect(loadEnv({ ...valid, WF_GITHUB_TOKEN: '' }).WF_GITHUB_TOKEN).toBe('');
+  });
+
+  it('does not validate the token shape — GitHub has changed its prefixes more than once', () => {
+    // ghp_, github_pat_, and the older 40-hex form have all been valid. A
+    // shape check here would reject a legitimate future format and force an
+    // edit to this file at the worst possible moment. The API is the
+    // authority on whether a credential works.
+    expect(loadEnv({ ...valid, WF_GITHUB_TOKEN: 'github_pat_11ABCDEFG' }).WF_GITHUB_TOKEN).toBe('github_pat_11ABCDEFG');
+  });
+});

@@ -71,6 +71,31 @@ const EnvSchema = z.object({
   // why a plain `===` or a bare crypto.timingSafeEqual would leak timing.
   WF_API_TOKEN: z.string().min(8),
   WF_API_PORT: z.coerce.number().int().positive().default(8787),
+  // M4a task 1. A read-only GitHub PAT, consumed by src/fetch/github.ts.
+  //
+  // OPTIONAL, and that is a design decision rather than leniency: the client
+  // has a real unauthenticated mode (60 core requests/hour, 10 search
+  // requests/minute, both confirmed live) and reports which mode it is in, so
+  // an absent token is a supported configuration. The PAT raises those
+  // ceilings to 5,000/hour and 30/minute. The owner creates it; no code here
+  // may attempt to.
+  //
+  // Deliberately NOT `.min(1)`, unlike WF_API_TOKEN above. A `.env` line left
+  // as `WF_GITHUB_TOKEN=` reads as '' rather than undefined, and rejecting
+  // that would let an optional variable stop the process from booting — the
+  // opposite of optional. GitHubClient trims and treats '' as absent, so the
+  // reported mode stays honest.
+  //
+  // Also deliberately unvalidated in shape. GitHub has used `ghp_`,
+  // `github_pat_`, and a bare 40-hex form; a prefix check here would reject a
+  // legitimate future format and require editing this file to fix it. The API
+  // is the authority on whether a credential works.
+  //
+  // This value is a live credential against the owner's GitHub account and
+  // this repository is PUBLIC. It must never be logged, echoed into an error,
+  // or committed — see src/fetch/github.ts for how that is enforced and
+  // tests/fetch/github.test.ts for the guards that pin it.
+  WF_GITHUB_TOKEN: z.string().optional(),
   // How often src/bin/scheduler.ts's tick loop checks which sources are due
   // (self-rescheduling setTimeout, not setInterval -- see that file). M1
   // task 10 fix round 1, minor: this used to be a hardcoded literal in
