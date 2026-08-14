@@ -239,14 +239,16 @@ sources:
     enrichment: false
     enabled: true
 
-  - id: reuters-gnews
-    name: Reuters (via Google News)
-    type: google_news
-    url: "https://news.google.com/rss/search?q=site:reuters.com+when:1d&hl=en-US&gl=US&ceid=US:en"
-    beats: [usnews]
-    weight: 1.8
-    poll_interval: 30m
-    enabled: true
+  # Reuters was here. Removed 2026-08-14 — there is no route we are permitted to use.
+  # Direct fetching is blocked by reuters.com's own robots.txt (an allowlist ending in
+  # `Disallow: /`), which is why the indirect Google News route existed at all. The first
+  # live run then found news.google.com's robots.txt ALSO opens `User-agent: * / Disallow: /`,
+  # so our own gate refused that fetch too — correctly. Both ends of the workaround are shut.
+  #
+  # No `enabled: false` row, matching how SCOTUS and NWS are handled: this is a publisher's
+  # declared policy, not a technical gap a future code change closes. The google_news adapter
+  # stays in the tree, tested and working, with no source pointed at it.
+  # Full detail in docs/sources-wishlist.md.
 
   - id: npr-news
     name: NPR News

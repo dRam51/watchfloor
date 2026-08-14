@@ -25,11 +25,52 @@ NVD's publication lag rather than SIRT's own timing, and without SIRT's severity
 
 ---
 
-## Reuters (direct)
+## Reuters — both routes blocked
 
-**Status:** blocked by `robots.txt` — deliberately, and permanently unless they change it.
-**Reached instead via:** Google News RSS scoped to `site:reuters.com`, which never touches their
-domain. See the `reuters-gnews` source.
+**Status:** unreachable. Dropped from `config/sources.yaml` on 2026-08-14.
+**Why it matters:** the spec names AP and Reuters the trust anchors of the US news beat, weighted
+highest because wires lead most national stories and editorialize least. Losing Reuters halves that
+anchor — AP now carries it alone, via its sitemap.
+
+**Route 1 — direct: blocked.** Reuters' `robots.txt` is an allowlist naming ~60 permitted crawlers,
+then closing with:
+
+```
+User-agent: *
+Allow: /plus/
+Disallow: /
+```
+
+Watchfloor is not on that list, so every path except `/plus/` is off-limits — including the sitemaps
+they declare, since a `Sitemap:` directive does not override a `Disallow:`.
+
+**Route 2 — Google News RSS: also blocked.** The indirect route existed precisely because Google *is*
+allowlisted by Reuters, so consuming Google's feed touched no forbidden domain. The **first live run
+disproved it**: `news.google.com/robots.txt` opens
+
+```
+User-agent: *
+Disallow: /
+```
+
+Our own gate refused the fetch on the very first cycle — correctly — so the adapter never issued a
+single request and the source ingested nothing.
+
+**The process lesson, worth keeping.** Both the adapter build and the config pass reasoned carefully
+about *reuters.com*'s `robots.txt` — that was the whole justification for the indirect route — and
+**neither checked Google's own**. Permission was verified at the destination and assumed at the
+intermediary. Any future indirect route must check every host in the chain, not just the one whose
+content is wanted.
+
+**Also rejected:** RSSHub and rss-bridge. Both are self-hostable and free, and both work by scraping.
+Pointing one at Reuters produces exactly the requests their `robots.txt` forbids — it only moves the
+fetching to our server. The tool does not change the permission.
+
+**The `google_news` adapter stays in the tree**, tested and working, with no source pointed at it —
+same treatment as the NWS adapter. If a publisher ever needs that shape and permits it, it is ready.
+
+**Revisit if:** Reuters restores a public feed or adds a general crawler allowance; or a different
+intermediary that permits us carries their wire.
 
 **Why:** Reuters' `robots.txt` is an allowlist. It names roughly sixty permitted crawlers, then
 closes with:
