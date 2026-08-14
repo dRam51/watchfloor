@@ -51,3 +51,15 @@ attic/overrides.ts.stray-2026-08-14
 # A sed backup left by a mutation-testing step during M3 task 5. Preserved
 # (never delete) but kept out of git, like the other attic strays above.
 attic/sources.ts.bak2-mutation-test-2026-08-14
+
+# A route-table debug script written to the repo ROOT during M3 task 7's
+# manual verification pass (server.printRoutes() against a scratch DB copy,
+# to confirm the frontend proxy's paths matched the /api prefix a concurrent
+# commit had just added). Served its purpose, moved to attic/ rather than
+# deleted, kept out of git like the other attic strays above.
+attic/wf-route-debug.mjs.task7-scratch-2026-08-14
+
+# The VACUUM INTO scratch copy of data/wf.db made for the same manual
+# verification pass -- never written to, matches the *.db ignore pattern
+# above already, listed here only for the paper trail.
+data/scratch-verify-task7.db

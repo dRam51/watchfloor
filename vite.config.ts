@@ -28,13 +28,15 @@ import react from '@vitejs/plugin-react';
 const apiPort = Number(process.env.WF_API_PORT ?? 8787);
 const apiTarget = `http://127.0.0.1:${apiPort}`;
 
-// Every JSON route this server exposes as of M3 waves 1-2: health.ts,
-// feed.ts, sources.ts, dashboard.ts, search.ts. None share a path prefix --
-// src/api/server.ts has no `/api` namespace, and adding one is out of scope
-// for this task (src/api/server.ts is frozen). Listed explicitly rather than
-// matched by a broad pattern so a stray frontend route can never be silently
-// swallowed by the proxy; a new backend route needs one more line here.
-const apiRoutePaths = ['/health', '/feed', '/dashboard', '/sources', '/search'];
+// src/api/server.ts namespaces every route under `/api` except `/health`,
+// which stays at the root as an unauthenticated liveness probe (see that
+// file's own comment on the `/api` prefix: it exists partly so a future
+// client-side route of the same name -- `/search` as a UI view, for
+// instance -- cannot collide with an API route, and so this proxy has
+// exactly one clean pattern to forward). Two entries, not a list of every
+// individual route: a new backend route under `/api` needs zero changes
+// here.
+const apiRoutePaths = ['/health', '/api'];
 
 const proxy = Object.fromEntries(
   apiRoutePaths.map((path) => [path, { target: apiTarget, changeOrigin: true }]),

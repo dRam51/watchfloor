@@ -79,7 +79,7 @@ describe('App', () => {
     });
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      '/dashboard/header',
+      '/api/dashboard/header',
       expect.objectContaining({
         headers: expect.objectContaining({ Authorization: 'Bearer a-test-token' }),
       }),

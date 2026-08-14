@@ -5,7 +5,7 @@
  * rather than something this module reads from storage itself: it is held
  * in memory by React state and passed in explicitly, never persisted.
  *
- * Paths are relative ('/dashboard/header', not an absolute URL) because in
+ * Paths are relative ('/api/dashboard/header', not an absolute URL) because in
  * every environment this app runs in -- `vite` dev server or `vite
  * preview` -- the real API is reached through that server's own proxy
  * config (see vite.config.ts), never called cross-origin directly. See the

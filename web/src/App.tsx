@@ -4,7 +4,7 @@ import { AuthGate } from './auth/AuthGate.tsx';
 import { apiFetch, ApiError } from './api/client.ts';
 
 /**
- * Shape of GET /dashboard/header (src/api/routes/dashboard.ts, M3 task 6).
+ * Shape of GET /api/dashboard/header (src/api/routes/dashboard.ts, M3 task 6).
  * Deliberately loose (`enrichmentSpend: unknown`) -- this task only needs
  * enough of the shape to prove the fetch path works end to end; a full
  * typed client is later tasks' concern, not scaffolding's.
@@ -29,7 +29,7 @@ function Dashboard() {
     let cancelled = false;
     setState({ status: 'loading' });
 
-    apiFetch<DashboardHeader>('/dashboard/header', token)
+    apiFetch<DashboardHeader>('/api/dashboard/header', token)
       .then((data) => {
         if (!cancelled) setState({ status: 'ready', data });
       })
