@@ -171,6 +171,39 @@ export interface AdapterResult {
    * source-health consumer most needs answered at cold start or after an
    * outage, when a capped source is furthest behind. Added M1 task 8 fix
    * round 1 (contract addition, authorized after tasks 6/7/9 all landed).
+   *
+   * ## The direction invariant -- read before rendering this number
+   *
+   * **`capped` counts entries at the OLD end of the source's range, never
+   * the new end.** Both producers guarantee it, by different mechanisms:
+   * `news_sitemap` keeps the most recent N and discards older ones
+   * (`capToMostRecent`), and `json.ts`'s nvd-cve mapper anchors its walk to
+   * the TAIL of NVD's ascending-by-CVE-id ordering, so what goes unrequested
+   * is history, not today. Any future capped producer must preserve this or
+   * change this contract deliberately.
+   *
+   * This is stated explicitly because **the meaning inverted once already**.
+   * Under nvd-cve's fix round 1 the walk started at `startIndex=0`, the
+   * HEAD, so `capped` counted the *newest* entries -- content genuinely
+   * missed. Fix round 2 moved the anchor to the tail, so the same field name
+   * now counts the *oldest* -- content deliberately not asked for. Same
+   * number, opposite alarm level. Anything written against the round-1
+   * framing is now backwards.
+   *
+   * Two consequences for the M3 source-health page, which does not exist yet
+   * and is the first real consumer:
+   *
+   * - **Magnitude is not comparable across sources, and `capped` is not a
+   *   behind-ness ranking.** Live on 2026-08-14, nvd-cve reports `capped`
+   *   around 358,900 while holding CVEs published minutes earlier -- the
+   *   backlog is a historical NVD bulk-rescore event sitting ~50-60 days
+   *   back, not a coverage failure. Sorting sources by `capped` descending
+   *   would put the healthiest, most current source at the top of a "furthest
+   *   behind" list.
+   * - **A large `capped` is not by itself actionable.** What matters is
+   *   whether the *newest* entry retrieved is current, which this field does
+   *   not answer. Pair it with the freshest `publishedAt` in `items` before
+   *   drawing any conclusion about a source's health.
    */
   capped?: number;
 }
