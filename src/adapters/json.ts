@@ -773,6 +773,59 @@ function nvdTotalAvailable(parsedEnvelope: unknown): number | null {
 }
 
 /**
+ * NVD's CVE Schema 2.0 emits `cve.published` (and `lastModified`) as an
+ * ISO-8601-SHAPED string with NO UTC offset and NO trailing "Z" -- e.g.
+ * "2026-08-12T20:17:51.690". By itself that shape is genuinely ambiguous:
+ * per the ECMA-262 Date Time String Format, an offset-less date-*time* means
+ * local time in whatever zone is reading it, and `src/normalize/item.ts`'s
+ * `parseIso8601` correctly refuses to guess one -- which is exactly why,
+ * before this function existed, EVERY nvd-cve item normalized to a null
+ * `published_at` (live-verified 2026-08-14: 800/800, 100% -- see
+ * fix-nvd-null-dates-report.md, .superpowers/sdd/2026-08-14-m2-scoring/).
+ *
+ * What breaks the ambiguity is knowledge NVD itself doesn't put in the
+ * string: this field is documented, and independently live-verified here,
+ * to always be UTC. The live check (not merely assumed): the newest CVE in a
+ * fresh poll's raw `published` value, read as UTC, was minutes in the past
+ * (plausible for something just published); read as any zone WEST of UTC
+ * (e.g. US/Eastern, -04:00 in August), the identical digits become a
+ * timestamp in the FUTURE, which a just-published CVE cannot be. Only a UTC
+ * reading is consistent with a CVE that was, in fact, just published.
+ *
+ * This function is deliberately the ONLY place that knowledge is applied --
+ * not `src/normalize/item.ts`'s shared `parseIso8601`. That parser's refusal
+ * is the globally correct default: it protects every source whose timezone
+ * has NOT been independently verified the way NVD's has been here. Folding
+ * "offset-less means UTC" into the shared parser would silently misread the
+ * NEXT source that happens to emit the identical bare shape but actually
+ * means a different zone -- there would be nothing left to stop it, because
+ * the shared parser has no way to know which source is asking. Scoping this
+ * to nvd-cve's own mapper means only a claim this file has itself verified,
+ * for this one source, ever gets applied -- see the "never-guess rule intact
+ * elsewhere" test in tests/adapters/json.test.ts, which proves the identical
+ * offset-less shape arriving through a DIFFERENT mapper (cisa-kev) still
+ * normalizes to null, exactly as before this function existed.
+ *
+ * Only transforms the one shape it has verified: a bare
+ * `YYYY-MM-DDTHH:mm:ss` with an optional fractional-seconds suffix and
+ * NOTHING after it. Anything else -- including a value that already carries
+ * an explicit offset or "Z" (not observed live, but not assumed impossible
+ * either, since NVD's schema could change) -- is returned untouched rather
+ * than blindly suffixed, so this can never corrupt an already-unambiguous
+ * value into something like "...690Z-04:00" or "...690ZZ". A value that
+ * doesn't match at all (malformed, or some future shape this function
+ * doesn't recognize) falls through to `normalizeItem`'s existing parsers
+ * exactly as it does today -- this function only ever ADDS information for
+ * the one case it has verified, never removes or reinterprets anything.
+ */
+const NVD_BARE_LOCAL_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+
+function nvdPublishedAtUtc(value: string | null): string | null {
+  if (value === null) return null;
+  return NVD_BARE_LOCAL_DATETIME_RE.test(value) ? `${value}Z` : value;
+}
+
+/**
  * NVD's CVE Schema 2.0 has no headline/title field at all (verified: none
  * of the 5 live entries in the fixture carry one, and the schema doesn't
  * define one) -- the CVE id itself is the only thing every entry is
@@ -808,13 +861,13 @@ function parseNvdCveEntry(rawEntry: unknown): RawItem | null {
     url: `https://nvd.nist.gov/vuln/detail/${id}`,
     title: id as string,
     // e.g. "1988-10-01T04:00:00.000" -- NVD omits any UTC offset or "Z" on
-    // this field, which normalizeItem's ISO-8601 parser deliberately
-    // refuses to interpret (an offset-less date-time is only meaningful
-    // relative to a local clock, and this is a self-hosted server that
-    // could run in any zone), so this becomes null at normalization.
-    // Passed through verbatim regardless -- interpreting it is not this
-    // layer's job.
-    publishedAt: asString(cve.published),
+    // this field. Unlike every other mapper in this file, this ONE field is
+    // not passed through verbatim: `nvdPublishedAtUtc` (above) appends "Z"
+    // because this specific field, from this specific source, is
+    // independently verified to be UTC -- see that function's doc comment
+    // for the live evidence and for why this is not a weakening of
+    // normalizeItem's general refusal to guess a timezone for anyone else.
+    publishedAt: nvdPublishedAtUtc(asString(cve.published)),
     summary: englishDescription ? asString(englishDescription.value) : null,
     author: null,
     raw: rawEntry,

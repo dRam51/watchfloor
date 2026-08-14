@@ -3,6 +3,7 @@ import { createServer, type RequestListener, type Server } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { jsonAdapter, JsonParseError, UnknownJsonSourceError } from '../../src/adapters/json.ts';
+import { normalizeItem } from '../../src/normalize/item.ts';
 import { canonicalizeUrl } from '../../src/normalize/url.ts';
 import type { Source } from '../../src/sources/load.ts';
 import type { FetchState } from '../../src/db/fetchState.ts';
@@ -166,9 +167,14 @@ describe('jsonAdapter', () => {
       // No title field exists in the NVD schema at all -- the CVE id is
       // used, the only thing every entry is guaranteed to carry.
       expect(first.title).toBe('CVE-1999-0095');
-      // No UTC offset or "Z" on this field at all -- passed through exactly
-      // as NVD wrote it (becomes null at normalization, never guessed).
-      expect(first.publishedAt).toBe('1988-10-01T04:00:00.000');
+      // NVD's `cve.published` carries no UTC offset or "Z" at all -- but is
+      // live-verified (fix-nvd-null-dates-report.md) to always mean UTC, so
+      // nvd-cve's own mapper (and only this mapper) appends "Z" rather than
+      // passing the ambiguous-looking string through untouched. See the
+      // dedicated describe block below ("fix, null published_at") for the
+      // full RawItem -> normalizeItem proof, including why this does not
+      // weaken normalizeItem's never-guess rule for any other source.
+      expect(first.publishedAt).toBe('1988-10-01T04:00:00.000Z');
       expect(first.summary).toBe(
         'The debug command in Sendmail is enabled, allowing attackers to execute commands as root.',
       );
@@ -1272,5 +1278,155 @@ describe('jsonAdapter', () => {
       // poll -- both are real, neither is hidden.
       expect(result.capped).toBe(204);
     }, 15000);
+  });
+
+  // -------------------------------------------------------------------------
+  // Fix (M2 Wave 1, urgent -- blocking the acceptance ingest): nvd-cve's
+  // `cve.published` carries NO UTC offset and NO trailing "Z" at all -- e.g.
+  // "2026-08-12T20:17:51.690" -- which src/normalize/item.ts's parseIso8601
+  // deliberately refuses to interpret: an offset-less ISO-8601 date-time is,
+  // per the ECMA-262 Date Time String Format, local time in whatever zone the
+  // running process happens to be in, and this is a self-hosted server that
+  // could run anywhere. Live-verified (2026-08-14, see
+  // fix-nvd-null-dates-report.md) that this refusal, entirely correct on its
+  // own terms, meant every single one of 800 items from a real, unmocked poll
+  // normalized to a null published_at -- and independently live-verified,
+  // freshly, that this field genuinely IS UTC: a just-published CVE's raw
+  // value, read as UTC, is minutes in the past (plausible); read as any zone
+  // west of UTC (e.g. US/Eastern, -04:00 in August), it becomes a timestamp
+  // in the FUTURE, which a just-published CVE cannot be.
+  //
+  // The fix lives in nvd-cve's OWN mapper (`nvdPublishedAtUtc`,
+  // src/adapters/json.ts), not in the shared normalizeItem/parseIso8601 --
+  // that parser's refusal is correct for every OTHER source (an offset-less
+  // date-time from a source whose zone has NOT been independently verified is
+  // genuinely ambiguous), and hoisting NVD-specific knowledge into the shared
+  // parser would make the next source that happens to emit the identical
+  // bare shape silently misread as UTC too, with no source-specific
+  // verification behind that guess at all. Every test below proves a piece of
+  // that: the fix works, it is UTC (not merely a no-op that happens to look
+  // right), it doesn't corrupt an already-offset value if NVD's schema ever
+  // changes, and it does not leak into any other source's mapper.
+  // -------------------------------------------------------------------------
+  describe('fix, null published_at: nvd-cve is UTC (live-verified), applied only to this mapper', () => {
+    it('appends "Z" to cve.published\'s bare local-datetime shape; normalizeItem then accepts the result as a correct, non-null UTC instant instead of refusing it', async () => {
+      const body = JSON.stringify({
+        totalResults: 1,
+        vulnerabilities: [
+          {
+            cve: {
+              id: 'CVE-2026-40000',
+              // NVD's real shape, live-verified: no offset, no "Z".
+              published: '2026-08-12T20:17:51.690',
+              descriptions: [{ lang: 'en', value: 'desc' }],
+            },
+          },
+        ],
+      });
+      const baseUrl = await serveBody(body);
+      const source = makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` });
+
+      const result = await jsonAdapter.fetch(source, null, new Date('2026-08-14T03:00:00.000Z'));
+      expect(result.items).toHaveLength(1);
+
+      const rawItem = result.items[0]!;
+      // The fix lives HERE, at the adapter/RawItem boundary -- the value is
+      // already unambiguous by the time normalizeItem ever sees it.
+      expect(rawItem.publishedAt).toBe('2026-08-12T20:17:51.690Z');
+
+      const normalized = normalizeItem(rawItem, source, '2026-08-14T03:00:00.000Z');
+      expect(normalized.publishedAt).toBe('2026-08-12T20:17:51.690Z');
+    });
+
+    it('is provably a UTC interpretation, not a coincidental no-op: the SAME raw digits read as a different zone (US/Eastern, -04:00 in August) produce a materially different -- and for a just-published CVE, impossible -- instant', async () => {
+      const rawPublished = '2026-08-12T20:17:51.690';
+      const body = JSON.stringify({
+        totalResults: 1,
+        vulnerabilities: [
+          {
+            cve: { id: 'CVE-2026-40001', published: rawPublished, descriptions: [{ lang: 'en', value: 'd' }] },
+          },
+        ],
+      });
+      const baseUrl = await serveBody(body);
+      const source = makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` });
+
+      const result = await jsonAdapter.fetch(source, null, new Date('2026-08-14T03:00:00.000Z'));
+      const actual = normalizeItem(result.items[0]!, source, '2026-08-14T03:00:00.000Z');
+
+      // What a WRONG naive local-time-as-US/Eastern reading of the identical
+      // raw digits would have produced -- computed independently here, via
+      // normalizeItem's own already-correct explicit-offset parsing path,
+      // never by re-running the adapter under a different assumed zone.
+      const wrongEasternInterpretation = normalizeItem(
+        { ...result.items[0]!, publishedAt: `${rawPublished}-04:00` },
+        source,
+        '2026-08-14T03:00:00.000Z',
+      );
+
+      expect(actual.publishedAt).toBe('2026-08-12T20:17:51.690Z');
+      expect(wrongEasternInterpretation.publishedAt).toBe('2026-08-13T00:17:51.690Z');
+      // The discriminating assertion: had nvd-cve's mapper wrongly assumed a
+      // non-UTC zone instead of UTC, this would fail here -- the two values
+      // are four hours apart, not coincidentally equal on any host regardless
+      // of the test runner's own system timezone (neither computation reads
+      // it -- see JsonSourceMapper.buildUrl's doc comment on why a builder
+      // never reads the clock itself, the same discipline applied here).
+      expect(actual.publishedAt).not.toBe(wrongEasternInterpretation.publishedAt);
+    });
+
+    it('does not corrupt a value that already carries an explicit offset or "Z" -- defensive, not observed live, but guards against double-suffixing if NVD\'s schema ever changes', async () => {
+      const body = JSON.stringify({
+        totalResults: 1,
+        vulnerabilities: [
+          {
+            cve: {
+              id: 'CVE-2026-40002',
+              published: '2026-08-12T20:17:51.690Z',
+              descriptions: [{ lang: 'en', value: 'd' }],
+            },
+          },
+        ],
+      });
+      const baseUrl = await serveBody(body);
+      const source = makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` });
+
+      const result = await jsonAdapter.fetch(source, null, new Date('2026-08-14T03:00:00.000Z'));
+      // Untouched -- not "...690ZZ" or any other corruption of an
+      // already-unambiguous value.
+      expect(result.items[0]!.publishedAt).toBe('2026-08-12T20:17:51.690Z');
+
+      const normalized = normalizeItem(result.items[0]!, source, '2026-08-14T03:00:00.000Z');
+      expect(normalized.publishedAt).toBe('2026-08-12T20:17:51.690Z');
+    });
+
+    it('never-guess rule intact elsewhere: the IDENTICAL offset-less shape, passed through a DIFFERENT source\'s mapper (cisa-kev), is left untouched by the adapter and still normalizes to null', async () => {
+      const body = JSON.stringify({
+        vulnerabilities: [
+          {
+            cveID: 'CVE-2026-40003',
+            vulnerabilityName: 'Hypothetical bare-datetime dateAdded',
+            // NOT cisa-kev's real shape (which is bare "YYYY-MM-DD") --
+            // deliberately NVD-shaped here, to prove the UTC assumption this
+            // fix adds is scoped to nvd-cve's own mapper and does not leak
+            // into any other source's mapper or into the shared parser.
+            dateAdded: '2026-08-12T20:17:51.690',
+            shortDescription: 'd',
+          },
+        ],
+      });
+      const baseUrl = await serveBody(body);
+      const source = makeSource({ id: 'cisa-kev', url: `${baseUrl}/feed` });
+
+      const result = await jsonAdapter.fetch(source, null);
+      // Untouched -- no "Z" appended, because this is not nvd-cve.
+      expect(result.items[0]!.publishedAt).toBe('2026-08-12T20:17:51.690');
+
+      const normalized = normalizeItem(result.items[0]!, source, '2026-08-14T03:00:00.000Z');
+      // The never-guess rule this fix must not weaken: an offset-less
+      // date-time from a source whose zone has not been independently
+      // verified still yields null, exactly as before this fix existed.
+      expect(normalized.publishedAt).toBeNull();
+    });
   });
 });
