@@ -8,8 +8,23 @@ authority for every decision below. This file records only what has been *settle
 outside it, plus the rules easiest to violate by accident.
 
 Status: **M0 complete (tagged `m0-scaffold`). M1 ingest complete. M2 dedupe+scoring in
-progress** — Wave 1 underway. 515 tests. The first live ingest ran on 2026-08-14 and pulled
-**3,325 real items in 10.3s across 17 sources**; the second cycle cost zero network requests.
+progress** — Wave 1 landed, Waves 2–3 in flight. 670+ tests. The first live ingest ran on
+2026-08-14 and pulled **3,325 real items in 10.3s across 17 sources**; the second cycle cost
+zero network requests.
+
+**M2 Wave 1, landed:** interest profile (`2f74029`), recency decay (`6fc2bb7`), beats union
+(`5836fe2`), entities union (`d6d49a9`). Two fix rounds were open at last handoff — decay's
+first-seen timestamp and `nvd-cve`'s tail pagination; check `git log` for whether they landed
+rather than assuming either way.
+
+> [!important] The scoring read path is three functions, not one
+> `getCurrentItem` returns a single stored *version*, and three separate facts about an item
+> are wrong if you read them from it. Use `getItemBeats` (`src/domain/itemBeats.ts`),
+> `getItemEntities` (`src/domain/itemEntities.ts`), and — for an undated item's decay
+> baseline — the first-seen `fetched_at` read path, not the current version's. Each exists
+> because the single-version read silently returned a *plausible* wrong answer. None of them
+> modify `item.ts`; `Item.beats` and `Item.entities` still return the single-version answer
+> on purpose, so nothing already written changes meaning.
 
 ## Resuming work — read these first
 
@@ -57,7 +72,17 @@ minutes ago. Any fix has to page from the tail.
 **Two hard-override categories have no reachable source.** Juniper SIRT publishes no feed,
 and `api.weather.gov` serves a blanket `Disallow: /`, which takes NWS hurricane alerts off
 the table during season. Both are recorded in `docs/sources-wishlist.md`. The override
-mechanism is built generically so either becoming available is a config change.
+mechanism is *specified* to be generic, so either becoming available is a config change —
+verify that against `src/score/overrides.ts` rather than trusting this line.
+
+**A hard override taken literally breaks on cold start.** "Pinned to the top regardless of
+computed score" collides with a fact M1 established: **CISA KEV dumps its entire 1,665-entry
+catalog on a first poll**, not just recent additions — half the whole first-ingest corpus. An
+unbounded KEV override therefore pins 1,665 items above everything else on every cold start
+or DB wipe, and the dashboard becomes the KEV catalog. Whatever bound resolves this has to
+stay consistent with decay-at-read-time: an override evaluated at read time may use the
+reader's `now`; one evaluated at scoring time may not. Note also that a KEV entry's own
+`dateAdded` is not when *we* first saw it — on a cold start those differ by years.
 
 **Reuters has no permitted route at all** — its own robots.txt blocks us, and the Google News
 workaround is blocked by Google's. The `google_news` adapter stays in the tree, tested,
