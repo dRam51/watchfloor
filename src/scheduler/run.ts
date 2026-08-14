@@ -478,7 +478,14 @@ async function pollOneSource(
     }
 
     const adapter = resolveAdapter(adapters, source);
-    const result = await adapter.fetch(source, priorState);
+    // Threads THIS cycle's single validated instant (assertCanonicalTimestamp
+    // already ran in runPollCycle) down to any adapter whose request depends
+    // on "now" -- src/adapters/types.ts's Adapter.fetch doc comment has the
+    // full reasoning. `new Date(now)` from an already-canonical UTC ISO
+    // string is a safe, lossless parse; an adapter with no such need (every
+    // M1 adapter but json.ts's nvd-cve mapper) simply never reads its own
+    // third parameter.
+    const result = await adapter.fetch(source, priorState, new Date(now));
 
     if (result.notModified) {
       // Constraint: 304 short-circuits without inserting and without

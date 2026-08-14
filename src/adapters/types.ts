@@ -66,10 +66,38 @@ export type AdapterRegistry = Record<SourceType, Adapter>;
  * one poll attempt for one source and must resolve to an `AdapterResult` or
  * reject -- see `AdapterResult` and the `EntryParser` convention below for
  * exactly what "resolve" vs. "reject" each mean.
+ *
+ * `now`, third and optional: the single instant this fetch should treat as
+ * "the current time," for the rare adapter whose request depends on it (M1
+ * follow-up: `src/adapters/json.ts`'s per-source `buildUrl`, which nvd-cve
+ * uses to compute a lastModified date window -- see that file for the full
+ * mechanism). Optional, not required, so the three adapters with no such
+ * need (`rss.ts`, `newsSitemap.ts`, `googleNews.ts`) need zero changes --
+ * TypeScript's normal function-arity assignability already makes their
+ * existing 2-parameter `fetch` implementations valid `Adapter`s with this
+ * third parameter simply never supplied at their call site. A caller that
+ * omits it (any adapter that ignores its own third parameter, or code
+ * calling through the bare `Adapter` type) gets undefined; an implementation
+ * that cares is expected to default it to `new Date()` itself, exactly the
+ * way `jsonAdapter.fetch` does, so that omitting it always means "use the
+ * real current time," never a crash or a silently-wrong fixed instant.
+ *
+ * Threaded explicitly by `src/scheduler/run.ts`'s `pollOneSource`, from the
+ * SAME already-validated `now` string `runPollCycle` receives (see that
+ * function's own doc comment on why every side effect in one poll cycle
+ * agrees on one instant) -- not a second, independent `new Date()` a
+ * defaulted parameter would otherwise evaluate one frame up from the
+ * scheduler's own clock read. Before this parameter existed, an adapter's
+ * only way to receive an injected `now` at all was a caller bypassing the
+ * `Adapter` type and calling a concrete adapter's own wider signature
+ * directly (as this codebase's tests already did) -- reachable from tests,
+ * unreachable from the one real production caller. Growing the shared
+ * interface, rather than leaving that gap, closes it for every adapter at
+ * once, present or future, not just json.ts's own `fetch`.
  */
 export interface Adapter {
   readonly type: SourceType;
-  fetch(source: Source, state: FetchState | null): Promise<AdapterResult>;
+  fetch(source: Source, state: FetchState | null, now?: Date): Promise<AdapterResult>;
 }
 
 /**
@@ -102,9 +130,9 @@ export interface AdapterResult {
    */
   skipped?: number;
   /**
-   * How many otherwise-valid `RawItem`s an adapter's own volume cap
-   * discarded this fetch -- entries that parsed successfully and were
-   * excluded by policy, not by defect. Deliberately DISTINCT from
+   * How many otherwise-valid entries an adapter's own volume policy
+   * excluded this fetch -- known to exist, deliberately not represented in
+   * `items`, but never because of a defect. Deliberately DISTINCT from
    * `skipped` (see that field's doc comment just above): `skipped` means
    * "this entry was broken or an EntryParser bug ate it," which is a
    * health signal a source-health page should treat as a possible problem.
@@ -112,11 +140,27 @@ export interface AdapterResult {
    * a healthy, working-as-designed, at-capacity poll look identical to a
    * parser that just broke on hundreds of entries.
    *
+   * Two genuinely different shapes of "excluded by policy" both use this
+   * SAME field, deliberately not two separate ones -- a source-health
+   * consumer needs to know "how far behind is this poll," not which of the
+   * two mechanically produced that number:
+   *   - fetched, parsed, then discarded to stay under a fixed count --
+   *     `news_sitemap` (src/adapters/newsSitemap.ts)'s MAX_ITEMS_PER_FETCH,
+   *     the original M1 task 8 use of this field: every excluded entry was
+   *     individually in hand, if only briefly.
+   *   - known via the source's OWN reported total count but never
+   *     individually requested at all -- `json.ts`'s nvd-cve mapper (M1
+   *     follow-up, fix round 1), whose pagination is bounded to a fixed
+   *     number of pages per poll regardless of how many total results NVD
+   *     itself reports; the remainder was never fetched, parsed, or
+   *     defective, merely not asked for this cycle. `capped` here is
+   *     `totalAvailable - entriesRetrieved`, not a discard count.
+   *
    * Optional because most adapters have no cap at all and must never
-   * fabricate a `0`: `rss`/`atom`, `json`, and `google_news` never set this
-   * field. `news_sitemap` (src/adapters/newsSitemap.ts) sets it whenever
-   * its MAX_ITEMS_PER_FETCH bound actually removed entries, and leaves it
-   * undefined on a fetch the cap didn't bind on -- same "undefined, not a
+   * fabricate a `0`: `rss`/`atom` and `google_news` never set this field;
+   * `json.ts` sets it only for its one paginated mapper. Leave it
+   * `undefined` on a fetch the cap didn't bind on (nothing excluded, or the
+   * true total genuinely couldn't be determined) -- same "undefined, not a
    * fabricated 0, when there is nothing to report" convention `skipped`
    * already uses for a `notModifiedResult`.
    *
