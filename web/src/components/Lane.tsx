@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import type { Beat, FeedItem } from '../api/types.ts';
-import { ItemRow } from './ItemRow.tsx';
+import { FeedRow } from './FeedRow.tsx';
 import { HeatStrip } from './HeatStrip.tsx';
 import { prefersReducedMotion } from '../lib/motion.ts';
 import { useItemFeed } from '../hooks/useItemFeed.ts';
@@ -8,7 +8,9 @@ import { useItemFeed } from '../hooks/useItemFeed.ts';
 /**
  * One lane column (M3 task 10) -- the wide-viewport ARRANGEMENT of a single
  * beat's slice of the merged stream, not a second row/list implementation.
- * `ItemRow` is imported and used verbatim, exactly as `Stream.tsx` uses it;
+ * The row is `FeedRow` -- the same dispatcher `Stream.tsx` uses, which picks
+ * `ItemRow` or M4a's `RepoRow` from the item's own payload (never from this
+ * lane's beat, so a cross-listed repo renders identically in both its lanes);
  * fetching/pagination/mutation come from the same `useItemFeed` hook
  * `Stream` calls, just with a beat fixed instead of filterable. If a future
  * change here only makes sense "because this is a lane", that is the
@@ -255,8 +257,16 @@ export const Lane = forwardRef<LaneHandle, LaneProps>(function Lane(
 
           {items.length > 0 && (
             <ul className="lane__list">
+              {/* M4a task 8: `FeedRow`, not `ItemRow` directly. §7's repos
+                  rows "differ" from news rows, and this lane holds whichever
+                  the item actually is -- the choice is made once, on the
+                  item's own payload, in FeedRow.tsx. Nothing lane-side
+                  changes: the props below are the same ones ItemRow took,
+                  forwarded untouched, so the roving tabindex, `toggleRef`
+                  focus wiring and the (beat, itemKey) focus record all keep
+                  working exactly as they did for a news row. */}
               {items.map((item: FeedItem, index: number) => (
-                <ItemRow
+                <FeedRow
                   key={item.itemKey}
                   item={item}
                   dismissing={dismissingKeys.has(item.itemKey)}

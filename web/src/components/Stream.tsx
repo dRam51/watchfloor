@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Beat, FeedItem } from '../api/types.ts';
 import { BeatFilter } from './BeatFilter.tsx';
-import { ItemRow } from './ItemRow.tsx';
+import { FeedRow } from './FeedRow.tsx';
 import { SearchBox } from './SearchBox.tsx';
 import { prefersReducedMotion } from '../lib/motion.ts';
 import { beatForDigitKey, hasNavModifier, isEditableTarget, nextFocusIndex } from '../lib/keyboardNav.ts';
@@ -258,8 +258,14 @@ export function Stream({ token, onUnauthorized, onOpenSearch }: StreamProps) {
 
       {items.length > 0 && (
         <ul className="stream__list">
+          {/* M4a task 8: `FeedRow` picks the news row or the repo row from
+              the item's own payload. This is the NARROW-viewport view -- the
+              phone -- and §7's deliverable is "usable daily on a laptop,
+              legible on a phone browser", so a repo has to read as a repo
+              here too, not only in the six-lane arrangement. Props are
+              unchanged and forwarded untouched. */}
           {items.map((item, index) => (
-            <ItemRow
+            <FeedRow
               key={item.itemKey}
               item={item}
               dismissing={dismissingKeys.has(item.itemKey)}
