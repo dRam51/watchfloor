@@ -138,6 +138,27 @@ is the specific mistake that cost this one.
 | Recency decay | **Applied at read time, never stored** | `item_scores` is append-only and a decaying score changes continuously, so storing it would append a row per item per beat forever to record nothing but the clock. Store the decay-invariant components; multiply by a decay factor at query time. Also makes historical ranking truthful — "what ranked top last Tuesday" applies Tuesday's decay to what was known then. |
 | Beats belong to the item | **Unioned across every version sharing an `item_key`** | An arXiv paper cross-listed in `cs.AI` and `cs.CR` is two rows with one key; the current-item read returned only the tie-break winner's beat. `src/domain/itemBeats.ts` is the corrected read path — `Item.beats` still returns the single-version answer. |
 
+## The `node:sqlite` cast quirk — three modules have now hit this
+
+Casting `.all()`'s result to a **named interface** array fails `tsc`; casting to a
+**structurally identical inline type literal** passes.
+
+```ts
+const rows = stmt.all(...) as MyRow[];                       // TS2352, "neither type
+                                                             // sufficiently overlaps"
+const rows = stmt.all(...) as Array<{ id: string; n: number }>;   // fine
+```
+
+`.all()` returns `Record<string, SQLOutputValue>[]`, and TypeScript's `as` overlap check is
+stricter about a named-interface array target than about an inline literal. Keep the named type
+for the function's public signature — the constraint applies only to the cast target at the
+call site.
+
+`src/cluster/store.ts:88-100` carries the long-form explanation. `src/domain/itemState.ts` and
+`src/search/query.ts` each rediscovered it independently, which is why it is recorded here.
+**Leave a comment at any new cast site**, or the next person tidies it into a named interface
+and reintroduces the error.
+
 ## Standing rules — the ones that bite
 
 - **Never delete anything.** No `rm`, no history rewrites, no dropping tables outside a
