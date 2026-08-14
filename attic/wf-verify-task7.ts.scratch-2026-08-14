@@ -1,0 +1,99 @@
+/**
+ * Task 7 live verification (M4a). Scratch script, run once, then attic'd.
+ *
+ * Proves the HN-overlap signal fires against the rows ACTUALLY STORED in the
+ * live corpus -- not against transcribed copies of them -- by asking the real
+ * /api/feed route. Writes only to a VACUUM INTO copy; data/wf.db is untouched.
+ */
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Fastify from 'fastify';
+import { openDb } from './src/db/connection.ts';
+import { runMigrations } from './src/db/migrate.ts';
+import { insertItem } from './src/domain/item.ts';
+import { recordStarSnapshot } from './src/db/repoSnapshots.ts';
+import { registerFeed } from './src/api/routes/feed.ts';
+import { loadDecayConfig } from './src/score/decay.ts';
+import { loadOverridesConfig } from './src/score/overrides.ts';
+import { loadInterestsFile } from './src/interests/load.ts';
+import { scoreItem, loadMechanicalScoreConfig } from './src/score/mechanical.ts';
+import type { Source } from './src/sources/load.ts';
+
+const scratch = join(mkdtempSync(join(tmpdir(), 'wf-task7-verify-')), 'wf-copy.db');
+execFileSync('sqlite3', [join(process.cwd(), 'data', 'wf.db'), `VACUUM INTO '${scratch}'`]);
+
+const db = openDb(scratch);
+runMigrations(db, join(process.cwd(), 'db', 'migrations'));
+
+const hnRows = db.prepare("select count(*) as n from items where source_id = 'hn-algolia'").get() as { n: number };
+console.log(`live corpus copy: ${hnRows.n} hn-algolia rows`);
+
+const NOW = '2026-08-14T20:00:00.000Z';
+const SOURCE: Source = {
+  id: 'github-verify', name: 'GitHub verify', type: 'github_search',
+  url: 'https://api.github.com/search/repositories', beats: ['repos'],
+  weight: 1.0, poll_interval: '6h', enabled: true, enrichment: true,
+};
+
+const REPOS = [
+  { owner: 'rustdesk', name: 'rustdesk', id: 101, stars: [40, 400] },
+  { owner: 'lxe', name: 'everywebsite', id: 102, stars: [1000, 1002] },
+  { owner: 'unslothai', name: 'unsloth', id: 103, stars: [200, 260] },
+  { owner: 'openai', name: 'whisper', id: 104, stars: [70000, 70010] },
+  { owner: 'someone', name: 'brand-new-thing', id: 105, stars: null },
+];
+
+for (const r of REPOS) {
+  const url = `https://github.com/${r.owner}/${r.name}`;
+  const item = insertItem(db, {
+    url, canonicalUrl: url, title: r.name, sourceId: 'github-verify', itemType: 'analysis',
+    beats: ['repos'], entities: [], publishedAt: NOW, fetchedAt: NOW, summaryRaw: null,
+    rawJson: JSON.stringify({
+      id: r.id, name: r.name, full_name: `${r.owner}/${r.name}`, owner: { login: r.owner },
+      description: `${r.name} description`, language: 'Rust', license: { spdx_id: 'MIT' },
+      stargazers_count: r.stars ? r.stars[1] : 0, open_issues_count: 7, pushed_at: '2026-08-13T09:15:00Z',
+      fork: false, archived: false,
+    }),
+  });
+  if (r.stars) {
+    recordStarSnapshot(db, { repoId: r.id, itemKey: item.item_key, fullName: `${r.owner}/${r.name}`, stars: r.stars[0]!, observedAt: '2026-08-08T12:00:00.000Z', tz: 'America/New_York' });
+    recordStarSnapshot(db, { repoId: r.id, itemKey: item.item_key, fullName: `${r.owner}/${r.name}`, stars: r.stars[1]!, observedAt: '2026-08-14T12:00:00.000Z', tz: 'America/New_York' });
+  }
+  // The REAL mechanical scorer, with the REAL config/scoring.yaml.
+  scoreItem(db, item.item_key, NOW, {
+    sources: [SOURCE],
+    interestProfile: loadInterestsFile(join(process.cwd(), 'config', 'interests.yaml')),
+    config: loadMechanicalScoreConfig(join(process.cwd(), 'config', 'scoring.yaml')),
+  });
+}
+
+const server = Fastify({ logger: false });
+registerFeed(server, {
+  db,
+  decayConfig: loadDecayConfig(join(process.cwd(), 'config', 'decay.yaml')),
+  overridesConfig: loadOverridesConfig(join(process.cwd(), 'config', 'overrides.yaml')),
+  sources: [SOURCE],
+});
+
+const res = await server.inject({ method: 'GET', url: `/feed?beat=repos&now=${encodeURIComponent(NOW)}` });
+const body = res.json() as { items: Array<Record<string, any>> };
+
+console.log('RAWJSON ' + JSON.stringify(body.items.find((i) => i.repo.fullName === 'someone/brand-new-thing')!.repo.velocity, null, 2));
+for (const item of body.items) {
+  const r = item.repo;
+  console.log(
+    `\n${r.fullName}  signal=${item.signalScore.toFixed(4)}  stars=${r.stars}  lang=${r.language}\n` +
+      `  velocity: ${r.velocity.status}` +
+      (r.velocity.status === 'ok'
+        ? ` ${r.velocity.starsPerDay.toFixed(2)}/day over ${r.velocity.spanDays.toFixed(3)}d ` +
+          `(coverage ${r.velocity.spanCoverage.toFixed(2)}, observed ${r.velocity.observedDays}/${r.velocity.expectedDays}, stale ${r.velocity.staleDays})`
+        : ` reason=${r.velocity.reason}`) +
+      `  component=${r.velocityComponent.toFixed(4)}\n` +
+      `  hn: seen=${r.hn.seen} strength=${r.hn.strength} component=${r.hn.component}` +
+      r.hn.mentions.map((m: any) => `\n     via ${m.via}: "${m.title}"  <- ${m.canonicalUrl}`).join(''),
+  );
+}
+console.log(`\nranking order: ${body.items.map((i) => `${i.repo.fullName}=${i.signalScore.toFixed(3)}`).join('  >  ')}`);
+process.exit(0);

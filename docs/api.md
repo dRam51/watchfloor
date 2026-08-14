@@ -10,8 +10,9 @@
 So this file exists for the clients that don't exist yet — M6's PWA, M8's native shells — as
 much as for the current React frontend. A contract nobody wrote down is a weak contract.
 
-Written 2026-08-14, after M3 Waves 1–2. Verified against the running server, not transcribed
-from the route files.
+Written 2026-08-14, after M3 Waves 1–2; the `repo` block added after M4a Wave 3. Verified
+against the running server, not transcribed from the route files — every payload below was
+copied out of a live response.
 
 ## Conventions
 
@@ -39,9 +40,14 @@ Liveness probe for process supervision (§12). Deliberately public: a supervisor
 carry a secret, and the body is operational status rather than item data.
 
 ```json
-{ "status": "ok", "db": "ok", "migrations": 6, "tz": "America/New_York",
+{ "status": "ok", "db": "ok", "migrations": 7, "tz": "America/New_York",
   "sources": 27, "costGates": { … } }
 ```
+
+`migrations` is the count of *applied* migrations, so it moves when a migration lands — it
+was 6 before M4a added `0007_repo_star_snapshots`. A database that has not had
+`npm run migrate` run against it still reports the old number, and every entrypoint refuses
+to boot in that state rather than auto-applying.
 
 ### `GET /api/feed`
 
@@ -64,6 +70,7 @@ beats[]  entities[]  representativeBeat  clusterSize
 signalScore  readScore  sortProfile
 override { signal:{pinned,priority,label}, read:{…} }
 state    { readAt, savedAt, dismissedAt }
+repo     null, or the block below
 ```
 
 **`kind` is a source-level fact, not an item-level one — and it can be `null`.** `beat` is a
@@ -90,6 +97,103 @@ never silently applied or silently dropped.
    stale *by design* — refresh rather than paginate forever.
 
 Dismissed items are excluded server-side. Do not filter again client-side.
+
+#### The `repo` block — repos-lane rows only
+
+`null` on every item that did not come from a `github_search` source. §7: *"Repos lane rows
+differ: repo name, one-line description, language, stars + velocity arrow, last-commit age."*
+Live response, abridged only where marked:
+
+```json
+"repo": {
+  "owner": "rustdesk", "name": "rustdesk", "fullName": "rustdesk/rustdesk", "repoId": 101,
+  "description": "…", "language": "Rust", "licenseSpdxId": "MIT",
+  "stars": 400, "openIssuesAndPullRequests": 7,
+  "lastCommitAt": "2026-08-13T09:15:00.000Z",
+  "isFork": false, "isArchived": false, "readmeExcerpt": null,
+  "velocity": {
+    "status": "ok", "repoId": 101,
+    "fromDay": "2026-08-08", "throughDay": "2026-08-14",
+    "expectedDays": 7, "observedDays": 2,
+    "missingDays": ["2026-08-09", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13"],
+    "starsPerDay": 60, "starsGained": 360,
+    "spanDays": 6, "spanCoverage": 1, "staleDays": 0,
+    "first": { "day": "2026-08-08", "stars": 40,  "observedAt": "2026-08-08T12:00:00.000Z" },
+    "last":  { "day": "2026-08-14", "stars": 400, "observedAt": "2026-08-14T12:00:00.000Z" },
+    "mixedTimezone": false
+  },
+  "velocityComponent": 1,
+  "hn": {
+    "seen": true, "strength": 0.5, "component": 0.5,
+    "mentions": [{
+      "itemKey": "452ad631b6…", "sourceId": "hn-algolia", "via": "title",
+      "title": "RustDesk now supports true unattended remote access on Wayland",
+      "canonicalUrl": "https://rustdesk.com/blog/unattended-remote-access-wayland",
+      "publishedAt": "2026-08-14T16:12:52.000Z"
+    }]
+  }
+}
+```
+
+**`velocity` is a discriminated union on `status`, and the union is intact on the wire.**
+When `status` is `"insufficient_history"` there is **no `starsPerDay` field at all** — not
+`null`, not `0`. Instead you get `reason` (`unknown_repo` · `no_snapshots` ·
+`single_snapshot` · `span_too_short`) and `minSpanDays`, alongside the window facts
+(`expectedDays`, `observedDays`, `missingDays`, `spanDays`). A client writing
+`velocity.starsPerDay ?? 0` gets `undefined`, deliberately: §4's ranking needs seven days of
+snapshots that do not exist on a fresh database, and the lane must **say so** rather than
+draw a confident flat arrow. Branch on `status`; render "velocity unavailable — N days of
+history" on the other branch. Live, that branch looks like:
+
+```json
+"velocity": {
+  "status": "insufficient_history", "reason": "unknown_repo", "repoId": null,
+  "fromDay": "2026-08-08", "throughDay": "2026-08-14",
+  "expectedDays": 7, "observedDays": 0, "missingDays": [], "spanDays": 0, "minSpanDays": 3
+}
+```
+
+Note `missingDays` is **empty**, not seven days long, when `reason` is `unknown_repo`:
+nothing is "missing" for a repo that was never watched. `no_snapshots` means we looked and
+saw nothing and *does* name the days. Rendering "0 of 7 days observed" off `unknown_repo`
+would be wrong.
+
+**`spanDays` is fractional.** It is elapsed days between two observation *instants*, not a
+count of calendar-day labels. Two polls 2 hours apart straddling midnight span 0.083 days,
+not 1. Do not round it into the measurement.
+
+**`starsPerDay` can be negative** — repos genuinely lose stars, and GitHub purges spam stars
+in bulk. It is not clamped anywhere in the stack, and neither is the score it feeds:
+**`signalScore` can be negative** for a barely-moving repo that HN has already covered
+(observed at −0.097 on the live corpus). A client must not assume a non-negative score.
+
+**`staleDays > 0` means the rate is real but old** — it describes an interval that stopped
+that many days ago, because the poller missed the end of the window. Reported, never gated:
+one missed poll must not blank the lane. Render it as "as of *N* days ago" rather than
+hiding it.
+
+**`velocityComponent` and `hn.component` are the numbers the scorer actually used**, bounded
+to [−1, 1] and [0, 1]. `velocityComponent: 0` is ambiguous by construction — it means either
+"flat" or "no history" — which is exactly why `velocity.status` ships beside it.
+
+**`hn` is the M4a acceptance question in the response.** A repo already covered on Hacker
+News is **de-ranked, never suppressed** (§4's suppression list is fork / archived / no README
+/ dismissed, and this is not on it). `via` says how the match was made: `"url"` for a link
+that names the repo — including a deep link into it, or a `*.github.io` Pages site — and
+`"title"` for a headline that names the project while linking somewhere else entirely. The
+mentions are shipped, not just the flag, so a UI can show *why* a row sank.
+
+**`readmeExcerpt: null` does NOT mean "this repo has no README."** An unread README is
+indistinguishable from a missing one. Do not render the absence as a claim.
+
+**`openIssuesAndPullRequests` counts open pull requests too**, because GitHub's
+`open_issues_count` does — 3 issues plus 90 PRs reports 93. Do not label it "issues".
+
+**Metadata can be `null` while the signal is not.** `description`, `language`,
+`licenseSpdxId`, `stars`, `openIssuesAndPullRequests`, `lastCommitAt`, `isFork`, `isArchived`
+and `readmeExcerpt` all come from the stored `raw_json`; if that cannot be read back they are
+`null` while `velocity` and `hn` remain fully populated. `owner`/`name`/`fullName` come from
+the item's own URL and are always present.
 
 ### `GET /api/search`
 
@@ -121,18 +225,43 @@ make them loud."*
 Each entry carries, verified against the running route:
 
 ```
-id  name  beats  weight  kind?  enabled
+id  name  beats  weight  enabled
 pollInterval  pollIntervalMs  everPolled
 lastSuccessAt  lastFailureAt  lastError
 consecutiveFailures  nextEligibleAt  inBackoff
 itemsYieldedSinceWindowStart  windowStartedAt  updatedAt
-stale  failing
+stale  failing  degraded
+sweep  (null, or { requestsPerPoll, requestsPerMinute, authMode, completable })
 ```
+
+*(This block previously listed a `kind?` field. `SourceHealth` has never declared one — `kind`
+is on `/api/feed`'s items, resolved per source, and was transcribed here in error. Removed
+M4a. It is the second time this section documented a field the route does not return; see the
+`itemsYielded7d` note below.)*
 
 - **`failing` = enabled AND (an error streak OR stale).** The second branch is the important
   one: a feed that last succeeded weeks ago with *zero* errors, because nothing is polling it,
   is the silent failure. A naive `consecutiveFailures > 0` check reports it as healthy. Two
   sources are in exactly that state on the live corpus right now.
+- **`degraded` = enabled AND a sweep that cannot complete.** A third axis, orthogonal to
+  `failing`. A `github_search` source issues one request per (topic × recency-half), so nine
+  topics is **18 requests against an unauthenticated ceiling of 10 per minute**: ten go out,
+  eight never do, and the poll returns *successfully* — zero errors, a fresh `lastSuccessAt`,
+  a healthy item count. Every other field on this endpoint says fine. Deliberately **not**
+  folded into `failing`: that boolean feeds the header strip's alarm count, and a sweep short
+  of budget is permanent until a PAT exists or topics are trimmed, so counting it there would
+  pin the alarm above zero forever. A source can be both `failing` and `degraded`; they are
+  independent.
+- **`sweep` is a prediction, not an observation, and is `null` for single-request sources.**
+  The observed figure (`AdapterResult.coverage`, `src/adapters/types.ts`) lives on the
+  scheduler's in-memory poll report and is never persisted, and the API is a separate process
+  — so this endpoint reports what a *complete* poll would need (`requestsPerPoll`, exact: the
+  sweep is a pure function of the topic list) against the ceiling it is billed to
+  (`requestsPerMinute`, from GitHub's published limits for `authMode`). It answers "can this
+  source ever complete a sweep?", never "did it this time." `authMode` is inferred from this
+  process's own `WF_GITHUB_TOKEN`; api and scheduler are separate processes sharing one
+  `.env`, so it is the API's mode, which is the poller's only under that assumption.
+  `null` means the concept does not apply — never a fabricated one-of-one.
 - **`stale` is measured against each source's own `pollInterval`**, not a global threshold. A
   `1d` source at 25 hours is overdue; a `12h` source at 30 minutes is fine. `pollIntervalMs` is
   the same value pre-parsed so a client need not parse `"30m"`.
