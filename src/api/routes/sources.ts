@@ -76,8 +76,60 @@
  * data doesn't keep. Both are passed through verbatim from the DB — this
  * module performs no recomputation, clamping, or re-bucketing of its own.
  *
- * ## `capped` / `filtered` / `skipped`: deliberately NOT on this endpoint
- * `AdapterResult.capped` and `AdapterResult.filtered` (src/adapters/types.ts)
+ * ## "Degraded", and why it is NOT `failing` (M4a task 10)
+ * A third derived judgement, orthogonal to the two above. `stale` and
+ * `failing` are AVAILABILITY facts — is this source being polled, and are
+ * those polls succeeding. `degraded` is a COVERAGE fact: this source is
+ * polled, on schedule, successfully, and is still structurally unable to
+ * observe everything it is configured to observe in one poll.
+ *
+ * The concrete case, and the only producer today: a `github_search` source
+ * issues one request per (topic × recency-half), so nine topics is **18
+ * requests against an unauthenticated ceiling of 10 per minute**. Ten go out,
+ * eight never do, and the poll returns successfully — `consecutiveFailures: 0`,
+ * a fresh `lastSuccessAt`, a healthy item count. Every check on this page says
+ * fine. That is the same class of quiet wrongness as the `stale` branch above,
+ * and §7's "silent-failing feeds … make them loud" covers it just as directly.
+ *
+ * **It is deliberately not folded into `failing`,** for three reasons:
+ *
+ *  1. `failing` is summed by `countFailingSources` into the header strip's
+ *     alarm count, whose entire value is that it returns to zero when nothing
+ *     is wrong. A sweep short of its budget is **permanent** until the owner
+ *     creates a PAT or trims the topic list — no poll can ever clear it — so
+ *     counting it there pins the alarm above zero forever, which is how an
+ *     alarm stops being read. That would be a worse outcome than the silent
+ *     failure it was meant to cure, not a better one.
+ *  2. Both of `failing`'s existing branches are recoverable by a successful
+ *     poll. This one is recoverable only by a config or credential change.
+ *     Different fact, different action, different field.
+ *  3. The axes are independent, and a source can be both — proven by a test.
+ *     Merging them into one boolean would lose whichever one did not fire.
+ *
+ * `degraded` follows the same disabled-source rule as `stale`/`failing`/
+ * `inBackoff`: pinned `false` for a disabled source, while the raw `sweep`
+ * object still passes through, exactly as `lastError` does.
+ *
+ * ## `sweep` is a PREDICTION, and says so
+ * `AdapterResult.coverage` (src/adapters/types.ts, task 10) is the OBSERVED
+ * version of this — how many of the planned requests a given poll actually
+ * completed. It is not persisted (see the section below), and the API runs in
+ * a different process from the scheduler, so this endpoint cannot read it.
+ * What it reports instead is derived from `config/sources.yaml` plus the auth
+ * mode: how many requests a complete poll of this source *needs*, and what the
+ * ceiling *is*. For `github_search` that prediction is exact — the sweep is a
+ * pure function of the topic list — and `plannedRequestsPerPoll`
+ * (src/adapters/github.ts) is the single shared definition, pinned against
+ * `buildSearchRequests` itself by a test so the two cannot drift.
+ *
+ * What the prediction cannot tell you is which particular poll fell short, or
+ * by how much. It answers "can this source ever complete a sweep?", not "did
+ * it this time." Both are worth knowing; only the first is knowable here, and
+ * inventing the second would be exactly the fabrication the section below
+ * refuses.
+ *
+ * ## `capped` / `filtered` / `skipped` / `coverage`: deliberately NOT on this endpoint
+ * `AdapterResult.capped`, `.filtered` and `.coverage` (src/adapters/types.ts)
  * and `SourceOutcome.skippedEntries` (src/scheduler/run.ts) all exist only
  * for the DURATION of one poll cycle — they live on the in-memory
  * `PollReport` the scheduler builds each tick (logged to stdout as a
@@ -88,14 +140,22 @@
  * process cannot see, which is worse than omitting the field. If a later
  * milestone wants them on the health page, they need a persistence layer
  * first (e.g. one more `source_fetch_state` column each, written by
- * `recordSuccess`), and whatever surfaces them must preserve two meanings
+ * `recordSuccess`), and whatever surfaces them must preserve three meanings
  * that are easy to get backwards: `capped` counts entries at the OLD end of
  * a source's range and is NOT a behind-ness ranking (nvd-cve reports
  * `capped` in the hundreds of thousands while holding CVEs published
  * minutes ago — sorting by it would rank the healthiest source as most
  * broken); `filtered` is a third, distinct count of entries a source's OWN
  * `config/sources.yaml` `filters` excluded on purpose (e.g. AP's
- * non-English entries) — not a defect and not a volume cap.
+ * non-English entries) — not a defect and not a volume cap; and
+ * `coverage.truncation.reportedMatches` is star-anchored, approximate at the
+ * source, and double-counts across overlapping queries, so its shortfall
+ * against `retrievedEntries` is not a number of distinct missed repos.
+ *
+ * `sweep`/`degraded` below are NOT an exception to this rule. They are
+ * computed from `config/sources.yaml` and the auth mode, both of which this
+ * process can read directly — nothing about a particular past poll is being
+ * asserted. See "`sweep` is a PREDICTION" above.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -103,6 +163,8 @@ import type { Db } from '../../db/connection.ts';
 import type { Source } from '../../sources/load.ts';
 import { assertCanonicalTimestamp } from '../../domain/item.ts';
 import { parsePollIntervalMs } from '../../scheduler/run.ts';
+import { plannedRequestsPerPoll, TOKEN_ENV_VAR } from '../../adapters/github.ts';
+import { GitHubClient, RATE_LIMITS, type GitHubAuthMode } from '../../fetch/github.ts';
 
 /**
  * The wire shape for one source, `GET /api/sources`'s array element. All
@@ -143,6 +205,126 @@ export interface SourceHealth {
   stale: boolean;
   /** See module doc comment, "'failing' and 'stale', defined." Always false for a disabled source. */
   failing: boolean;
+
+  /**
+   * How big one COMPLETE poll of this source is, against the ceiling it is
+   * billed to — or `null` for a source whose poll is a single request and
+   * therefore has no such fact. Never a fabricated `{requestsPerPoll: 1}`:
+   * `null` means "this concept does not apply here," the same way every other
+   * null on this wire means something specific. See the module doc comment,
+   * "`sweep` is a PREDICTION, and says so."
+   *
+   * A RAW config-derived fact, so it passes through for a DISABLED source too
+   * — exactly like `lastError` and `consecutiveFailures`. Only `degraded`, the
+   * derived judgement about it, is pinned false for one.
+   */
+  sweep: SweepBudget | null;
+  /**
+   * True when this source is enabled and its poll cannot cover everything it
+   * is configured to cover — succeeding, on schedule, and still only seeing
+   * part of the picture. Orthogonal to `failing`, deliberately NOT folded into
+   * it; the module doc comment's "'Degraded', and why it is NOT `failing`"
+   * section is the full argument. Always false for a disabled source, and
+   * false whenever `sweep` is null (no sweep, nothing to fall short of).
+   */
+  degraded: boolean;
+}
+
+/**
+ * The size of one complete poll of a multi-request source, against the
+ * rate-limit ceiling those requests are billed to. Every field is a plain
+ * number or enum rather than a rendered string — a health page decides how to
+ * phrase "10 of 18", this module decides what is true.
+ */
+export interface SweepBudget {
+  /**
+   * API requests ONE COMPLETE poll of this source needs. For `github_search`
+   * this is `topics × 2` (§4's `created:` and `pushed:` halves, which GitHub
+   * refuses to express as one query — see src/adapters/github.ts), taken from
+   * that adapter's own `plannedRequestsPerPoll` rather than recomputed here.
+   */
+  requestsPerPoll: number;
+  /**
+   * The published per-minute ceiling those requests are billed against in
+   * `authMode`, read from `RATE_LIMITS` (src/fetch/github.ts) rather than
+   * restated — GitHub's own numbers, confirmed live, in one place.
+   */
+  requestsPerMinute: number;
+  /**
+   * Whether the POLLER has a credential. Inferred by this process from its own
+   * `WF_GITHUB_TOKEN`, using `GitHubClient`'s exact rule (see
+   * `detectGitHubAuthMode`).
+   *
+   * The caveat, stated rather than buried: the API and the scheduler are
+   * SEPARATE processes (`src/bin/api.ts`, `src/bin/scheduler.ts`), both started
+   * with `--env-file=.env`, so this is an inference across a process boundary
+   * rather than an observation of the poller. It is correct for the
+   * single-user, single-`.env` deployment this system is built for, and wrong
+   * if someone ever runs the two with different environments — in which case
+   * this field reports the API's mode, not the poller's.
+   */
+  authMode: GitHubAuthMode;
+  /**
+   * False when `requestsPerPoll` exceeds `requestsPerMinute`: this source
+   * cannot complete a full sweep in one poll, on any poll, until its config or
+   * its credential changes.
+   *
+   * The comparison is per-MINUTE against a whole poll because the client
+   * spaces requests 2s apart (`src/fetch/github.ts`), so 18 requests span ~34
+   * seconds and cannot straddle two full rate-limit windows. Measured live:
+   * nine topics unauthenticated got **10 of 18** through before the budget
+   * refused the eleventh. A future producer that spaces requests far enough
+   * apart to span windows would need a different comparison, not just a
+   * different number.
+   */
+  completable: boolean;
+}
+
+/**
+ * The non-config, non-database inputs `computeSourceHealth` needs. Injected
+ * rather than read from the ambient environment inside the computation, for
+ * the same reason `now` is: a function that reads a global is one a test can
+ * only exercise by mutating that global. `getSourcesHealth` resolves the
+ * default once per request and threads it down.
+ */
+export interface SourceHealthEnv {
+  githubAuthMode: GitHubAuthMode;
+}
+
+/**
+ * Whether this process has a GitHub PAT.
+ *
+ * Delegates to `GitHubClient` rather than testing `process.env` directly, and
+ * the delegation is the point: that class treats a whitespace-only value (a
+ * `.env` line left as `WF_GITHUB_TOKEN=`) as an ABSENT credential, not a blank
+ * one, because sending `Authorization: Bearer ` would 401 every request. If
+ * this module reimplemented the check and the two ever disagreed, the health
+ * page would report a 30/minute budget against a poller really on 10 — a
+ * plausible wrong answer, which is the failure mode this codebase exists to
+ * refuse. Constructing a client performs no I/O and starts nothing; it only
+ * assigns fields.
+ */
+function detectGitHubAuthMode(): GitHubAuthMode {
+  return new GitHubClient({ token: process.env[TOKEN_ENV_VAR] }).mode;
+}
+
+/**
+ * The sweep budget for one source, or `null` when the concept does not apply.
+ * `plannedRequestsPerPoll` is the gate: it returns `null` for every source
+ * type that is not a multi-request sweep, and for a `github_search` source too
+ * malformed to have an honest answer.
+ */
+function computeSweepBudget(source: Source, authMode: GitHubAuthMode): SweepBudget | null {
+  const requestsPerPoll = plannedRequestsPerPoll(source);
+  if (requestsPerPoll === null) return null;
+
+  const requestsPerMinute = RATE_LIMITS[authMode].searchPerMinute;
+  return {
+    requestsPerPoll,
+    requestsPerMinute,
+    authMode,
+    completable: requestsPerPoll <= requestsPerMinute,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +433,7 @@ export function computeSourceHealth(
   source: Source,
   fetchState: FetchStateRecord | null,
   now: string,
+  env: SourceHealthEnv = { githubAuthMode: detectGitHubAuthMode() },
 ): SourceHealth {
   assertCanonicalTimestamp('now', now);
 
@@ -278,6 +461,13 @@ export function computeSourceHealth(
   const failing = enabled && rawFailing;
   const inBackoff = enabled && rawInBackoff;
 
+  // A coverage fact, not an availability one, and deliberately absent from
+  // `rawFailing` above — see the module doc comment's "'Degraded', and why it
+  // is NOT `failing`". Same disabled-source rule as the three judgements just
+  // above; `sweep` itself is raw and passes through regardless.
+  const sweep = computeSweepBudget(source, env.githubAuthMode);
+  const degraded = enabled && sweep !== null && !sweep.completable;
+
   return {
     id: source.id,
     name: source.name,
@@ -302,6 +492,9 @@ export function computeSourceHealth(
 
     stale,
     failing,
+
+    sweep,
+    degraded,
   };
 }
 
@@ -321,10 +514,16 @@ export function getSourcesHealth(
   db: Db,
   sources: readonly Source[],
   now: string = new Date().toISOString(),
+  env: SourceHealthEnv = { githubAuthMode: detectGitHubAuthMode() },
 ): SourceHealth[] {
   assertCanonicalTimestamp('now', now);
   const fetchStates = getAllFetchStateRecords(db);
-  return sources.map((source) => computeSourceHealth(source, fetchStates.get(source.id) ?? null, now));
+  // `env` is resolved ONCE for the whole page rather than defaulted per source,
+  // so every row on one response agrees about the auth mode — the same "one
+  // instant for the whole cycle" discipline `now` already has.
+  return sources.map((source) =>
+    computeSourceHealth(source, fetchStates.get(source.id) ?? null, now, env),
+  );
 }
 
 /**

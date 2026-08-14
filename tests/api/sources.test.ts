@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -287,6 +287,214 @@ describe('computeSourceHealth', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The sweep budget (M4a task 10). §7's "silent-failing feeds are the main
+// failure mode of a system like this; make them loud" -- and a github_search
+// poll that covers 10 of its 18 queries is the same class of quiet wrongness
+// the `stale` branch above exists for: a successful poll, no recorded failure,
+// and a genuinely incomplete picture.
+//
+// This process cannot OBSERVE that (AdapterResult.coverage lives on the
+// scheduler's in-memory PollReport and is never persisted), so what is
+// reported here is a PREDICTION from config plus auth mode -- exact, because
+// the sweep is a pure function of the topic list.
+// ---------------------------------------------------------------------------
+
+function githubSource(overrides: Partial<Source> = {}): Source {
+  return buildSource({
+    id: 'github-repos',
+    name: 'GitHub topic search',
+    type: 'github_search',
+    url: 'https://api.github.com/search/repositories',
+    beats: ['repos'],
+    poll_interval: '6h',
+    filters: { topics: NINE_TOPICS },
+    ...overrides,
+  });
+}
+
+const NINE_TOPICS = [
+  'llm',
+  'agents',
+  'mcp',
+  'rag',
+  'ai-security',
+  'prompt-injection',
+  'llmops',
+  'network-automation',
+  'netdevops',
+];
+
+/** A fetch-state record for a source that is succeeding on schedule. */
+function healthyState() {
+  return {
+    lastSuccessAt: iso(-5 * MIN),
+    lastFailureAt: null,
+    lastError: null,
+    consecutiveFailures: 0,
+    nextEligibleAt: null,
+    itemsYieldedSinceWindowStart: 300,
+    windowStartedAt: iso(-2 * DAY),
+    updatedAt: iso(-5 * MIN),
+  };
+}
+
+describe('computeSourceHealth: the sweep budget', () => {
+  it('reports a nine-topic github_search sweep as 18 requests against the unauthenticated 10/minute search ceiling', () => {
+    const health = computeSourceHealth(githubSource(), healthyState(), NOW, {
+      githubAuthMode: 'unauthenticated',
+    });
+
+    expect(health.sweep).toEqual({
+      requestsPerPoll: 18,
+      requestsPerMinute: 10,
+      authMode: 'unauthenticated',
+      completable: false,
+    });
+  });
+
+  it('THE QUIET WRONGNESS: a source succeeding on schedule with zero failures still reads as degraded when its sweep cannot complete', () => {
+    const health = computeSourceHealth(githubSource(), healthyState(), NOW, {
+      githubAuthMode: 'unauthenticated',
+    });
+
+    // Everything a naive health check looks at says this source is fine.
+    expect(health.consecutiveFailures).toBe(0);
+    expect(health.stale).toBe(false);
+    expect(health.itemsYieldedSinceWindowStart).toBe(300);
+    // And it is only ever seeing ten of its eighteen queries.
+    expect(health.degraded).toBe(true);
+  });
+
+  // The defence for NOT folding this into `failing`: that boolean is summed by
+  // countFailingSources into the header strip's alarm count, whose whole value
+  // is that it returns to zero when nothing is wrong. A sweep short of budget
+  // is permanent until the owner creates a PAT or trims the topic list -- no
+  // poll can clear it -- so counting it there would pin the alarm above zero
+  // forever, which is how an alarm stops being read.
+  it('does NOT make a degraded source `failing` -- the header-strip alarm count has to stay actionable', () => {
+    const health = computeSourceHealth(githubSource(), healthyState(), NOW, {
+      githubAuthMode: 'unauthenticated',
+    });
+
+    expect(health.degraded).toBe(true);
+    expect(health.failing).toBe(false);
+  });
+
+  it('a PAT raises the ceiling to 30/minute, so the same eighteen-request sweep completes and is not degraded', () => {
+    const health = computeSourceHealth(githubSource(), healthyState(), NOW, {
+      githubAuthMode: 'authenticated',
+    });
+
+    expect(health.sweep).toEqual({
+      requestsPerPoll: 18,
+      requestsPerMinute: 30,
+      authMode: 'authenticated',
+      completable: true,
+    });
+    expect(health.degraded).toBe(false);
+  });
+
+  it('a five-topic sweep fits the unauthenticated budget exactly and is not degraded', () => {
+    const health = computeSourceHealth(
+      githubSource({ filters: { topics: NINE_TOPICS.slice(0, 5) } }),
+      healthyState(),
+      NOW,
+      { githubAuthMode: 'unauthenticated' },
+    );
+
+    expect(health.sweep!.requestsPerPoll).toBe(10);
+    expect(health.sweep!.completable).toBe(true);
+    expect(health.degraded).toBe(false);
+  });
+
+  // Same rule the module already applies to stale/failing/inBackoff: a
+  // disabled source is an operator decision, never an operational problem --
+  // but the RAW config-derived facts still pass through, exactly as lastError
+  // and consecutiveFailures do.
+  it('a disabled source never reads as degraded, though its raw sweep facts still pass through', () => {
+    const health = computeSourceHealth(githubSource({ enabled: false }), healthyState(), NOW, {
+      githubAuthMode: 'unauthenticated',
+    });
+
+    expect(health.degraded).toBe(false);
+    expect(health.sweep!.completable).toBe(false);
+    expect(health.sweep!.requestsPerPoll).toBe(18);
+  });
+
+  it('reports null, never a fabricated one-of-one, for a source type whose poll is a single request', () => {
+    const health = computeSourceHealth(buildSource({ type: 'rss' }), healthyState(), NOW, {
+      githubAuthMode: 'unauthenticated',
+    });
+
+    expect(health.sweep).toBeNull();
+    expect(health.degraded).toBe(false);
+  });
+
+  it('reports null rather than guessing for a github_search source with no topic list', () => {
+    const health = computeSourceHealth(githubSource({ filters: {} }), healthyState(), NOW, {
+      githubAuthMode: 'unauthenticated',
+    });
+
+    expect(health.sweep).toBeNull();
+    expect(health.degraded).toBe(false);
+  });
+
+  // A source can be both: degraded is a coverage fact, failing is an
+  // availability fact, and merging orthogonal axes into one boolean loses one
+  // of them.
+  it('degraded and failing are independent axes -- a stale source with an over-budget sweep reports both', () => {
+    const health = computeSourceHealth(
+      githubSource({ poll_interval: '6h' }),
+      { ...healthyState(), lastSuccessAt: iso(-7 * HOUR), updatedAt: iso(-7 * HOUR) },
+      NOW,
+      { githubAuthMode: 'unauthenticated' },
+    );
+
+    expect(health.stale).toBe(true);
+    expect(health.failing).toBe(true);
+    expect(health.degraded).toBe(true);
+  });
+});
+
+describe('computeSourceHealth: the default auth mode', () => {
+  const TOKEN_ENV = 'WF_GITHUB_TOKEN';
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[TOKEN_ENV];
+    delete process.env[TOKEN_ENV];
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[TOKEN_ENV];
+    else process.env[TOKEN_ENV] = saved;
+  });
+
+  it('reads WF_GITHUB_TOKEN when no auth mode is injected', () => {
+    // Fixture-only string. Nothing here is or resembles a real credential.
+    process.env[TOKEN_ENV] = 'ghp_fixture_only';
+    expect(computeSourceHealth(githubSource(), healthyState(), NOW).sweep!.authMode).toBe(
+      'authenticated',
+    );
+  });
+
+  it('treats an absent token as unauthenticated', () => {
+    expect(computeSourceHealth(githubSource(), healthyState(), NOW).sweep!.authMode).toBe(
+      'unauthenticated',
+    );
+  });
+
+  // The exact rule GitHubClient applies to the same value: a `.env` line left
+  // as `WF_GITHUB_TOKEN=` is an absent credential, not a blank one. If this
+  // process and the client disagreed, the health page would report a 30/minute
+  // budget against a poller that is really on 10.
+  it('treats a blank or whitespace-only token as absent, exactly as GitHubClient does', () => {
+    process.env[TOKEN_ENV] = '   ';
+    expect(computeSourceHealth(githubSource(), healthyState(), NOW).sweep!.authMode).toBe(
+      'unauthenticated',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // HTTP-level tests: proves the DB read + config combine + JSON wiring, on a
 // real temp-file SQLite DB and a real Fastify server built locally (per the
 // Wave 2 concurrency note: server.ts is NOT touched or imported here).
@@ -483,6 +691,52 @@ describe('GET /sources', () => {
     expect(row.failing).toBe(false);
     expect(row.stale).toBe(false);
     expect(row.lastError).toBe('boom'); // raw history still visible
+    await server.close();
+  });
+
+  it('carries the sweep budget and the degraded flag over real HTTP+DB, so a partial sweep is visible to the health page', async () => {
+    const db = migratedDb();
+    // The route reads the WALL CLOCK for `now` (it is the live endpoint, not
+    // the pinned pure function), so this row's success has to be recent
+    // against real time for `failing` to be false -- which is the whole point
+    // of the assertion below: degraded WITHOUT failing.
+    insertFetchState(db, {
+      sourceId: 'github-repos',
+      lastSuccessAt: new Date().toISOString(),
+      consecutiveFailures: 0,
+      itemsYielded7d: 300,
+    });
+    const server = buildTestServer(db, [githubSource()]);
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/sources',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+
+    const row = res.json().sources[0];
+    expect(row.failing).toBe(false);
+    expect(row.degraded).toBe(true);
+    expect(row.sweep.requestsPerPoll).toBe(18);
+    expect(row.sweep.completable).toBe(false);
+    await server.close();
+  });
+
+  it('serialises sweep as an explicit null for a single-request source, never an omitted key', async () => {
+    const db = migratedDb();
+    insertFetchState(db, { sourceId: 'test-source', lastSuccessAt: iso(-5 * MIN) });
+    const server = buildTestServer(db, [buildSource()]);
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/sources',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+
+    const row = res.json().sources[0];
+    expect('sweep' in row).toBe(true);
+    expect(row.sweep).toBeNull();
+    expect(row.degraded).toBe(false);
     await server.close();
   });
 
