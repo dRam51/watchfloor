@@ -1,0 +1,37 @@
+{
+  // Deliberately NOT extending the repo-root tsconfig.json: that config
+  // targets the Node server (module/moduleResolution: NodeNext,
+  // allowImportingTsExtensions: true) and is incompatible with how Vite and
+  // React code is normally written (bundler resolution, extensionless
+  // relative imports, a DOM lib, JSX). See the task 7 report for the reason
+  // this is a fresh config rather than an `include` addition to the
+  // server's.
+  //
+  // Lives at web/tsconfig.json (not repo-root tsconfig.web.json) so Vite's
+  // own esbuild-based transform can find it via its normal upward directory
+  // search from web/src -- the same reason every `create-vite` template
+  // puts its tsconfig next to its own index.html rather than at the
+  // monorepo root.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    // Vite's bundler resolution is happy either way; this is set so the
+    // frontend can keep the same explicit-extension import style the server
+    // config enforces (src/tsconfig.json's own allowImportingTsExtensions),
+    // rather than the codebase switching styles at the web/ boundary.
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"],
+  "exclude": ["node_modules", "dist"]
+}

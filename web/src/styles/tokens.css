@@ -1,0 +1,115 @@
+/**
+ * Design tokens -- the ONLY place a color, spacing step, or type size may be
+ * a literal value anywhere in this frontend (brief §7.1: "Design tokens in
+ * one place: colors, spacing, type scale as CSS custom properties. A native
+ * shell reuses them; a hardcoded palette doesn't travel."). Every component
+ * reads these via var(--token-name); none may hardcode a hex value, a px
+ * size, or a font name of its own.
+ *
+ * Nothing below is settled. The brief specifies only qualitative intent --
+ * "dark, high-contrast, monospace-leaning... the dense, alive,
+ * slightly-glowing ops wall, not a gray CRUD app" (§7, §7.4) -- no hex
+ * values, no font stack, no scale. This is a first, defensible pass. Expect
+ * the owner to retune it; that is exactly why every value lives in this one
+ * file and nowhere else -- retuning is a single-file edit, not a refactor.
+ *
+ * One deliberate constraint carried in from the brief's own color use:
+ * neither green nor red appears below. §7's ribbon wants directional market
+ * color ("ticker, change %, colored") and that is M4b's concern, not this
+ * task's -- reserving both hues now means M4b does not have to fight an
+ * already-established "green = good" association spent on something else
+ * (e.g. a generic "success" state this dashboard has no use for yet).
+ */
+:root {
+  color-scheme: dark;
+
+  /* ---- surfaces, darkest to lightest ---- */
+  --color-bg: #05070a;
+  --color-surface: #0b0f14;
+  --color-surface-raised: #121a24;
+  --color-border: #1f2937;
+  --color-border-strong: #2c3a4d;
+
+  /* ---- text ---- */
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #8b98a5;
+  --color-text-dim: #5b6672;
+
+  /* ---- accent: cyan, the ops-wall glow. Used for focus rings, links,
+     primary interactive chrome. Never used for directional market data --
+     see the note above. ---- */
+  --color-accent: #22d3ee;
+  --color-accent-dim: #0e7490;
+  --color-accent-glow: rgba(34, 211, 238, 0.35);
+
+  /* ---- alert: amber, not red, so a future market "down" signal (M4b) is
+     not competing with this dashboard's own idea of "something needs
+     attention" (hard-override pulse, a source in backoff, etc.). ---- */
+  --color-alert: #f59e0b;
+  --color-alert-glow: rgba(245, 158, 11, 0.35);
+
+  /* ---- error: a broken request or invalid form input -- distinct from
+     --color-alert, which is a watchfloor *signal*, not a UI failure. ---- */
+  --color-error: #f87171;
+
+  /* ---- type: one family, used everywhere (title, body, timestamps,
+     scores) -- "monospace-leaning" per §7, taken literally rather than
+     paired with a second sans-serif for prose. System fonts only: no
+     webfont download, consistent with zero-dollar-by-default and staying
+     self-contained. ---- */
+  --font-mono:
+    ui-monospace, 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Roboto Mono', Menlo, Consolas,
+    monospace;
+  --text-xs: 0.6875rem; /* 11px -- metadata, timestamps */
+  --text-sm: 0.8125rem; /* 13px -- secondary copy, status lines */
+  --text-base: 0.9375rem; /* 15px -- body default */
+  --text-md: 1.0625rem; /* 17px -- item titles */
+  --text-lg: 1.25rem; /* 20px -- section headings */
+  --text-xl: 1.625rem; /* 26px -- page title */
+  --leading-tight: 1.2;
+  --leading-normal: 1.5;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 700;
+
+  /* ---- space: 4px base ---- */
+  --space-1: 0.25rem; /* 4px */
+  --space-2: 0.5rem; /* 8px */
+  --space-3: 0.75rem; /* 12px */
+  --space-4: 1rem; /* 16px */
+  --space-5: 1.5rem; /* 24px */
+  --space-6: 2rem; /* 32px */
+  --space-7: 3rem; /* 48px */
+
+  /* ---- shape: small radii on purpose -- technical/sharp, not the rounded
+     "friendly app" look the brief explicitly rejects. ---- */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+
+  /* ---- touch: §7.1 -- interactive elements must be >=44px even in the
+     dense desktop view. Apply via the .touch-target utility class
+     (global.css) rather than repeating this on every component. ---- */
+  --touch-target-min: 44px;
+
+  /* ---- motion: §7.4 -- micro-transitions are 150-200ms, ease-out, never
+     bouncy. No animation ships in this task; the tokens exist so the first
+     component that DOES animate (M3 task 12) reads a variable rather than
+     inventing its own timing, and gets prefers-reduced-motion for free (see
+     the media query below) rather than as an opt-in each component must
+     remember. ---- */
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* The default rather than an opt-in: any component that transitions via
+   var(--motion-fast)/var(--motion-base) is automatically neutralized here,
+   with no media query of its own required. Zeroing the duration (rather
+   than removing the `transition`/`animation` property) keeps `transitionend`
+   / `animationend` events firing, which anything gating on them still needs. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+}

@@ -1,0 +1,167 @@
+/**
+ * Base reset plus the handful of rules every future component should
+ * inherit for free: box-sizing, touch targets, focus visibility. Anything
+ * component-specific belongs in that component's own file, not here -- this
+ * stays small on purpose. Colors, spacing and type all come from
+ * tokens.css; nothing here is a literal value of its own except the ones
+ * that are structurally zero (0, 100%) rather than a design choice.
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--color-accent);
+}
+
+/* Nothing may rely on hover to convey information (§7.1) -- :focus-visible
+   gets the same treatment as it would need for keyboard/touch users, so an
+   accent ring is always available through a non-pointer path too. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Apply to every clickable control -- buttons, link-styled actions,
+   row-level actions -- not just elements that already look like buttons.
+   §7.1: touch targets >=44px even in the dense desktop view. */
+.touch-target {
+  min-width: var(--touch-target-min);
+  min-height: var(--touch-target-min);
+}
+
+/* ---------------------------------------------------------------------
+ * Shell (web/src/App.tsx) -- the scaffold this task builds. No item rows,
+ * lanes, or stream styling here; that belongs to the tasks that build them.
+ * --------------------------------------------------------------------- */
+.shell {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.shell__title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 12px var(--color-accent-glow);
+}
+
+.shell__subtitle {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.shell__status {
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.shell__status--error {
+  color: var(--color-error);
+}
+
+.shell__placeholder {
+  padding: var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-dim);
+  font-size: var(--text-sm);
+}
+
+/* ---------------------------------------------------------------------
+ * Auth gate (web/src/auth/AuthGate.tsx)
+ * --------------------------------------------------------------------- */
+.auth-gate {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+.auth-gate__form {
+  width: min(28rem, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 24px var(--color-accent-glow);
+}
+
+.auth-gate__label {
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  color: var(--color-text-secondary);
+}
+
+.auth-gate__input {
+  min-height: var(--touch-target-min);
+  padding: 0 var(--space-3);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  font-size: var(--text-base);
+}
+
+.auth-gate__submit {
+  min-height: var(--touch-target-min);
+  min-width: var(--touch-target-min);
+  background: var(--color-accent-dim);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  /* Hover only enhances (a brightness bump); the button is fully usable,
+     and its state fully legible, without it. */
+  transition: filter var(--motion-fast) var(--motion-ease);
+}
+
+.auth-gate__submit:hover {
+  filter: brightness(1.2);
+}
+
+.auth-gate__hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-dim);
+}
