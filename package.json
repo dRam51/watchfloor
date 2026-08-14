@@ -17,6 +17,7 @@
     "score": "node --env-file=.env src/bin/score.ts",
     "score:force": "node --env-file=.env src/bin/score.ts --force",
     "rank": "node --env-file=.env src/bin/rank.ts",
+    "suggest": "node --env-file=.env src/bin/suggest.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json && tsc -p web/tsconfig.json",
