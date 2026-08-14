@@ -21,12 +21,13 @@
 #                 M1 adapter (src/adapters/*.ts always fetch `url` verbatim) — present here
 #                 only as forward documentation of intent for M2 scoring/filtering.
 #   tier          markets sources only: event | analysis
-#   enrichment    true | false, default true (AP-only in M1, set false below). NOTE: this
-#                 key is NOT YET IN src/sources/load.ts's Zod schema — zod's default object
-#                 parsing silently strips unrecognized keys rather than rejecting them, so
-#                 this loads fine but has no effect yet. It documents intent (AP's robots.txt
-#                 blocks AI crawlers by name; AP items must never reach an LLM) ahead of the
-#                 schema catching up — see task-11-report.md.
+#   enrichment    true | false, default true (AP-only in M1, set false below). Validated by
+#                 src/sources/load.ts's Zod schema — a non-boolean value fails config load,
+#                 not just a comment's say-so. Still NOT YET CONSUMED by any M1 code (the
+#                 enrichment pass itself is a later milestone); this field's job today is to
+#                 record the decision (AP's robots.txt blocks AI crawlers by name; AP items
+#                 must never reach an LLM) so it survives until a consumer exists — see
+#                 task-11-report.md and fix-enrichment-field-report.md.
 #
 # M1 weight bands (see task-11-report.md for full per-source reasoning):
 #   2.0       hard-override: CISA KEV, and government primaries whose documents ARE the news
@@ -233,7 +234,8 @@ sources:
     weight: 1.8
     poll_interval: 30m
     # AP's robots.txt blocks AI crawlers by name — AP items must never be sent to an
-    # LLM. See the header comment above re: this field's current (inert) status.
+    # LLM. Validated by the schema now (see fix-enrichment-field-report.md); still not
+    # consumed by anything until the enrichment pass ships. See the header comment above.
     enrichment: false
     enabled: true
 

@@ -84,6 +84,40 @@ sources:
     expect(sources.map((s) => s.type)).toEqual(['news_sitemap', 'google_news']);
   });
 
+  // fix-enrichment-field task: `enrichment` was already legal, documented YAML
+  // (config/sources.yaml's `ap-news` entry set `enrichment: false`) before this schema
+  // knew about it. A plain `z.object()` (no `.strict()`) strips unrecognized keys
+  // instead of rejecting them, so the field loaded "successfully" while being silently
+  // dropped -- the AP-excluded-from-enrichment decision it encoded had zero effect. See
+  // task-11-report.md's "The `enrichment` field" section for the original discovery.
+  describe('enrichment field', () => {
+    it('parses enrichment: false and keeps the value', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true, enrichment: false }
+`;
+      const sources = loadSources(yaml);
+      expect(sources[0]?.enrichment).toBe(false);
+    });
+
+    it('defaults enrichment to true when omitted', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true }
+`;
+      const sources = loadSources(yaml);
+      expect(sources[0]?.enrichment).toBe(true);
+    });
+
+    it('rejects a non-boolean enrichment value', () => {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: 1h, enabled: true, enrichment: maybe }
+`;
+      expect(() => loadSources(yaml)).toThrow(SourceConfigError);
+    });
+  });
+
   // M1 task 11: the real config grew from one placeholder entry to the full verified
   // set. `loadSourcesFile` already rejects the whole file if a SINGLE entry is
   // malformed (FileSchema is `z.array(SourceSchema)`, parsed atomically), so the two
@@ -139,6 +173,18 @@ sources:
       for (const beat of ['ai', 'cyber', 'aisec', 'usnews'] as const) {
         expect(enabledBeats.has(beat), `no enabled source covers beat "${beat}"`).toBe(true);
       }
+    });
+
+    // Pinned regression for the fix-enrichment-field task: this is the exact case that
+    // motivated adding `enrichment` to the schema at all (task-11-report.md's "The
+    // `enrichment` field" section). Before the schema declared this key, `ap-news`'s
+    // `enrichment: false` loaded "successfully" while zod silently stripped it -- this
+    // fails loudly if a future config edit ever drops the field from ap-news, instead of
+    // the loss going unnoticed the same way it did the first time.
+    it('has enrichment: false on ap-news', () => {
+      const apNews = sources.find((s) => s.id === 'ap-news');
+      expect(apNews).toBeDefined();
+      expect(apNews?.enrichment).toBe(false);
     });
   });
 });

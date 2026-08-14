@@ -44,11 +44,43 @@ const SourceSchema = z.object({
   filters: z.record(z.unknown()).optional(),
   /** Markets sources only. Drives decay and which consumer sees the item (§5.1). */
   tier: z.enum(['event', 'analysis']).optional(),
+  // Gates whether this source's items may enter the LLM enrichment pass -- a later
+  // milestone. NOTHING reads this field yet (there is no enrichment pass to gate); its
+  // job today is narrower: be recorded and validated so a real decision doesn't quietly
+  // rot into a no-op. Do NOT delete this as "unused" just because no adapter or scorer
+  // consumes it yet -- that was exactly the bug this field fixes (see below).
+  //
+  // The decision behind it: AP's robots.txt names ClaudeBot, anthropic-ai, GPTBot, and
+  // CCBot as disallowed. Fetching AP's own declared news sitemap (config/sources.yaml's
+  // `ap-news`, type: news_sitemap) stays inside AP's stated rules, but handing those
+  // headlines to an LLM summarizer is closer to what those blocks are aimed at than a
+  // literal robots.txt path match captures. The project owner chose to keep `ap-news`
+  // out of enrichment regardless -- see that entry in config/sources.yaml and
+  // task-11-report.md's "The `enrichment` field" section for the full reasoning.
+  //
+  // Before this line existed, `enrichment: false` was already sitting on `ap-news` in
+  // config/sources.yaml, set there in the same commit that noted the schema gap -- and
+  // doing nothing, silently: a plain `z.object()` (no `.strict()`) drops unrecognized
+  // keys instead of rejecting them, so the config loaded "fine" while the decision it
+  // encoded had zero effect. Defaults to `true` so every existing source stays
+  // enrichment-eligible unless explicitly opted out.
+  enrichment: z.boolean().default(true),
 });
 
 const FileSchema = z.object({ sources: z.array(SourceSchema).min(1) });
 
-export type Source = z.infer<typeof SourceSchema>;
+// `enrichment`'s `.default(true)` above makes it required in z.infer's raw output -- every
+// Source that actually came from loadSources()/loadSourcesFile() always carries a concrete
+// true/false, never undefined. Widened back to optional here, deliberately: a repo-wide grep
+// (fix-enrichment-field task) found five `tests/**/*.test.ts` files building `Source` fixtures
+// by hand via `{ ...base, ...overrides }` with no base `enrichment`, none of them touchable by
+// this task (out of scope) or owned by the field's addition. Requiring the property there
+// would force an unrelated edit in every one of those files for a field nothing yet consumes.
+// A required `boolean` always satisfies an optional `boolean | undefined` slot, so this costs
+// real callers of the loader nothing. Do not read the `?` as "the loader may omit this" --
+// it never does. Treat a hand-built Source that skips this field as `?? true`, matching the
+// loader's own default, the same way you would for any other optional field on this type.
+export type Source = Omit<z.infer<typeof SourceSchema>, 'enrichment'> & { enrichment?: boolean };
 
 export function loadSources(yamlText: string): Source[] {
   let raw: unknown;
