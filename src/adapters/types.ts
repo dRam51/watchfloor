@@ -262,6 +262,187 @@ export interface AdapterResult {
    * the same way it would have to for `capped`.
    */
   filtered?: number;
+  /**
+   * How much of what this poll INTENDED to observe it actually observed. Not a
+   * count of entries at all -- see "why this is an object" below -- and
+   * deliberately the fourth exclusion-adjacent field rather than a reuse of any
+   * of the three above. Added M4a task 10, whose producer is
+   * `src/adapters/github.ts`; task 4 found the two facts, established that
+   * `skipped`/`capped`/`filtered` could each carry NEITHER of them, and
+   * recorded the gap rather than corrupting a field to fit.
+   *
+   * ## The two facts, and why they are one field
+   *
+   * - **Requests that were never sent.** A `github_search` poll issues one
+   *   query per (topic x recency-half): nine topics is 18 requests against an
+   *   unauthenticated ceiling of **10 per minute**. A poll therefore sends ten
+   *   and stops -- with no error, no throw, no failed entry, and a perfectly
+   *   healthy `recordSuccess(itemCount: n)`. Eight topics-worth of the picture
+   *   is simply missing and, before this field, NOTHING anywhere recorded it.
+   *   That is §7's "silent-failing feed" in its purest form.
+   * - **Result sets that were truncated.** Each query asks for one page in
+   *   STAR order, so a topic reporting 3,644 matches yields 50. What is left
+   *   behind is the low-star tail.
+   *
+   * They are not two flat fields because **neither is interpretable without
+   * the other**: a match shortfall summed over ten of eighteen queries is a
+   * shortfall over ten queries, not over the sweep. Read alone, `truncation`
+   * would invite exactly the confident wrong reading this file exists to
+   * prevent. Grouping them makes the denominator unavoidable.
+   *
+   * ## Why none of `skipped`, `capped`, `filtered` could carry either fact
+   *
+   * All three were considered and rejected -- see task-10-report.md; this is
+   * the same standard of argument `filtered`'s own doc comment above sets:
+   *
+   * - **`skipped` means "defective."** Neither fact involves a defective
+   *   entry. A query that was never sent has no entry to be broken; a repo
+   *   below the 50th star rank was never seen at all, let alone found
+   *   malformed. Folding either in would make a budget-exhausted or an
+   *   at-page-boundary poll -- both entirely healthy -- indistinguishable from
+   *   a parser that just broke on hundreds of entries. That is the same false
+   *   alarm `skipped`'s and `filtered`'s own comments already refuse for the
+   *   item cap and for a language filter.
+   * - **`capped` fails on BOTH counts, and each failure is independently
+   *   disqualifying.**
+   *     1. *Direction.* `capped`'s invariant is pinned above, deliberately and
+   *        after the meaning inverted once already: it counts entries at the
+   *        OLD end of a source's range, never the new end, because both of its
+   *        producers are recency-anchored. Star-order truncation drops the
+   *        LOW-STAR tail, which is neither end of a range `capped`'s consumers
+   *        can reason about. `filtered` exists because a language exclusion had
+   *        no relationship to recency; this is that same objection one step
+   *        further, and writing a star-anchored number into `capped` would make
+   *        the field mean "old end, sometimes" -- destroying the one
+   *        cross-source property it has.
+   *     2. *Plane, and unknowability.* `capped` counts ENTRIES. A request that
+   *        was never sent has no entry count -- and, decisively, **none can be
+   *        computed.** `capped`'s nvd-cve producer legitimately counts entries
+   *        it never fetched because NVD reports a `totalResults` for the whole
+   *        query; GitHub reports `total_count` **inside the search envelope**,
+   *        so a query that never went out yields no envelope and therefore no
+   *        total. Any number written for those eight queries would be
+   *        invented, and `0` is precisely the fabrication this file's three
+   *        prior fields already forbid. Requests are the only plane on which
+   *        that fact can be stated truthfully at all.
+   * - **`filtered` means "excluded by the source's own content policy."** This
+   *   adapter already uses `filtered` correctly, for §4's fork/archived
+   *   suppression. Neither fact here is a content decision: a page boundary
+   *   excludes on rank, not on content, and a rate limit excludes on budget.
+   *   (The adapter's real content filter, `stars:>=N`, is applied SERVER-SIDE
+   *   and correctly reports nothing at all through any field -- nothing is
+   *   fetched and then discarded, so there is nothing to count.)
+   *
+   * ## Presence convention -- deliberately `skipped`'s, not `capped`'s
+   *
+   * `capped` and `filtered` stay `undefined` when nothing was excluded,
+   * because a `0` there would assert a bound that never bound. `coverage` is
+   * the opposite case and follows `skipped` instead: `{plannedRequests: 18,
+   * completedRequests: 18}` is a real measurement of a poll that happened, and
+   * it is the REASSURING one. An adapter that plans requests therefore reports
+   * this on every non-304 fetch, complete or not -- so **absent means "this
+   * adapter does not report coverage," never "coverage was fine."** A
+   * source-health consumer must not read a missing field as an all-clear.
+   *
+   * `truncation` inside it keeps the `capped` convention (absent when nothing
+   * was left behind) and is nested rather than flattened so its three
+   * co-dependent numbers cannot be present one without the others -- the type
+   * enforces what three sibling optionals would only have documented.
+   */
+  coverage?: FetchCoverage;
+}
+
+/**
+ * Which end of a source's own result ordering the entries it did NOT retrieve
+ * sit at. A single-member union today, and that is the mechanism, not an
+ * accident: a second producer with a different anchor must add its own member,
+ * which breaks every exhaustive `switch` over this type at COMPILE time -- the
+ * same enforcement `AdapterRegistry` above provides for a missing `SourceType`,
+ * and precisely what was missing when `capped`'s direction silently inverted
+ * between two fix rounds and every consumer written against the old framing
+ * became backwards with nothing reporting it.
+ *
+ * `'stars-desc'`: `src/adapters/github.ts` requests one page sorted by stars
+ * descending, so the remainder is the low-star tail. NOT a recency anchor --
+ * a repo pushed an hour ago with 3 stars is left behind exactly as readily as
+ * one untouched for a year with 3 stars.
+ */
+export type CoverageOrder = 'stars-desc';
+
+/**
+ * The result-plane half of `AdapterResult.coverage`: within the requests that
+ * DID complete, how much of what they reported was actually retrieved.
+ *
+ * Both numbers are reported RAW rather than as their difference, and the
+ * difference is deliberately not precomputed anywhere: it is the misleading
+ * number. `capped`'s doc comment records the live case -- nvd-cve reporting a
+ * shortfall around 358,900 while holding CVEs published minutes earlier -- and
+ * this field is worse, not better, for it: `topic:llm` alone reports 70,432
+ * matches against 50 retrieved, and that ratio says nothing whatever about
+ * whether the lane is healthy. It is the same stance `src/api/routes/sources.ts`
+ * takes toward its tumbling window: publish the two components and the caveat,
+ * never a single derived number that asserts more than the data keeps.
+ */
+export interface ResultTruncation {
+  order: CoverageOrder;
+  /**
+   * What the source itself reported as matching, summed over COMPLETED
+   * requests only. For `github_search` this is the search envelope's own
+   * `total_count`.
+   *
+   * Two caveats a renderer must not lose. **It is approximate at the source:**
+   * GitHub's `total_count` is an estimate, and when a search envelope's
+   * `incomplete_results` is `true` it was computed over a query that timed out
+   * server-side. **It double-counts across overlapping queries:** a repo
+   * matching two topics is counted once per query, exactly as
+   * `retrievedEntries` counts it once per query. So neither figure is a
+   * distinct-entity count -- but both are on the same per-request-sum basis,
+   * which is what keeps their ratio meaningful even though their difference is
+   * not a number of distinct missed repos.
+   */
+  reportedMatches: number;
+  /**
+   * Entries actually present in those same completed responses, summed on the
+   * identical basis. Counted BEFORE any downstream accounting: an entry that
+   * then turned out defective (`skipped`), was excluded by policy
+   * (`filtered`), or was a duplicate of one already seen in another query is
+   * still counted here, because this number's only job is to be the honest
+   * denominator for `reportedMatches`. Reading it as "items ingested" would be
+   * wrong on all three counts -- `AdapterResult.items.length` is that number.
+   */
+  retrievedEntries: number;
+}
+
+/**
+ * How much of one poll's intended observation actually happened. See
+ * `AdapterResult.coverage` for the full argument, including why the two facts
+ * below share one object and why none of `skipped`/`capped`/`filtered` could
+ * hold either.
+ */
+export interface FetchCoverage {
+  /**
+   * Requests this poll intended to make -- the whole sweep, computed before
+   * the first one was sent. Always >= 1 on a fetch that reports coverage at
+   * all.
+   */
+  plannedRequests: number;
+  /**
+   * Requests that actually completed and contributed to `items`. Less than
+   * `plannedRequests` means the remainder was never sent (a rate-limit budget
+   * refused it) and this poll's picture is genuinely incomplete -- with no
+   * error, no failed entry, and a successful outcome, which is exactly why it
+   * needs recording somewhere at all.
+   *
+   * A poll where NOT ONE request completed does not reach this field: the
+   * adapter throws instead, so the scheduler records a real failure rather
+   * than a success that fetched nothing (`src/adapters/github.ts`'s `fetch`).
+   * `completedRequests: 0` is therefore not a reachable state today, and a
+   * future producer that makes it reachable should reconsider that rule rather
+   * than report it here.
+   */
+  completedRequests: number;
+  /** Absent when nothing was left behind -- see `ResultTruncation`. */
+  truncation?: ResultTruncation;
 }
 
 // ---------------------------------------------------------------------------

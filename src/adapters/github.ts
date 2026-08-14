@@ -162,26 +162,41 @@
  * is the backstop for if that ever changes.
  *
  * ---------------------------------------------------------------------------
- * WHAT IS NOT REPORTED, AND WHY -- `capped` cannot honestly carry it
+ * TWO INCOMPLETENESSES, BOTH REPORTED -- via `coverage`, never via `capped`
  * ---------------------------------------------------------------------------
- * One page of `RESULTS_PER_PAGE` per query means most queries leave results
- * behind: `topic:mcp created:>=180d stars:>=10` reports `total_count: 3644`
- * against 50 retrieved. That shortfall is NOT reported, and the omission is
- * deliberate.
+ * Task 4 found two facts about a poll that the adapter contract had no honest
+ * home for, and refused to force either into `skipped`/`capped`/`filtered`.
+ * Task 10 added `AdapterResult.coverage` for them; **read that field's doc
+ * comment in src/adapters/types.ts for the full argument** -- this is only what
+ * is specific to here.
  *
- * `AdapterResult.capped` has a **pinned direction invariant** (see its doc
- * comment, which records that the meaning inverted once already): it counts
- * entries at the OLD end of a source's range, never the new end. Both existing
- * producers are anchored to recency. This adapter's truncation is anchored to
- * STARS -- what it leaves behind is the low-star tail, which is neither the old
- * end nor the new end of anything. Setting `capped` here would corrupt the one
- * cross-source invariant that field was explicitly pinned to have, before its
- * first real consumer (M3's source-health page) exists to read it.
+ *   truncation   One page of `RESULTS_PER_PAGE` per query in STAR order means
+ *                most queries leave results behind: `topic:mcp created:>=180d
+ *                stars:>=10` reports `total_count: 3644` against 50 retrieved.
+ *                What is left is the LOW-STAR TAIL. `capped` could not carry
+ *                it: that field's direction invariant is pinned to the OLD end
+ *                of a range (and inverted once already), and a star anchor is
+ *                neither end. Reported as `coverage.truncation`, carrying an
+ *                explicit `order: 'stars-desc'` so no consumer can assume
+ *                recency.
+ *   partial      18 requests against an unauthenticated 10/minute budget: a
+ *   sweep        poll sends ten and returns, successfully, with eight topics'
+ *                worth of `pushed` half never asked for. `capped` could not
+ *                carry this one either, for a second and independent reason:
+ *                GitHub reports `total_count` INSIDE the envelope, so a query
+ *                that was never sent has no total and therefore no entry count
+ *                that could be written without inventing it. Reported as
+ *                `coverage.plannedRequests` vs `completedRequests` -- the only
+ *                plane on which the fact is stateable truthfully.
  *
- * Reporting it honestly needs either a new field or a deliberate contract
- * change, both in `src/adapters/types.ts`, which this task does not own.
- * Recorded in the task report as a recommendation rather than done quietly the
- * wrong way.
+ * `coverage` is reported on EVERY non-304 fetch, complete or not, so an absent
+ * field can never be misread as an all-clear.
+ *
+ * **It is not persisted.** Like `skipped`/`capped`/`filtered`, it lives only on
+ * the scheduler's in-memory `PollReport` for the duration of one cycle;
+ * `source_fetch_state` has no column for it. `src/api/routes/sources.ts` is in a
+ * different process and therefore reports a PREDICTION instead, computed from
+ * config by `plannedRequestsPerPoll` below. See that function.
  *
  * ---------------------------------------------------------------------------
  * NO CONDITIONAL REQUESTS EXIST ON THIS ENDPOINT
@@ -332,12 +347,26 @@ function asString(value: unknown): string | null {
 // Query construction
 // ---------------------------------------------------------------------------
 
+/**
+ * The two halves of §4's un-expressible OR, in the order they are issued.
+ *
+ * Hoisted to module scope, and `plannedRequestsPerPoll` below multiplies by
+ * `SEARCH_HALVES.length` rather than by a literal 2, so the request count the
+ * source-health page PREDICTS from config cannot drift from the sweep this
+ * adapter actually plans. A third half would otherwise have to be remembered in
+ * two files, and the symptom of forgetting would be a health page confidently
+ * reporting the wrong denominator.
+ */
+export const SEARCH_HALVES = ['created', 'pushed'] as const;
+
+export type SearchHalf = (typeof SEARCH_HALVES)[number];
+
 /** One search request this poll intends to make. */
 export interface SearchRequest {
   /** The configured topic this query is for. */
   topic: string;
   /** Which half of §4's un-expressible OR this query covers. */
-  half: 'created' | 'pushed';
+  half: SearchHalf;
   /** The `q` parameter, exactly as sent. */
   q: string;
   /** The fully-resolved request url. */
@@ -450,20 +479,20 @@ export function buildSearchRequests(source: Source, now: Date): SearchRequest[] 
   const endpoint = searchEndpoint(source);
   const minStars = typeof source.filters?.min_stars === 'number' ? source.filters.min_stars : DEFAULT_MIN_STARS;
 
-  const halves: ReadonlyArray<{ half: 'created' | 'pushed'; qualifier: string }> = [
-    { half: 'created', qualifier: `created:>=${dayStringBefore(now, CREATED_WITHIN_DAYS)}` },
-    { half: 'pushed', qualifier: `pushed:>=${dayStringBefore(now, PUSHED_WITHIN_DAYS)}` },
-  ];
+  const qualifierFor: Record<SearchHalf, string> = {
+    created: `created:>=${dayStringBefore(now, CREATED_WITHIN_DAYS)}`,
+    pushed: `pushed:>=${dayStringBefore(now, PUSHED_WITHIN_DAYS)}`,
+  };
 
   const offset = Math.floor(now.getTime() / TOPIC_ROTATION_PERIOD_MS) % topics.length;
   const rotated = [...topics.slice(offset), ...topics.slice(0, offset)];
 
   const requests: SearchRequest[] = [];
   // Halves outermost, topics innermost -- see the doc comment above.
-  for (const { half, qualifier } of halves) {
+  for (const half of SEARCH_HALVES) {
     for (const topic of rotated) {
       // `archived:false` is server-side §4 suppression; see the module doc.
-      const q = `topic:${topic} archived:false stars:>=${minStars} ${qualifier}`;
+      const q = `topic:${topic} archived:false stars:>=${minStars} ${qualifierFor[half]}`;
       const url = new URL(endpoint);
       url.searchParams.set('q', q);
       // `order` is explicit even though desc is GitHub's default for `stars`:
@@ -674,20 +703,68 @@ function mapEntry(entry: unknown): EntryOutcome {
   };
 }
 
+/** One completed query's envelope, as far as this adapter reads it. */
+interface SearchEnvelope {
+  entries: unknown[];
+  /**
+   * The envelope's own `total_count`, or `null` when it is absent or not a
+   * number. Null is not treated as zero: a request whose total cannot be read
+   * contributes to NEITHER side of `ResultTruncation`, so both of its sums stay
+   * on the same per-request basis and their ratio keeps meaning. Counting the
+   * entries of a request whose total is unknown would silently make the sweep
+   * look better covered than it is.
+   */
+  reportedMatches: number | null;
+}
+
 /**
- * Pulls the `items` array out of a search envelope, or throws. An `items` that
- * is present and empty is a valid envelope reporting zero results -- a quiet
- * topic (or, with the floor applied, a topic with nothing worth showing) is a
- * healthy poll, not a failure.
+ * Pulls the `items` array (and the reported match total) out of a search
+ * envelope, or throws. An `items` that is present and empty is a valid envelope
+ * reporting zero results -- a quiet topic (or, with the floor applied, a topic
+ * with nothing worth showing) is a healthy poll, not a failure.
+ *
+ * A missing or unreadable `total_count` is deliberately NOT a parse failure:
+ * `items` is what the adapter exists to read, and refusing a whole otherwise-
+ * good response over a coverage statistic would trade real repos for a number.
  */
-function extractItems(body: unknown, request: SearchRequest, sourceId: string): unknown[] {
+function extractEnvelope(body: unknown, request: SearchRequest, sourceId: string): SearchEnvelope {
   if (!isRecord(body)) {
     throw new GitHubSearchParseError(request.url, sourceId, 'response body is not a JSON object');
   }
   if (!Array.isArray(body.items)) {
     throw new GitHubSearchParseError(request.url, sourceId, 'no "items" array in the response envelope');
   }
-  return body.items;
+  const total = body.total_count;
+  return {
+    entries: body.items,
+    reportedMatches: typeof total === 'number' && Number.isFinite(total) ? total : null,
+  };
+}
+
+/**
+ * How many requests ONE COMPLETE poll of `source` needs, or `null` for a source
+ * this adapter does not drive.
+ *
+ * Exported for `src/api/routes/sources.ts`, which runs in the API process and
+ * therefore never sees an `AdapterResult` -- `AdapterResult.coverage` is an
+ * OBSERVATION made by the scheduler process and is not persisted anywhere, so
+ * the health page can only PREDICT this figure from config. That prediction is
+ * exact for this adapter (the sweep is a pure function of the topic list), and
+ * `tests/adapters/github.test.ts` pins it against `buildSearchRequests` itself
+ * for every topic count rather than trusting two copies of the arithmetic.
+ *
+ * Deliberately never throws, unlike `buildSearchRequests`: a health page asking
+ * "how big is this source's sweep?" about a misconfigured source must get
+ * `null` -- "no honest answer" -- and go on to render every other source, not
+ * take the whole endpoint down. The loud refusal for a topic-less source
+ * already exists twice (config load, and `buildSearchRequests` at poll time);
+ * a third one here would only move a real failure into the wrong process.
+ */
+export function plannedRequestsPerPoll(source: Source): number | null {
+  if (source.type !== 'github_search') return null;
+  const topics = source.filters?.topics;
+  if (!Array.isArray(topics) || topics.length === 0) return null;
+  return topics.length * SEARCH_HALVES.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +825,11 @@ export const githubSearchAdapter: Adapter = {
     let skipped = 0;
     let filtered = 0;
     let completedRequests = 0;
+    // Both sums are over the SAME set of requests -- those that completed AND
+    // reported a readable total -- so their ratio stays meaningful. See
+    // `SearchEnvelope.reportedMatches` and `ResultTruncation`.
+    let reportedMatches = 0;
+    let retrievedEntries = 0;
 
     for (const request of requests) {
       let body: unknown;
@@ -759,7 +841,13 @@ export const githubSearchAdapter: Adapter = {
       }
       completedRequests++;
 
-      for (const entry of extractItems(body, request, source.id)) {
+      const envelope = extractEnvelope(body, request, source.id);
+      if (envelope.reportedMatches !== null) {
+        reportedMatches += envelope.reportedMatches;
+        retrievedEntries += envelope.entries.length;
+      }
+
+      for (const entry of envelope.entries) {
         let outcome: EntryOutcome;
         try {
           outcome = mapEntry(entry);
@@ -794,6 +882,29 @@ export const githubSearchAdapter: Adapter = {
       // `filtered` already use. Normally undefined: GitHub excludes forks and
       // archived repos server-side, so the local check finds nothing to drop.
       ...(filtered > 0 ? { filtered } : {}),
+      // ALWAYS reported, complete or not -- `coverage` follows `skipped`'s
+      // presence convention rather than `capped`'s, precisely so a
+      // source-health consumer cannot read an absent field as an all-clear.
+      // See AdapterResult.coverage's own doc comment.
+      coverage: {
+        plannedRequests: requests.length,
+        completedRequests,
+        // `capped`'s convention here: absent when the page boundary did not
+        // bind, never a fabricated zero.
+        ...(reportedMatches > retrievedEntries
+          ? {
+              truncation: {
+                // Anchored to STARS, which is why `capped` -- pinned to the OLD
+                // end of a range -- could not carry this number. Machine-
+                // readable so a renderer cannot assume recency the way one
+                // written against capped's pre-inversion framing did.
+                order: 'stars-desc' as const,
+                reportedMatches,
+                retrievedEntries,
+              },
+            }
+          : {}),
+      },
     };
   },
 };

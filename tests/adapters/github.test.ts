@@ -8,6 +8,7 @@ import {
   DEFAULT_MIN_STARS,
   githubSearchAdapter,
   GitHubSearchConfigError,
+  plannedRequestsPerPoll,
   PUSHED_WITHIN_DAYS,
   repoFromSearchItem,
   RESULTS_PER_PAGE,
@@ -721,6 +722,137 @@ describe('githubSearchAdapter', () => {
         JSON.stringify(error, Object.getOwnPropertyNames(error)),
       ].join('\n');
       expect(serialized).not.toContain('ghp_fixture_only_secret');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // AdapterResult.coverage (task 10) -- the two facts task 4 found had no
+  // honest home in the contract, and refused to force into skipped/capped/
+  // filtered. See src/adapters/types.ts's `coverage` doc comment for why none
+  // of those three could carry either one.
+  // -------------------------------------------------------------------------
+  describe('coverage: how much of what this poll intended to observe it actually observed', () => {
+    // Same shape as the `rate limits` block's: real captured header set with
+    // the counter zeroed and the reset pushed far out, so the client refuses
+    // the SECOND request locally rather than the outcome depending on the
+    // wall clock.
+    const exhausted = {
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-used': '10',
+      'x-ratelimit-reset': '4102444800',
+    };
+
+    it('reports a COMPLETE sweep as planned === completed, so "everything ran" is a positive statement rather than an absent field', async () => {
+      const baseUrl = await serveFixture('search-mcp-created.json');
+      const result = await githubSearchAdapter.fetch(makeSource({ url: baseUrl }), null, NOW);
+
+      expect(result.coverage).toBeDefined();
+      expect(result.coverage!.plannedRequests).toBe(2);
+      expect(result.coverage!.completedRequests).toBe(2);
+    });
+
+    // THE SILENT FAILURE THIS FIELD EXISTS FOR. Nine topics is 18 requests
+    // against an unauthenticated 10/minute budget: a poll sends ten and
+    // returns a genuinely incomplete picture, with no error, no throw, and a
+    // perfectly healthy recordSuccess. Before this field, nothing anywhere
+    // recorded that eight queries were never sent.
+    it('reports a PARTIAL sweep -- the requests the budget refused are counted, not silently dropped', async () => {
+      let calls = 0;
+      const baseUrl = await serve((_req, res) => {
+        calls++;
+        res.writeHead(200, headersOf('search_200', exhausted));
+        res.end(fixture('search-mcp-created.json'));
+      });
+
+      const result = await githubSearchAdapter.fetch(makeSource({ url: baseUrl }), null, NOW);
+
+      // One query got through and reported a spent budget; the second was
+      // refused locally before it was ever sent.
+      expect(calls).toBe(1);
+      expect(result.coverage!.plannedRequests).toBe(2);
+      expect(result.coverage!.completedRequests).toBe(1);
+    });
+
+    // Star-order truncation. GitHub returns 50-per-page in star order, so what
+    // one page leaves behind is the LOW-STAR TAIL -- neither the old nor the
+    // new end of anything, which is exactly why `capped` (whose direction
+    // invariant is pinned to the OLD end) could not carry this number.
+    it('reports star-order truncation with the ordering it is anchored to, and both raw numbers rather than their difference', async () => {
+      const baseUrl = await serveFixture('search-mcp-created.json');
+      const result = await githubSearchAdapter.fetch(makeSource({ url: baseUrl }), null, NOW);
+
+      expect(result.coverage!.truncation).toEqual({
+        order: 'stars-desc',
+        // Summed over the two completed requests, both served the same
+        // 3,644-match / 12-retrieved fixture.
+        reportedMatches: 3644 * 2,
+        retrievedEntries: 12 * 2,
+      });
+    });
+
+    // `capped` would have been the wrong field, but so would a bare number:
+    // a shortfall counted over ten of eighteen queries is not a shortfall
+    // over the sweep. The two numbers are only interpretable against
+    // completedRequests, which is why they travel in one object with it.
+    it('sums the truncation numbers over COMPLETED requests only -- a query never sent contributes no matches', async () => {
+      const baseUrl = await serve((_req, res) => {
+        res.writeHead(200, headersOf('search_200', exhausted));
+        res.end(fixture('search-mcp-created.json'));
+      });
+
+      const result = await githubSearchAdapter.fetch(makeSource({ url: baseUrl }), null, NOW);
+
+      expect(result.coverage!.completedRequests).toBe(1);
+      expect(result.coverage!.truncation).toEqual({
+        order: 'stars-desc',
+        reportedMatches: 3644,
+        retrievedEntries: 12,
+      });
+    });
+
+    // Same "undefined rather than a fabricated 0" convention skipped/capped/
+    // filtered already use: a page that held everything there was to hold was
+    // not truncated, and saying so with a zero would be a claim about a
+    // boundary that never bound.
+    it('omits truncation entirely when every match was retrieved', async () => {
+      const baseUrl = await serveFixture('search-netdevops-created.json');
+      const result = await githubSearchAdapter.fetch(
+        makeSource({ url: baseUrl, filters: { topics: ['netdevops'] } }),
+        null,
+        NOW,
+      );
+
+      expect(result.coverage!.completedRequests).toBe(2);
+      expect(result.coverage!.truncation).toBeUndefined();
+    });
+
+    it('omits truncation on an empty result set, which is a healthy quiet poll and not a boundary', async () => {
+      const baseUrl = await serveFixture('search-empty.json');
+      const result = await githubSearchAdapter.fetch(makeSource({ url: baseUrl }), null, NOW);
+      expect(result.coverage!.truncation).toBeUndefined();
+    });
+
+    // The source-health page predicts requestsPerPoll from config alone (it
+    // runs in the API process and never sees an AdapterResult). If that
+    // prediction and the adapter's real plan ever diverge, the page reports a
+    // confident wrong number -- so they are pinned to one another here rather
+    // than to two independently-maintained "x 2"s.
+    it('plannedRequestsPerPoll predicts exactly what buildSearchRequests plans, for any topic count', () => {
+      for (let topicCount = 1; topicCount <= 12; topicCount++) {
+        const source = makeSource({
+          filters: { topics: Array.from({ length: topicCount }, (_, i) => `t${i}`) },
+        });
+        expect(plannedRequestsPerPoll(source)).toBe(buildSearchRequests(source, NOW).length);
+      }
+    });
+
+    it('predicts nothing for a source type that has no multi-request sweep', () => {
+      expect(plannedRequestsPerPoll(makeSource({ type: 'rss', url: 'https://example.com/feed.xml' }))).toBeNull();
+    });
+
+    it('predicts nothing, rather than guessing, for a github_search source with no topic list', () => {
+      expect(plannedRequestsPerPoll(makeSource({ filters: {} }))).toBeNull();
+      expect(plannedRequestsPerPoll(makeSource({ filters: undefined }))).toBeNull();
     });
   });
 
