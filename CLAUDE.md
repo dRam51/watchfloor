@@ -192,6 +192,30 @@ Edit `config/sources.yaml` — never code. Fields and allowed values are documen
 in the file header and enforced by `src/sources/load.ts`. A source with a
 malformed `weight`, `beat`, or `poll_interval` fails at load, not at fetch time.
 
+> [!warning] Check what the source actually *sorts by*. This has bitten twice.
+> A feed returning HTTP 200 with well-formed, parseable, genuinely-real items can still be
+> useless, because **an API's default sort is rarely "newest first"** and the failure is
+> completely silent — no error, no null, no malformed row. Both instances were found only by
+> looking at the dates of what came back:
+>
+> - **`nvd-cve`** sorts ascending by CVE id. Paginating from `startIndex=0` returned CVEs
+>   from **1988** on every poll, forever. Fixed by anchoring the walk at the tail.
+> - **`hn-algolia`** used Algolia's `/search`, which sorts by *relevance* — with no query
+>   term, that means all-time popularity. It returned *"Steve Jobs has passed away"*
+>   (**5,426 days old**) every hour, on the `ai` beat. Fixed with `/search_by_date` plus a
+>   `numericFilters=points>50` quality floor, since pure recency swings to the opposite
+>   failure of 1-point submissions minutes old.
+>
+> So when adding any `json`/`api` source: **fetch it and print the dates.** A one-line check
+> (`newest`, `median`, `oldest` age of what comes back) catches this class instantly. A full
+> 19-source sweep is recorded in the M2 ledger; re-run it after adding sources.
+>
+> Two results from that sweep that are *not* bugs but explain row counts:
+> `huggingface-blog` carries its entire history (**842 items, median age 767 days**), like
+> `cisa-kev`'s 1,665-entry catalog dump — correctly ordered, just complete. And
+> `owasp-genai`'s newest item is **93 days old**, so it contributes nothing current to
+> `aisec`; that is a quiet publisher, not a sort bug.
+
 ## Portability debt
 
 **The Obsidian vault is on iCloud Drive** — `~/Library/Mobile Documents/iCloud~md~obsidian/
