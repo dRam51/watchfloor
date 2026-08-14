@@ -4,6 +4,10 @@ import {
   InvalidRepoError,
   MAX_EXCERPT_LENGTH,
   makeRepo,
+  hasNoReadme,
+  intrinsicSuppressionReasons,
+  isArchived,
+  isFork,
   repoItemKey,
   toExcerpt,
   type RepoInput,
@@ -204,5 +208,64 @@ describe('repoItemKey', () => {
     const repo = makeRepo(dmcaInput());
     expect(deriveItemKey(DMCA_DEEP_LINK)).toBe(DMCA_DEEP_LINK_ITEM_KEY);
     expect(repoItemKey(repo)).not.toBe(DMCA_DEEP_LINK_ITEM_KEY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §4: "Suppress: forks, archived repos, repos with no README, anything I've
+// already dismissed." Three of the four are properties of the repo itself.
+// ---------------------------------------------------------------------------
+
+describe('the three intrinsic suppression predicates', () => {
+  it('isFork is true for a fork and false otherwise', () => {
+    expect(isFork(makeRepo(dmcaInput({ isFork: true })))).toBe(true);
+    expect(isFork(makeRepo(dmcaInput({ isFork: false })))).toBe(false);
+  });
+
+  it('isArchived is true for an archived repo and false otherwise', () => {
+    expect(isArchived(makeRepo(dmcaInput({ isArchived: true })))).toBe(true);
+    expect(isArchived(makeRepo(dmcaInput({ isArchived: false })))).toBe(false);
+  });
+
+  it('hasNoReadme is true when there is no README at all', () => {
+    expect(hasNoReadme(makeRepo(dmcaInput({ readmeFirstParagraph: null })))).toBe(true);
+  });
+
+  it('hasNoReadme is true for a README with no prose -- a title and badges only', () => {
+    // Real and common: `# projectname` followed by a row of shields.io badges,
+    // from which an extractor recovers no paragraph. Treated as README-less
+    // rather than as a repo with an empty excerpt.
+    expect(hasNoReadme(makeRepo(dmcaInput({ readmeFirstParagraph: '  \n\n ' })))).toBe(true);
+  });
+
+  it('hasNoReadme is false when a first paragraph survived extraction', () => {
+    expect(hasNoReadme(makeRepo(dmcaInput()))).toBe(false);
+  });
+});
+
+describe('intrinsicSuppressionReasons', () => {
+  it('is empty for a repo that breaks none of the three rules', () => {
+    expect(intrinsicSuppressionReasons(makeRepo(dmcaInput()))).toEqual([]);
+  });
+
+  it('reports every rule the repo breaks, in a deterministic order', () => {
+    const repo = makeRepo(
+      dmcaInput({ isFork: true, isArchived: true, readmeFirstParagraph: null }),
+    );
+    expect(intrinsicSuppressionReasons(repo)).toEqual(['fork', 'archived', 'no_readme']);
+  });
+
+  it('reports exactly the rule broken when only one is', () => {
+    expect(intrinsicSuppressionReasons(makeRepo(dmcaInput({ isArchived: true })))).toEqual([
+      'archived',
+    ]);
+  });
+
+  it('never reports dismissal -- that is not a property of the repo', () => {
+    // Dismissal is the reader's own history, and needs a database. Keeping it
+    // out of the pure function is what lets Tasks 4 and 6 apply the cheap
+    // rules with no db handle at all.
+    const repo = makeRepo(dmcaInput({ isFork: true, isArchived: true, readmeFirstParagraph: null }));
+    expect(intrinsicSuppressionReasons(repo)).not.toContain('dismissed');
   });
 });

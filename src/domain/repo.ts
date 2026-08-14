@@ -322,3 +322,127 @@ export function makeRepo(input: RepoInput): Repo {
 export function repoItemKey(repo: Repo): string {
   return deriveItemKey(repo.htmlUrl);
 }
+
+// ---------------------------------------------------------------------------
+// §4's suppression list
+//
+// "Suppress: forks, archived repos, repos with no README, anything I've
+// already dismissed."
+//
+// SUPPRESS, NOT DE-RANK -- and the reason is structural, not deference to the
+// brief's wording
+// ---------------------------------------------------------------------------
+//
+// The literal reading (remove, do not merely penalize) is the right one for
+// all four, but the interesting case is "no README", because unlike the other
+// three it is a FIXABLE property of a live repository: a repo can gain a
+// README next week. Under this project's append-only storage, "a hard
+// suppression today is not a permanent verdict" is the question worth asking,
+// and it has a clean answer:
+//
+//   Suppression here is a PREDICATE OVER THE CURRENT SNAPSHOT, evaluated at
+//   read time. It is never stored, so there is no verdict to become stale.
+//
+// That is the same stance `src/score/decay.ts` takes toward recency and
+// `isHighOnBoth` takes toward the two-score flag: derived at read time from
+// stored facts, never itself a stored fact. A repo that gains a README simply
+// stops matching `hasNoReadme` on the next poll, with no migration, no
+// backfill, and no "unsuppress" mechanism to build -- exactly as a repo that
+// gets unarchived stops matching `isArchived`. This module writes nothing,
+// anywhere, which is what makes that guarantee mechanical rather than a
+// promise.
+//
+// A negative WEIGHT would be strictly worse here, and not for stylistic
+// reasons. A weight has to live in `config/scoring.yaml` and feed the
+// mechanical scorer, whose stored components are required to be
+// decay-invariant (CLAUDE.md, "Recency decay: applied at read time, never
+// stored"). "Has a README" is not decay-invariant in that sense -- it is a
+// mutable property of a live repo -- so a score component derived from it
+// would go stale in `item_scores` in exactly the way a stored decay factor
+// would, and would need a rescore to correct. The read-time predicate is
+// strictly more truthful AND strictly less machinery.
+//
+// The real cost of the literal reading is a DETECTION problem, not a policy
+// one: a notable repo whose docs live on a separate site, or whose readme is
+// `README.rst` / `readme.txt` / in `docs/`, would vanish from the lane
+// entirely. The mitigation belongs in Task 6's enrichment fetch -- GitHub's
+// `GET /repos/{owner}/{repo}/readme` already resolves any casing and any of
+// the standard extensions, so using that endpoint rather than probing for a
+// literal `README.md` closes most of it. It does not belong in a weight here.
+//
+// WHERE THE FOUR ARE ENFORCED IS A SEPARATE QUESTION FROM WHETHER THEY REMOVE
+//
+// `isFork` and `isArchived` are readable from the SEARCH response with no
+// extra request, so Task 4 can drop those repos before Task 6 ever spends an
+// enrichment request on them. `hasNoReadme` can only be known after the README
+// fetch, so it necessarily costs the request it then invalidates.
+// `isRepoDismissed` is the one that saves the most budget and enforces the
+// least: `src/api/routes/feed.ts` ALREADY excludes every dismissed item from
+// every view before ranking ("Dismissed items never come back (§7)"), so the
+// repos lane inherits that guarantee whether or not this predicate is ever
+// called. Its value is that Task 4 can check it BEFORE enriching -- not
+// spending a rate-limited request on a repo the owner has already thrown away.
+// Stated plainly so nobody later mistakes this function for the enforcement
+// point and "optimizes away" the one in feed.ts.
+
+/** Why a repo is being kept out of the lane. Ordered as declared below. */
+export type SuppressionReason = 'fork' | 'archived' | 'no_readme' | 'dismissed';
+
+/** §4: forks are suppressed. A fork is by construction a copy of an upstream repo. */
+export function isFork(repo: Repo): boolean {
+  return repo.isFork;
+}
+
+/**
+ * §4: archived repos are suppressed. Archiving is the author's own explicit
+ * statement that the repo is finished and read-only — the least ambiguous
+ * signal on this list, and reversible, so the read-time evaluation above
+ * applies here too.
+ */
+export function isArchived(repo: Repo): boolean {
+  return repo.isArchived;
+}
+
+/**
+ * §4: repos with no README are suppressed.
+ *
+ * Keyed on the CAPPED excerpt being absent, not on whether a README file
+ * exists — so a README that is nothing but a title heading and a badge row
+ * (real, and common) counts as README-less, because that is what it is to a
+ * reader. See {@link toExcerpt}'s blank → `null` rule, which is where that
+ * equivalence is actually established.
+ */
+export function hasNoReadme(repo: Repo): boolean {
+  return repo.readmeExcerpt === null;
+}
+
+// One table, so the combined function below cannot drift from the individual
+// predicates -- adding a fourth intrinsic rule means adding one row here, not
+// remembering to update two places.
+const INTRINSIC_RULES: ReadonlyArray<{
+  reason: SuppressionReason;
+  test: (repo: Repo) => boolean;
+}> = [
+  { reason: 'fork', test: isFork },
+  { reason: 'archived', test: isArchived },
+  { reason: 'no_readme', test: hasNoReadme },
+];
+
+/**
+ * Every §4 suppression rule this repo breaks that is a property of the repo
+ * ITSELF — deliberately excluding dismissal, which is the reader's own history
+ * and needs a database.
+ *
+ * Pure, and separated from {@link suppressionReasons} for a practical reason:
+ * these three are the cheap rules, evaluable with no `Db` handle at all, so a
+ * caller holding only a search-API response can drop forks and archived repos
+ * before paying for enrichment.
+ *
+ * Returns every reason rather than the first, in declaration order. A repo can
+ * break several rules at once and "why is this not in my lane" is a question
+ * the owner will eventually ask; a first-match-wins answer would be a
+ * half-truth.
+ */
+export function intrinsicSuppressionReasons(repo: Repo): SuppressionReason[] {
+  return INTRINSIC_RULES.filter((rule) => rule.test(repo)).map((rule) => rule.reason);
+}
