@@ -563,6 +563,60 @@ describe('query validation', () => {
 //    including the "pinned at signal ~0.000" case the M3 brief calls out.
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// The row carries what §7's item row actually needs to render.
+// ---------------------------------------------------------------------------
+
+describe("§7's row needs a link and an excerpt, so the wire carries both", () => {
+  it('returns canonicalUrl and summary, which `o` (open in new tab) and expand-in-place require', async () => {
+    const db = migratedDb();
+    const publishedAt = '2026-08-13T00:00:00.000Z';
+    const item = insertItem(
+      db,
+      baseItem({
+        beats: ['cyber'],
+        publishedAt,
+        fetchedAt: publishedAt,
+        summaryRaw: 'A short excerpt, already capped at ~300 chars when stored.',
+      }),
+    );
+    insertScoreRow(db, item.item_id, 'cyber', 10, 5, publishedAt);
+
+    const server = buildTestServer(db);
+    const res = await server.inject(authed(`/feed?beat=cyber&now=${T0}`));
+    expect(res.statusCode).toBe(200);
+    const row = res.json().items[0];
+
+    // Both were absent from the original wire shape. §7's `o` action cannot
+    // be implemented without a link, and "expands in place for the
+    // excerpt/summary" has nothing to expand into without the excerpt --
+    // and §7.1 forbids the frontend deriving either. Regressions here are
+    // silent: the UI simply renders a row that cannot be opened or expanded.
+    expect(row.canonicalUrl).toBe(item.canonicalUrl);
+    expect(row.summary).toBe('A short excerpt, already capped at ~300 chars when stored.');
+  });
+
+  it('passes a null summary through as null rather than omitting the field', async () => {
+    const db = migratedDb();
+    const publishedAt = '2026-08-13T00:00:00.000Z';
+    const item = insertItem(
+      db,
+      baseItem({ beats: ['cyber'], publishedAt, fetchedAt: publishedAt, summaryRaw: null }),
+    );
+    insertScoreRow(db, item.item_id, 'cyber', 10, 5, publishedAt);
+
+    const server = buildTestServer(db);
+    const res = await server.inject(authed(`/feed?beat=cyber&now=${T0}`));
+    const row = res.json().items[0];
+
+    // Absence and emptiness differ: a source with no excerpt is not a source
+    // whose excerpt failed to load. The frontend renders those differently.
+    expect(row).toHaveProperty('summary');
+    expect(row.summary).toBeNull();
+  });
+});
+
 describe('real corpus (data/wf.db)', () => {
   it('runs against the real 4,135-item corpus, and a pinned KEV entry can display signal 0.000 while still ranking first among its cyber peers', () => {
     const scratchDir = mkdtempSync(join(tmpdir(), 'wf-feed-corpus-'));

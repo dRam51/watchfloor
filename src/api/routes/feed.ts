@@ -345,6 +345,21 @@ function candidateItemKeysAll(db: Db, now: string): string[] {
 interface FeedRow {
   itemKey: string;
   title: string;
+  /**
+   * §7's `o` keyboard action is "open in new tab", and §7.1 forbids business
+   * logic in the frontend -- so the client cannot reconstruct a link, it has
+   * to be handed one. Added during route wiring: the original shape omitted
+   * it, which would have made the open action unimplementable.
+   */
+  canonicalUrl: string;
+  /**
+   * The stored excerpt. §7's row is "one line at rest, expands in place for
+   * the excerpt/summary and metadata" -- without this there is nothing to
+   * expand into. Already capped at ~300 characters at storage time by the
+   * standing "links and short excerpts, never full article text" rule, so
+   * this is not a full-text leak.
+   */
+  summary: string | null;
   sourceId: string;
   publishedAt: string | null;
   itemType: ItemType;
@@ -463,6 +478,8 @@ function buildCandidateRows(
     rows.push({
       itemKey,
       title: item.title,
+      canonicalUrl: item.canonicalUrl,
+      summary: item.summaryRaw,
       sourceId: item.sourceId,
       publishedAt: item.publishedAt,
       itemType: item.itemType,
@@ -501,6 +518,13 @@ function toFeedItemJson(row: FeedRow, profile: SortProfile) {
   return {
     itemKey: row.itemKey,
     title: row.title,
+    // §7's `o` opens the item in a new tab, and its row "expands in place for
+    // the excerpt/summary". Neither is derivable client-side (§7.1 forbids
+    // business logic in the frontend), so both are handed over. `summary` is
+    // already capped at ~300 characters at storage time by the standing
+    // "links and short excerpts, never full article text" rule.
+    canonicalUrl: row.canonicalUrl,
+    summary: row.summary,
     sourceId: row.sourceId,
     publishedAt: row.publishedAt,
     itemType: row.itemType,
