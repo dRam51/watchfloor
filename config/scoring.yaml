@@ -1,0 +1,191 @@
+# Mechanical-scorer weights for Watchfloor's M2 scoring pass (§5, M2 task 5).
+# Consumed by src/score/mechanical.ts's parseMechanicalScoreConfig /
+# loadMechanicalScoreConfig -- Zod-validated at load time, so a malformed or
+# out-of-range value fails the process rather than silently producing a
+# nonsensical score. Retuning a weight here is a config edit, never a code
+# change -- same convention as config/decay.yaml, config/interests.yaml, and
+# config/overrides.yaml.
+#
+# ---------------------------------------------------------------------------
+# What this file does NOT decide
+# ---------------------------------------------------------------------------
+#
+# Recency decay -- NOT here. item_scores is append-only, and this scorer
+# computes only the DECAY-INVARIANT components of signal_score/read_score;
+# decay is applied at READ time, from published_at and the reader's own now,
+# by src/score/decay.ts (config/decay.yaml), never by this file or
+# src/score/mechanical.ts. Nothing below is a half-life, and no value here
+# is multiplied against elapsed time anywhere in mechanical.ts.
+#
+# item_type -- NOT an input to this scorer, DELIBERATELY, despite the M2
+# plan's signal_score description mentioning "timeliness-as-a-property-of-
+# the-item" (which reads, at first glance, like an item_type signal) and an
+# earlier draft of this file having shipped exactly that. Corrected during
+# implementation, before this file's first commit, once M2 task 7's real
+# measurement came back: item_type is CURRENTLY effectively binary --
+# `event` for exactly the four government-primary source_ids
+# (cisa-kev/cisa-advisories/federal-register/whitehouse-actions) and
+# `analysis` for literally everything else, INCLUDING real sports and
+# Spanish-language wire copy (verified: "Howard, Gray each score 29 points
+# as the Dream ease by the Sun 104-69" and "Swiatek vence a Rybakina en
+# Toronto" both classify `analysis`). The one case that would have added
+# real information -- `press`, PR-wire syndication -- matches 0 of 3,325
+# real items; no configured source is a PR-wire distributor. Building an
+# item_type-keyed multiplier here would either (a) do nothing beyond what
+# `source.*` below already captures, since `event` is 100% determined by
+# source_id membership in a fixed 4-source list, or (b) create the ILLUSION
+# of a content-quality signal for `analysis` vs `press` that the real data
+# cannot support. Omitted entirely rather than shipped as a table that's
+# quietly a no-op -- this project's convention (Task 6's two unreachable
+# override categories, Task 1's empty press-release term list) is that an
+# absent mechanism is documented as absent, not implied to work. See
+# src/score/mechanical.ts's module doc comment for the full reasoning and
+# task-5-report.md for the live correction that prompted it. `Item.itemType`
+# remains available on every row for a future scorer version to use once a
+# further classifier refinement (M4b or later) gives it independent
+# discriminating power again -- picking it up is a `scorer_version` bump,
+# not a schema change.
+#
+# ---------------------------------------------------------------------------
+# Shape
+# ---------------------------------------------------------------------------
+#
+#   scorer_version   Written verbatim into every item_scores row this
+#                     module writes. Bump it by hand whenever a change to
+#                     THIS FILE's numbers, or to mechanical.ts's formula
+#                     shape, would produce a different score for the same
+#                     inputs -- a comment-only edit here must NOT bump it.
+#                     This is how a rescore is told apart from an original:
+#                     item_scores is append-only, so two rows for the same
+#                     (item_id, beat) with different scorer_version values
+#                     record two genuinely different scoring RULESETS, not
+#                     just two points in time (that's what computed_at is
+#                     for). See src/score/mechanical.ts's module doc comment,
+#                     "What scorer_version holds".
+#
+#   source            Maps a source's config/sources.yaml trust weight
+#                     (0.1-2.0) onto this scorer's 0..1 internal scale.
+#                     min_weight/max_weight mirror that file's own Zod bound
+#                     exactly (src/sources/load.ts) -- if that bound is ever
+#                     widened, update both here. signal_weight/read_weight
+#                     are each dimension's MAXIMUM contribution (at
+#                     sourceWeight == max_weight) in final-score units, not
+#                     a 0..1 fraction -- see "How the pieces combine" below.
+#
+#   cluster            Same idea for corroboration. getClusterSizeAsOf never
+#                     returns less than 1 (a singleton "cluster of itself"),
+#                     so a cluster size of 1 always normalizes to exactly 0
+#                     -- no boost for being uncorroborated, not a penalty
+#                     either; it's the baseline every item starts from.
+#                     saturation_size is the cluster size at which
+#                     corroboration stops adding further weight (log2-
+#                     scaled: doubling an already-large cluster matters much
+#                     less than the jump from 1 source to 2). read_weight is
+#                     deliberately SMALLER than signal_weight -- corroboration
+#                     drives §5.1's "materiality" claim for signal_score
+#                     directly (M1's own prediction: a story carried by AP
+#                     *and* NPR *and* PBS is national news almost by
+#                     definition), but for read_score's "non-duplication"
+#                     claim, heavy corroboration is a WEAKER positive at
+#                     best -- once you could read this story from any one of
+#                     several outlets, an individual copy's marginal
+#                     read-value doesn't scale with how many outlets carry
+#                     it the way its material significance does. See
+#                     src/score/mechanical.ts's module doc comment for the
+#                     full reasoning, including why this is NOT modeled as a
+#                     penalty (would need real per-reader read-history data
+#                     this milestone doesn't have).
+#
+#   interest           How src/interests/load.ts's matchProfile boosts/
+#                     suppressions (each already weighted 0.1-2.0 by
+#                     config/interests.yaml) turn into a single multiplier
+#                     applied to BOTH scores identically. boost_gain/
+#                     suppress_gain scale the summed matched weights;
+#                     multiplier_floor/multiplier_ceiling clamp the result.
+#                     suppress_gain > boost_gain deliberately: a confident
+#                     "this is not what I want" (sports, entertainment,
+#                     crypto, funding-round churn -- config/interests.yaml)
+#                     should crush a score harder than a boost lifts one,
+#                     matching the M2 acceptance goal of getting suppressed
+#                     categories OFF the list, not merely below the boosted
+#                     ones. multiplier_floor is not 0 -- a hard zero would
+#                     make every heavily-suppressed item tie at exactly
+#                     nothing, indistinguishable by source trust or
+#                     corroboration; a small nonzero floor keeps a
+#                     meaningful (if compressed) ordering even among
+#                     suppressed items.
+#
+#   high_on_both        Thresholds isHighOnBoth() checks BOTH signal_score
+#                     and read_score against (see src/score/mechanical.ts).
+#                     Not a stored column -- item_scores has exactly two
+#                     score columns, by design (§5's schema) -- this flag is
+#                     DERIVED at read time from those two numbers, the same
+#                     "derived, not stored" stance decay.ts takes toward
+#                     recency. Chosen so the flag requires BOTH strong
+#                     corroboration/trust AND a genuine interest-profile
+#                     match -- see mechanical.test.ts's "isHighOnBoth" block
+#                     for the worked numeric example this was tuned against.
+#
+#   portfolio           portfolio_path names a RELATIVE path to a
+#                     gitignored, machine-local file (config/portfolio.yaml,
+#                     which does not exist on this machine and does not
+#                     exist in a fresh clone). THIS REPOSITORY IS PUBLIC
+#                     (CLAUDE.md) -- nothing below, or anywhere else in this
+#                     tracked file, is portfolio content: no ticker, holding,
+#                     or weight. Portfolio proximity itself is an M4b no-op
+#                     stub (src/score/mechanical.ts's resolvePortfolioProximity,
+#                     mirroring Task 6's identical portfolio_stub convention
+#                     in src/score/overrides.ts / config/overrides.yaml) --
+#                     this path exists so the stub's read-and-tolerate-
+#                     absence plumbing has something real to point at, not
+#                     because anything downstream reads the path's contents.
+#
+# ---------------------------------------------------------------------------
+# How the pieces combine (src/score/mechanical.ts's computeMechanicalScore)
+# ---------------------------------------------------------------------------
+#
+#   sourceComponent  = clamp((sourceWeight - source.min_weight)
+#                             / (source.max_weight - source.min_weight), 0, 1)
+#   clusterComponent = clamp(log2(clusterSize) / log2(cluster.saturation_size), 0, 1)
+#   interestMultiplier = clamp(1 + interest.boost_gain * sum(boost weights)
+#                                 - interest.suppress_gain * sum(suppress weights),
+#                               interest.multiplier_floor, interest.multiplier_ceiling)
+#
+#   signal_score = (cluster.signal_weight * clusterComponent
+#                    + source.signal_weight * sourceComponent) * interestMultiplier
+#   read_score   = (cluster.read_weight * clusterComponent
+#                    + source.read_weight * sourceComponent) * interestMultiplier
+#
+# Worked example against these exact numbers, a single-source (clusterSize=1)
+# AP item (weight 1.8) with no interest match: sourceComponent = 0.8947,
+# signal_score = 3.5*0 + 3.5*0.8947 = 3.13, read_score = 1.5*0 + 3.5*0.8947 =
+# 3.13 -- see mechanical.test.ts for this and every other worked case
+# (multi-source outranking single-source, a real suppressed AP sports title,
+# a real boosted arXiv title, the high-on-both case) computed by hand against
+# this file and asserted with toBeCloseTo, so a coefficient change here that
+# silently changes ranking shows up as a reviewable, explained test failure.
+scorer_version: mechanical-v1
+
+source:
+  min_weight: 0.1
+  max_weight: 2.0
+  signal_weight: 3.5
+  read_weight: 3.5
+
+cluster:
+  saturation_size: 8
+  signal_weight: 3.5
+  read_weight: 1.5
+
+interest:
+  boost_gain: 0.5
+  suppress_gain: 0.8
+  multiplier_floor: 0.05
+  multiplier_ceiling: 3.0
+
+high_on_both:
+  signal_threshold: 8.0
+  read_threshold: 6.0
+
+portfolio:
+  portfolio_path: config/portfolio.yaml
