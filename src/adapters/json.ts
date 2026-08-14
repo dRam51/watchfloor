@@ -101,6 +101,21 @@
  * for the full shape and why it deliberately stops there rather than
  * growing into a templating language, and `nvdCveUrl` below for the one
  * registered builder.
+ *
+ * Fix round 1 (re-review), Finding 1 (CRITICAL): the date window alone was
+ * not the whole fix -- the configured url's own `resultsPerPage=5`, with no
+ * pagination, meant a poll retrieved 5 of a much larger total (verified
+ * live: 5 of 6,090, 0.08%), all sharing one tied `lastModified` timestamp,
+ * recurring across many consecutive polls -- the SAME "technically working,
+ * permanently near-useless, silently incomplete" pathology this fix set out
+ * to eliminate, just relocated. `JsonSourceMapper` gained a second optional
+ * field for this, `paginate` -- see its own doc comment for the shape, and
+ * `NVD_RESULTS_PER_PAGE`/`NVD_MAX_PAGES_PER_POLL`'s doc comments (below,
+ * nvd-cve's section) for the live-verified numbers and the honest limits of
+ * what a BOUNDED per-poll page count can promise against an unbounded,
+ * source-controlled total -- `AdapterResult.capped` (src/adapters/types.ts)
+ * is what makes the remainder visible rather than hidden, not a guarantee
+ * of complete coverage every poll.
  */
 
 import { politeFetch, type FetchResult } from '../fetch/http.ts';
@@ -216,21 +231,21 @@ interface JsonSourceMapper {
    * Optional, symmetric with `extractEntries`/`parseEntry` above: one
    * function per source id, registered here rather than invented as a
    * separate concept elsewhere. Takes the CONFIGURED url
-   * (config/sources.yaml, verbatim -- whatever query params it already
-   * carries, e.g. nvd-cve's own `?resultsPerPage=5`) and the current
-   * instant, and returns the url this poll should actually request. Absent
-   * for four of the five sources registered below, which have no reason to
-   * vary their request across polls -- those fetch `source.url` completely
-   * unchanged, exactly as every JSON source did before this field existed.
+   * (config/sources.yaml, verbatim) and the current instant, and returns
+   * the url this poll should actually request. Absent for four of the five
+   * sources registered below, which have no reason to vary their request
+   * across polls -- those fetch `source.url` completely unchanged, exactly
+   * as every JSON source did before this field existed.
    *
    * Deliberately NOT a templating language, a query-string DSL, or a
    * general per-source config hook -- it is one plain function, taking the
-   * two inputs a source's per-poll url could ever need with the state this
-   * adapter already has in hand (no cursor, no page token, nothing else is
-   * threaded through `parseJsonBody` or persisted between polls). A source
-   * that genuinely needed more than "the configured url plus the current
-   * time" -- a cursor from the previous response, say -- would need a
-   * different mechanism than this, not a bigger one wedged into this shape.
+   * two inputs a source's per-poll FIRST-page url could ever need with the
+   * state this adapter already has in hand (no cursor, no page token,
+   * nothing persisted between polls -- `paginate` below, not this field,
+   * is what a source with a WITHIN-one-poll cursor uses). A source that
+   * genuinely needed more than "the configured url plus the current time"
+   * for its first request would need a different mechanism than this, not
+   * a bigger one wedged into this shape.
    *
    * `now` is a parameter here, and MUST be treated as the only source of
    * the current time -- never `new Date()`/`Date.now()` inside a builder
@@ -244,6 +259,43 @@ interface JsonSourceMapper {
    * for the one registered builder today.
    */
   buildUrl?(configuredUrl: string, now: Date): string;
+  /**
+   * Optional pagination policy (M1 follow-up, fix round 1, Finding 1
+   * CRITICAL) -- a source with this field is fetched by `jsonAdapter.fetch`
+   * via a BOUNDED loop of `politeFetch` calls instead of the ordinary
+   * single call every other mapper still gets. Absent for four of the five
+   * sources; nvd-cve is the one registered user today (see
+   * `nvdNextPageUrl`/`nvdTotalAvailable`/`NVD_MAX_PAGES_PER_POLL` below).
+   *
+   * - `maxPages`: a hard ceiling on how many pages ONE `fetch()` call will
+   *   ever request, independent of `nextPageUrl`'s or `totalAvailable`'s
+   *   own opinion -- the reason a source whose real backlog is enormous
+   *   (see nvd-cve's own doc comment for a concrete, live-verified case)
+   *   still costs a small, fixed, predictable number of requests per poll,
+   *   never "however many pages the backlog happens to have."
+   * - `nextPageUrl(currentPageUrl, entriesOnThisPage)`: given the page
+   *   just fetched and how many RAW entries it contained (before
+   *   `parseEntry` dropped any malformed ones -- a malformed entry still
+   *   occupied a slot in that page), returns the next page's url, or
+   *   `null` to stop early (this page was short -- fewer entries than a
+   *   full page -- meaning there is nothing more to fetch, independent of
+   *   `maxPages`). Never receives the parsed envelope: everything it needs
+   *   to construct the next request is either the page count it already
+   *   knows about or already present on the CURRENT page's own url.
+   * - `totalAvailable(parsedEnvelope)`: reads the source's own reported
+   *   total-available count off one page's ALREADY-parsed envelope (so
+   *   this never re-parses a body `parseJsonBody` already parsed), or
+   *   `null` if that field is absent or the wrong type. Feeds
+   *   `AdapterResult.capped` ONLY -- never loop control (`nextPageUrl`
+   *   alone decides when to stop), so a missing or malformed total-count
+   *   field degrades to "capped is not reported" rather than to a broken
+   *   or infinite loop.
+   */
+  paginate?: {
+    maxPages: number;
+    nextPageUrl(currentPageUrl: string, entriesOnThisPage: number): string | null;
+    totalAvailable(parsedEnvelope: unknown): number | null;
+  };
 }
 
 /**
@@ -350,21 +402,112 @@ function parseCisaKevEntry(rawEntry: unknown): RawItem | null {
 /**
  * How far back each poll's `lastModStartDate`/`lastModEndDate` window
  * looks. NVD's own documented ceiling for this window is 120 days
- * (verified live: a several-year span 404s) -- 7 is nowhere near that
- * ceiling, chosen instead against this source's own `poll_interval` (3h,
- * config/sources.yaml): more than 50x that cadence is generous enough that
- * a source sitting un-polled for a while (a missed cycle, a stretch of
- * consecutive-failure backoff) does not open a gap between one successful
- * poll's window and the next's. A CVE modified more than once inside two
- * overlapping windows is simply re-fetched -- `parseNvdCveEntry` below has
- * no memory of a previous poll and does not need one; see the module doc
- * comment's "skip vs throw" section and `AdapterResult`'s own docs
- * (src/adapters/types.ts) for how downstream storage is expected to treat
- * a re-seen item.
+ * (verified live: a several-year span 404s).
+ *
+ * Widened from an original 7 to 90 (fix round 1, Important item) --
+ * re-reasoned against actual backoff behavior, not just `poll_interval`
+ * directly: `src/db/fetchState.ts`'s backoff ceiling is `max(6h,
+ * poll_interval)`, reached after the FIRST failure and never growing, so
+ * repeated failures retry roughly every 6h indefinitely -- there is no cap
+ * on how many times in a row that can happen. A 7-day window survives
+ * about 28 consecutive failed attempts before a gap opens between one
+ * successful poll's window and the next's; this is a single-user,
+ * self-hosted box with no uptime guarantee, where an outage measured in
+ * weeks (vacation, hardware replacement, a stretch of failures against a
+ * struggling upstream) is a real, not hypothetical, scenario. 90 days
+ * survives roughly 12x that -- comfortably past a month-plus outage --
+ * while leaving 30 days of headroom below NVD's 120-day ceiling, the same
+ * "not up against it" margin DEFAULT_MAX_BYTES/MAX_BYTES_OVERRIDES
+ * (src/fetch/http.ts) already use for their own ceilings. Re-fetching a CVE
+ * already seen in an earlier overlapping window is harmless and expected
+ * (`parseNvdCveEntry` has no memory of a previous poll and does not need
+ * one -- see the module doc comment's "skip vs throw" section and
+ * `AdapterResult`'s own docs, src/adapters/types.ts, for how downstream
+ * storage is expected to treat a re-seen item), so widening this costs
+ * nothing beyond the (bounded, see NVD_MAX_PAGES_PER_POLL below) extra
+ * requests pagination already accounts for.
+ *
+ * One live-verified caveat, discovered investigating THIS widening rather
+ * than assumed: window width and per-poll COVERAGE are in real tension,
+ * not independent knobs. `totalResults` does not grow smoothly with window
+ * width -- verified live (2026-08-14): 1d=1,577, 7d=6,095 (matches the
+ * reviewer's own 6,090 finding), 14d=11,043, 30d=24,148, but then 50d=
+ * 32,897 jumping to 60d=359,579 and 90d=359,625 -- a single historical
+ * bulk-modification event (NVD rescoring roughly 326,700 old CVEs at
+ * once, apparently sometime 50-60 days before this was measured) that a
+ * window wide enough for outage resilience walks directly into, while a
+ * narrower one would have avoided it entirely FOR NOW. Deliberately did
+ * NOT shrink the window to dodge this: doing so would overfit to a
+ * transient, point-in-time anomaly (it ages out of any fixed window
+ * eventually, and a DIFFERENT bulk event could sit at a different offset
+ * next time) and defeats the actual, stated purpose of widening in the
+ * first place. The resolution is downstream, not here: NVD_MAX_PAGES_PER_POLL
+ * bounds the request/byte cost regardless of totalResults, and `capped`
+ * (see jsonAdapter.fetch below) honestly reports whatever coverage
+ * shortfall results -- large and visible during an anomaly like the one
+ * discovered here, small on an ordinary day -- rather than a fixed
+ * coverage percentage this design cannot actually promise against an
+ * unbounded, source-controlled total. See NVD_MAX_PAGES_PER_POLL's own doc
+ * comment for the concrete numbers this produces today.
  */
-const NVD_WINDOW_DAYS = 7;
+const NVD_WINDOW_DAYS = 90;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Fix round 1, Finding 1 (CRITICAL): the ORIGINAL fix for this source (a
+ * date-window `buildUrl`, above) verified that the window filter worked,
+ * but never checked whether a single, still-unpaginated page could
+ * retrieve a meaningful fraction of it. It could not: the configured url's
+ * `resultsPerPage=5` capped every response at 5 entries regardless of the
+ * window, and NVD's stable default sort (ascending by `lastModified`, tied
+ * entries breaking in an unspecified but repeatable order) meant the SAME
+ * 5-entry tied block recurred across many consecutive polls -- reviewer
+ * live-verified, the exact url this code built returned 5 of 6,090 total
+ * results (0.08%), all 5 sharing one exact-millisecond `lastModified` from
+ * an NVD bulk-rescore batch. Technically working (real CVE ids, recent
+ * timestamps, `skipped: 0`, no errors) and permanently near-useless --
+ * indistinguishable, in `AdapterResult`, from a complete poll. The two
+ * constants below, and `nvdNextPageUrl`/`nvdTotalAvailable`'s registration
+ * in `JsonSourceMapper.paginate` further down, are the fix: retrieve more
+ * than one page per poll, bounded, and report what's left uncovered via
+ * `AdapterResult.capped` rather than leaving it silent.
+ *
+ * `NVD_RESULTS_PER_PAGE = 200`: live-verified (2026-08-14) against the
+ * exact window/query this code builds -- 200 entries measured 467,442
+ * bytes (~456 KB), comfortably under `politeFetch`'s 5 MiB default ceiling
+ * (nvd-cve has no `MAX_BYTES_OVERRIDES` entry, src/fetch/http.ts, and does
+ * not need one at this page size). Sized for headroom beyond today's
+ * measurement, not just today's number: the reviewer separately found
+ * `resultsPerPage=2000` exceeding 25 MB in a DIFFERENT window (a
+ * bulk-rescore batch's entries apparently carry unusually heavy multi-source
+ * CVSS metrics) -- averaging ~12.5 KB/entry worst-case, 200 entries is
+ * ~2.5 MB, still comfortably under 5 MiB (2x margin) even under that
+ * heavier assumption, not just under today's lighter ~2.3 KB/entry
+ * average. `resultsPerPage=2000` was not chosen at any size specifically
+ * to chase maximum throughput -- see `NVD_MAX_PAGES_PER_POLL` below for why
+ * a bigger page size would not meaningfully change the actual coverage
+ * problem anyway.
+ *
+ * `NVD_MAX_PAGES_PER_POLL = 5`: chosen to equal, not exceed, NVD's own
+ * publicly documented unauthenticated rate guidance (5 requests per 30s;
+ * see docs/costs.md) -- a full-throttle poll (5 pages, each spaced by
+ * politeFetch's own default 2s per-host minimum interval) completes its
+ * whole burst within about 8-10 seconds, safely inside a single 30s
+ * window, by construction rather than by tuning a custom interval. This
+ * bounds one poll to 5 requests / up to 1,000 entries, REGARDLESS of
+ * `totalResults` -- on a quiet day (a few thousand modified, see
+ * NVD_WINDOW_DAYS's own doc comment for real measured totals well under
+ * this) that is strong, often complete, coverage; during a bulk-rescore
+ * anomaly like the one discovered widening the window above (hundreds of
+ * thousands), it is a small fraction. Both are correct, expected
+ * behavior for a fixed per-poll budget against an unbounded, source-
+ * controlled total -- `capped` (jsonAdapter.fetch below) is what makes
+ * either case visible on a source-health page rather than indistinguishable
+ * from each other or from a fully complete poll.
+ */
+const NVD_RESULTS_PER_PAGE = 200;
+const NVD_MAX_PAGES_PER_POLL = 5;
 
 /**
  * NVD's CVE API 2.0, with no date filter, sorts ascending from the very
@@ -375,21 +518,35 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * technically "working," permanently useless, and under append-only
  * storage a source of repeated inserts of the same 1980s records.
  * `lastModStartDate`/`lastModEndDate` is NVD's own documented recency
- * filter and fixes this (verified live: a 7-day window against the real
- * API returns thousands of genuinely current results, not the 1988-era
+ * filter and fixes this (verified live: a wide window against the real API
+ * returns thousands of genuinely current results, not the 1988-era
  * handful) -- but the window has to be computed relative to "now" at
  * request time, which a static config url can never express. This is the
  * one registered `buildUrl` today -- see `JsonSourceMapper`'s doc comment
  * (module-level, above) for the general mechanism.
  *
+ * Also sets `resultsPerPage`/`startIndex` explicitly, UNCONDITIONALLY
+ * overwriting whatever the configured url carries (fix round 1: the
+ * configured url previously carried its own `?resultsPerPage=5`, which is
+ * exactly Finding 1's defect -- see NVD_RESULTS_PER_PAGE's own doc comment
+ * just above). These two values are now entirely code-owned rather than
+ * config-owned, on purpose: `nvdNextPageUrl` below increments `startIndex`
+ * by exactly `NVD_RESULTS_PER_PAGE` and decides "was this page short" by
+ * comparing an entry count against that SAME constant -- if the actual
+ * requested page size could silently drift out of sync with what
+ * `nvdNextPageUrl` assumes (e.g. someone editing `config/sources.yaml`'s
+ * url without knowing this code hardcodes a page size), pagination would
+ * misbehave in a way neither file's own diff would make obvious. Fixing
+ * both at this one call site, always applied regardless of what the
+ * configured url happens to contain, removes that whole class of drift.
+ *
  * Built with `URL`/`searchParams.set` -- the same reason `cisaKevUrl` above
- * uses it over string interpolation -- so any query param already on the
- * CONFIGURED url (e.g. nvd-cve's own `?resultsPerPage=5`) survives
- * untouched; this only adds/overwrites the two date-window params. The
- * resulting percent-encoded ISO-8601 values (`searchParams.set` escapes the
- * colons) were verified live to be accepted identically to an unencoded
- * form -- NVD decodes the query string normally, as any compliant server
- * would.
+ * uses it over string interpolation -- so any OTHER query param already on
+ * the configured url survives untouched; this only adds/overwrites these
+ * four params. The resulting percent-encoded ISO-8601 date values
+ * (`searchParams.set` escapes the colons) were verified live to be
+ * accepted identically to an unencoded form -- NVD decodes the query
+ * string normally, as any compliant server would.
  *
  * Uses `now` (and `now` minus `NVD_WINDOW_DAYS`) exactly as given -- never
  * reads the clock itself, see `JsonSourceMapper.buildUrl`'s doc comment for
@@ -404,7 +561,46 @@ function nvdCveUrl(configuredUrl: string, now: Date): string {
   const windowStart = new Date(now.getTime() - NVD_WINDOW_DAYS * MS_PER_DAY);
   url.searchParams.set('lastModStartDate', windowStart.toISOString());
   url.searchParams.set('lastModEndDate', now.toISOString());
+  url.searchParams.set('resultsPerPage', String(NVD_RESULTS_PER_PAGE));
+  url.searchParams.set('startIndex', '0');
   return url.href;
+}
+
+/**
+ * `JsonSourceMapper.paginate.nextPageUrl` for nvd-cve. A page shorter than
+ * `NVD_RESULTS_PER_PAGE` (verified live: this holds even for the very last
+ * page of a result set, which is simply whatever remains) means there is
+ * nothing left to fetch -- `entriesOnThisPage` is the RAW count `jsonAdapter.
+ * fetch` passes in, before `parseEntry` dropped any malformed ones, so a
+ * page that was full-sized but contained a few unparseable entries is
+ * still correctly treated as full, not short. Otherwise increments
+ * `startIndex` by exactly one page's worth on the SAME url, leaving every
+ * other param (including the date window, fixed for this whole poll) untouched
+ * -- verified live that consecutive `startIndex` pages return disjoint,
+ * sequential entries with a stable `totalResults` across pages.
+ */
+function nvdNextPageUrl(currentPageUrl: string, entriesOnThisPage: number): string | null {
+  if (entriesOnThisPage < NVD_RESULTS_PER_PAGE) return null;
+  const url = new URL(currentPageUrl);
+  const currentStartIndex = Number(url.searchParams.get('startIndex') ?? '0');
+  url.searchParams.set('startIndex', String(currentStartIndex + NVD_RESULTS_PER_PAGE));
+  return url.href;
+}
+
+/**
+ * `JsonSourceMapper.paginate.totalAvailable` for nvd-cve. Reads NVD's own
+ * `totalResults` envelope field -- present on every live response observed
+ * (including error-free empty results) -- for `AdapterResult.capped`
+ * ONLY, never for loop control (`nvdNextPageUrl` above decides that on its
+ * own). `null` for anything not shaped like a number, so a malformed or
+ * missing field degrades to "capped is not reported" (see
+ * `AdapterResult.capped`'s own doc comment, src/adapters/types.ts, on why
+ * that is the correct default over fabricating a number).
+ */
+function nvdTotalAvailable(parsedEnvelope: unknown): number | null {
+  if (!isRecord(parsedEnvelope)) return null;
+  const total = parsedEnvelope.totalResults;
+  return typeof total === 'number' ? total : null;
 }
 
 /**
@@ -594,6 +790,11 @@ const JSON_SOURCE_MAPPERS: Record<string, JsonSourceMapper> = {
     extractEntries: extractArrayField('vulnerabilities'),
     parseEntry: parseNvdCveEntry,
     buildUrl: nvdCveUrl,
+    paginate: {
+      maxPages: NVD_MAX_PAGES_PER_POLL,
+      nextPageUrl: nvdNextPageUrl,
+      totalAvailable: nvdTotalAvailable,
+    },
   },
   'hn-algolia': { extractEntries: extractArrayField('hits'), parseEntry: parseHnAlgoliaEntry },
   'federal-register': { extractEntries: extractArrayField('results'), parseEntry: parseFederalRegisterEntry },
@@ -604,12 +805,30 @@ const JSON_SOURCE_MAPPERS: Record<string, JsonSourceMapper> = {
 // Top-level: dispatch on source id, fetch, parse the body.
 // ---------------------------------------------------------------------------
 
+/**
+ * `ParseEntriesResult` (items/skipped) plus the two extra pieces of
+ * information the PAGINATED path below needs that the single-page path
+ * doesn't: the envelope itself (so `JsonSourceMapper.paginate.totalAvailable`
+ * can read a field like `totalResults` off it without re-parsing the same
+ * body a second time) and the RAW entry count for this one page, before
+ * `parseEntries` dropped any malformed ones (so pagination can tell "a full
+ * page" from "the last, short page," and so `capped` can count "entries we
+ * actually retrieved" -- successfully parsed or not -- rather than only the
+ * ones that survived). A plain, non-exported, local type: `ParseEntriesResult`
+ * itself (types.ts) stays exactly what every other adapter already relies
+ * on, unchanged.
+ */
+interface ParsedJsonPage extends ParseEntriesResult {
+  parsedBody: unknown;
+  entriesOnThisPage: number;
+}
+
 function parseJsonBody(
   body: string,
   sourceUrl: string,
   sourceId: string,
   mapper: JsonSourceMapper,
-): ParseEntriesResult {
+): ParsedJsonPage {
   let parsedBody: unknown;
   try {
     parsedBody = JSON.parse(body);
@@ -620,27 +839,19 @@ function parseJsonBody(
   }
 
   const entries = mapper.extractEntries(parsedBody, sourceUrl, sourceId);
-  return parseEntries(entries, mapper.parseEntry);
+  const { items, skipped } = parseEntries(entries, mapper.parseEntry);
+  return { items, skipped, parsedBody, entriesOnThisPage: entries.length };
 }
 
-// Not annotated `: Adapter` (compare rss.ts/newsSitemap.ts/googleNews.ts,
-// which all use that plain annotation) -- deliberately `satisfies Adapter`
-// instead. An explicit `: Adapter` annotation would WIDEN this object's own
-// static type down to exactly the `Adapter` interface, which only declares
-// a 2-parameter `fetch(source, state)` -- erasing the third `now` parameter
-// below from anything a direct importer (this file's own tests) could
-// legally pass, even though the interface itself is never touched and
-// every existing consumer (src/bin/scheduler.ts, calling through
-// `AdapterRegistry`/`Adapter`) keeps working unchanged: a function with an
-// extra optional/defaulted parameter is still structurally assignable
-// anywhere a shorter function type is expected. `satisfies` checks this
-// object against `Adapter` at THIS declaration (a real `type: 'json'`
-// typo, or a `fetch` genuinely incompatible with `Adapter`, still fails to
-// compile right here) while preserving the wider, more specific inferred
-// type on the `jsonAdapter` binding itself.
-export const jsonAdapter = {
+export const jsonAdapter: Adapter = {
   type: 'json',
 
+  // `now` defaults to the real current time, so every production caller
+  // (the scheduler, threading its own single validated instant through
+  // Adapter.fetch's now-optional third parameter -- see that interface's
+  // doc comment, types.ts) gets a real, current-instant window with zero
+  // special-casing, while a test can pass a fixed Date directly for a fully
+  // deterministic assertion on the exact url(s) requested.
   async fetch(source: Source, state: FetchState | null, now: Date = new Date()): Promise<AdapterResult> {
     // Dispatch first, before any network call -- see UnknownJsonSourceError.
     const mapper = JSON_SOURCE_MAPPERS[source.id];
@@ -649,31 +860,100 @@ export const jsonAdapter = {
     // Per-source url construction -- see `JsonSourceMapper.buildUrl`'s doc
     // comment above. Absent for four of the five registered sources, which
     // fetch `source.url` exactly as configured, byte-for-byte unchanged
-    // from before this field existed. `now` is read exactly once for this
-    // whole fetch -- as this method's own defaulted parameter, never inside
-    // a builder -- so every production caller (the scheduler, calling
-    // `fetch(source, state)` with no third argument) gets a real,
-    // current-instant window with zero code changes, while a test can pass
-    // a fixed `Date` as the third argument for a fully deterministic
-    // assertion on the exact url requested.
-    const fetchUrl = mapper.buildUrl ? mapper.buildUrl(source.url, now) : source.url;
+    // from before this field existed.
+    const firstUrl = mapper.buildUrl ? mapper.buildUrl(source.url, now) : source.url;
 
-    const fetchResult: FetchResult = await politeFetch(fetchUrl, {
+    const firstFetch: FetchResult = await politeFetch(firstUrl, {
       etag: state?.etag ?? undefined,
       lastModified: state?.lastModified ?? undefined,
     });
 
-    if (fetchResult.notModified) return notModifiedResult(fetchResult, state);
+    if (firstFetch.notModified) return notModifiedResult(firstFetch, state);
 
-    if (fetchResult.body === null) {
+    if (firstFetch.body === null) {
       // politeFetch's contract guarantees a non-null body whenever
       // notModified is false (null only ever accompanies a 304, handled
       // above) -- this asserts that contract rather than silently treating
       // an impossible state as an empty document.
-      throw new JsonParseError(fetchUrl, source.id, 'politeFetch returned a null body for a non-304 response');
+      throw new JsonParseError(firstUrl, source.id, 'politeFetch returned a null body for a non-304 response');
     }
 
-    const parsed = parseJsonBody(fetchResult.body, fetchUrl, source.id, mapper);
-    return fetchedResult(fetchResult, parsed);
+    if (!mapper.paginate) {
+      // Four of five sources: unchanged from before pagination existed --
+      // one request, one parse, done.
+      const parsed = parseJsonBody(firstFetch.body, firstUrl, source.id, mapper);
+      return fetchedResult(firstFetch, parsed);
+    }
+
+    // ---------------------------------------------------------------------
+    // Paginated path -- nvd-cve today (see JsonSourceMapper.paginate's doc
+    // comment above for the general mechanism, and nvdNextPageUrl/
+    // nvdTotalAvailable/NVD_MAX_PAGES_PER_POLL below for nvd-cve's own
+    // policy). Bounded strictly by maxPages regardless of what nextPageUrl
+    // or the source's own reported total says -- one poll can never turn
+    // into more than that many requests or run past that many round-trips,
+    // no matter how large the backlog behind it is.
+    // ---------------------------------------------------------------------
+    const { maxPages, nextPageUrl, totalAvailable } = mapper.paginate;
+
+    const items: RawItem[] = [];
+    let skipped = 0;
+    let entriesSeen = 0;
+    let available: number | null = null;
+    // `url`/`fetchResult` always describe the SAME page as each other --
+    // reassigned together, at the bottom of the loop, before the next
+    // iteration processes them. Explicit `: string` (not `string | null`)
+    // on `url` deliberately: the loop's own `break`s are what end iteration
+    // when there is no next page, never a null sentinel threaded back
+    // through this variable -- simpler for the type checker to follow
+    // across loop iterations, and simpler to read.
+    let url: string = firstUrl;
+    let fetchResult: FetchResult = firstFetch;
+
+    for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+      if (fetchResult.body === null) {
+        throw new JsonParseError(url, source.id, 'politeFetch returned a null body for a non-304 response');
+      }
+
+      const page = parseJsonBody(fetchResult.body, url, source.id, mapper);
+      items.push(...page.items);
+      skipped += page.skipped;
+      entriesSeen += page.entriesOnThisPage;
+      // Later pages of the SAME query report the same total in practice
+      // (verified live), but if one page's envelope is missing/malformed
+      // where an earlier one wasn't, keep the last known-good reading
+      // rather than losing it to a single page's absence.
+      available = totalAvailable(page.parsedBody) ?? available;
+
+      if (pageNum >= maxPages) break; // hard ceiling reached -- stop regardless of nextPageUrl's own opinion
+
+      const next: string | null = nextPageUrl(url, page.entriesOnThisPage);
+      if (next === null) break; // a short page -- nothing left to fetch
+
+      url = next;
+      // Page 2+ carries no conditional-request validators. `state`'s
+      // etag/lastModified describes a prior poll's PAGE-1-EQUIVALENT
+      // identity (the same url this poll's own page 1 was conditionally
+      // requested against) -- it was never issued for, and has no
+      // "unchanged since" meaning against, a DIFFERENT page. An
+      // unconditional GET here is the only correct request, not a
+      // politeness shortcut being skipped.
+      fetchResult = await politeFetch(url, {});
+    }
+
+    return {
+      items,
+      etag: firstFetch.etag,
+      lastModified: firstFetch.lastModified,
+      notModified: false,
+      skipped,
+      // Never fabricated: undefined unless the source's own reported total
+      // was legible AND genuinely exceeds what this poll actually
+      // retrieved (parsed or not) -- see AdapterResult.capped's own doc
+      // comment (types.ts) for why "undefined, not 0, when there is
+      // nothing to report" is the shared rule across every adapter that
+      // sets this field.
+      capped: available !== null && available > entriesSeen ? available - entriesSeen : undefined,
+    };
   },
-} satisfies Adapter;
+};

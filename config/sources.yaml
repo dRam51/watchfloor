@@ -83,7 +83,7 @@ sources:
   - id: nvd-cve
     name: NVD CVE Database (API 2.0)
     type: json
-    url: https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=5
+    url: https://services.nvd.nist.gov/rest/json/cves/2.0
     beats: [cyber]
     weight: 1.6
     poll_interval: 3h

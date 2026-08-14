@@ -807,32 +807,44 @@ describe('jsonAdapter', () => {
   // window can.
   // -------------------------------------------------------------------------
   describe('nvd-cve: per-poll date-window url builder', () => {
-    it('builds lastModStartDate/lastModEndDate as a window ending at the injected "now", preserving the configured url\'s existing query params', async () => {
+    it('builds a 90-day lastModStartDate/lastModEndDate window ending at the injected "now", forces resultsPerPage/startIndex, and preserves any OTHER configured query param', async () => {
       let requestUrl: string | undefined;
       const baseUrl = await serve((req, res) => {
         requestUrl = req.url;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ vulnerabilities: [] }));
+        // A short page (fewer than NVD_RESULTS_PER_PAGE entries) -- keeps
+        // this test to exactly one request, since it is asserting on the
+        // FIRST page's url, not exercising pagination itself (see the
+        // dedicated pagination describe block below for that).
+        res.end(JSON.stringify({ totalResults: 0, vulnerabilities: [] }));
       });
 
       const fixedNow = new Date('2026-08-14T03:00:00.000Z');
       await jsonAdapter.fetch(
-        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed?resultsPerPage=5` }),
+        // A param unrelated to pagination -- proves buildUrl adds/overwrites
+        // only its own four params (two date-window, resultsPerPage,
+        // startIndex) rather than replacing the whole query string.
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed?apiKey=unused-in-m1` }),
         null,
         fixedNow,
       );
 
       const requested = new URL(requestUrl!, baseUrl);
-      // The configured url's own query param survives untouched -- buildUrl
-      // only adds/overwrites the two date-window params, never replaces the
-      // whole query string.
       expect(requested.pathname).toBe('/feed');
-      expect(requested.searchParams.get('resultsPerPage')).toBe('5');
+      expect(requested.searchParams.get('apiKey')).toBe('unused-in-m1');
+      // Fix round 1, Finding 1: resultsPerPage/startIndex are now entirely
+      // code-owned (NVD_RESULTS_PER_PAGE/nvdCveUrl, src/adapters/json.ts) --
+      // FORCED to these values regardless of whatever the configured url
+      // carried (it carries nothing here, on purpose, to prove that).
+      expect(requested.searchParams.get('resultsPerPage')).toBe('200');
+      expect(requested.searchParams.get('startIndex')).toBe('0');
       // A fully deterministic exact match -- possible only because "now" is
       // an injected parameter, never read from the clock inside the
-      // builder itself (see buildUrl's doc comment).
+      // builder itself (see buildUrl's doc comment). 90 days, not 7 --
+      // widened, fix round 1 (Important item) -- see NVD_WINDOW_DAYS's own
+      // doc comment for the full reasoning.
       expect(requested.searchParams.get('lastModEndDate')).toBe('2026-08-14T03:00:00.000Z');
-      expect(requested.searchParams.get('lastModStartDate')).toBe('2026-08-07T03:00:00.000Z');
+      expect(requested.searchParams.get('lastModStartDate')).toBe('2026-05-16T03:00:00.000Z');
     });
 
     it('defaults to the real current time when no "now" argument is given, so production callers (2-arg fetch) need no changes', async () => {
@@ -888,5 +900,208 @@ describe('jsonAdapter', () => {
       expect(result.skipped).toBe(0);
       expect(result.items[0]!.url).toBe('https://nvd.nist.gov/vuln/detail/CVE-1999-0095');
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Fix round 1 (re-review), Finding 1 (CRITICAL): nvd-cve's pagination.
+  //
+  // The reviewer's live finding: the exact url the ORIGINAL fix built
+  // (resultsPerPage=5, no pagination) retrieved 5 of 6,090 total results
+  // (0.08%) -- a single page, capped at a tiny fixed size, of a stable
+  // ascending sort whose front is dominated by a tied bulk-rescore batch.
+  // `nvdPagedServer` below reproduces that exact shape as a loopback
+  // fixture: honors resultsPerPage/startIndex from the query string
+  // (defaulting resultsPerPage to 5 when absent, matching the ORIGINAL
+  // bug's own default) against a caller-chosen totalResults, so the same
+  // server proves both the defect (against pre-pagination code) and the fix
+  // (against paginated code) -- see the report for the actual RED-then-GREEN
+  // run against this exact test.
+  // -------------------------------------------------------------------------
+  describe('nvd-cve: pagination (fix round 1, Finding 1 CRITICAL)', () => {
+    function nvdPagedServer(totalResults: number): Promise<string> {
+      return serve((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://placeholder.test');
+        const resultsPerPage = Number(url.searchParams.get('resultsPerPage') ?? '5');
+        const startIndex = Number(url.searchParams.get('startIndex') ?? '0');
+        const count = Math.max(0, Math.min(resultsPerPage, totalResults - startIndex));
+        const vulnerabilities = Array.from({ length: count }, (_, i) => ({
+          cve: {
+            id: `CVE-2026-${String(startIndex + i + 1).padStart(5, '0')}`,
+            published: '2026-01-01T00:00:00.000',
+            descriptions: [{ lang: 'en', value: 'synthetic' }],
+          },
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalResults, resultsPerPage, startIndex, vulnerabilities }));
+      });
+    }
+
+    it('Finding 1 (CRITICAL): retrieves far more than a single short page of a large total, in exactly NVD_MAX_PAGES_PER_POLL requests, and reports the honest remainder via capped', async () => {
+      let requestCount = 0;
+      const baseUrl = await serve((req, res) => {
+        requestCount++;
+        const url = new URL(req.url ?? '/', 'http://placeholder.test');
+        const resultsPerPage = Number(url.searchParams.get('resultsPerPage') ?? '5');
+        const startIndex = Number(url.searchParams.get('startIndex') ?? '0');
+        const totalResults = 6090; // the reviewer's own live figure
+        const count = Math.max(0, Math.min(resultsPerPage, totalResults - startIndex));
+        const vulnerabilities = Array.from({ length: count }, (_, i) => ({
+          cve: { id: `CVE-2026-${String(startIndex + i + 1).padStart(5, '0')}` },
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalResults, resultsPerPage, startIndex, vulnerabilities }));
+      });
+
+      const result = await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }),
+        null,
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      // 5 pages x 200/page = 1,000 -- NVD_MAX_PAGES_PER_POLL x
+      // NVD_RESULTS_PER_PAGE (src/adapters/json.ts). Before this fix: 5
+      // (a single resultsPerPage=5 page), 0.08% of 6,090 -- see the report
+      // for the actual RED run of this exact test against the prior code.
+      expect(requestCount).toBe(5); // bounded -- 6,090/200 would otherwise be 31 pages
+      expect(result.items).toHaveLength(1000);
+      expect(result.skipped).toBe(0);
+      // Never silently hidden: 6,090 total, 1,000 actually retrieved,
+      // 5,090 known-to-exist-but-not-this-poll -- AdapterResult.capped
+      // (src/adapters/types.ts), not a fabricated 0 and not omitted.
+      expect(result.capped).toBe(5090);
+      // Explicit timeout: 5 real politeFetch calls to the same loopback host,
+      // each spaced by the PRODUCTION 2s per-host minimum interval (never
+      // weakened for test speed -- politeness is non-negotiable even in a
+      // test's own server) -- up to ~8s wall-clock, over vitest's 5s default.
+      // (The bounded page count is proven above by requestCount === 5 against
+      // a total that would otherwise need 31 pages -- a second test against
+      // an even larger, effectively-unbounded total, e.g. the ~1,000,000-ish
+      // scale of the live bulk-rescore anomaly discovered widening the
+      // window, would prove nothing further about THIS property, only cost
+      // another ~8s of real per-host spacing, so was deliberately not added.)
+    }, 15000);
+
+    it('stops early, before reaching maxPages, once a page returns fewer entries than a full page', async () => {
+      const baseUrl = await nvdPagedServer(450); // 200 + 200 + 50 -- a short third page
+
+      const result = await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }),
+        null,
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      expect(result.items).toHaveLength(450);
+      // Fully covered -- nothing excluded, so capped must be undefined, not
+      // a fabricated 0 (AdapterResult.capped's own doc comment).
+      expect(result.capped).toBeUndefined();
+    }, 15000); // 3 real requests (2 gaps x 2s)
+
+    it('leaves capped undefined (not 0) when the very first page already covers the whole total', async () => {
+      const baseUrl = await nvdPagedServer(3);
+
+      const result = await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }),
+        null,
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      expect(result.items).toHaveLength(3);
+      expect(result.capped).toBeUndefined();
+    });
+
+    it('sends conditional-request headers only on page 1; page 2+ are unconditional GETs', async () => {
+      const receivedHeaders: Array<Record<string, string | string[] | undefined>> = [];
+      const baseUrl = await serve((req, res) => {
+        receivedHeaders.push(req.headers);
+        const url = new URL(req.url ?? '/', 'http://placeholder.test');
+        const startIndex = Number(url.searchParams.get('startIndex') ?? '0');
+        const vulnerabilities = Array.from({ length: 200 }, (_, i) => ({
+          cve: { id: `CVE-2026-${String(startIndex + i + 1).padStart(5, '0')}` },
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalResults: 350, vulnerabilities: startIndex === 0 ? vulnerabilities : vulnerabilities.slice(0, 150) }));
+      });
+
+      await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }),
+        makeState({ etag: '"prior-nvd-etag"', lastModified: 'Wed, 21 Oct 2015 07:28:00 GMT' }),
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      expect(receivedHeaders).toHaveLength(2); // 200 + 150 -- a short second page, exactly 2 requests
+      expect(receivedHeaders[0]!['if-none-match']).toBe('"prior-nvd-etag"');
+      expect(receivedHeaders[0]!['if-modified-since']).toBe('Wed, 21 Oct 2015 07:28:00 GMT');
+      // Page 2 was never conditionally requested -- state's validators
+      // describe page 1's identity, not a page that never existed on any
+      // prior poll (see the doc comment in jsonAdapter.fetch's paginated
+      // loop for why this is correct, not an oversight).
+      expect(receivedHeaders[1]!['if-none-match']).toBeUndefined();
+      expect(receivedHeaders[1]!['if-modified-since']).toBeUndefined();
+    }, 15000); // 2 real requests (1 gap x 2s)
+
+    it('a 304 on page 1 short-circuits before any pagination is attempted', async () => {
+      let requestCount = 0;
+      const baseUrl = await serve((_req, res) => {
+        requestCount++;
+        res.writeHead(304, { ETag: '"still-current"' });
+        res.end();
+      });
+
+      const result = await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }),
+        makeState({ etag: '"still-current"' }),
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      expect(requestCount).toBe(1);
+      expect(result.notModified).toBe(true);
+      expect(result.items).toEqual([]);
+    });
+
+    it('a failure fetching page 2+ propagates and rejects the whole fetch, exactly like a page-1 failure would', async () => {
+      let requestCount = 0;
+      const baseUrl = await serve((req, res) => {
+        requestCount++;
+        if (requestCount === 1) {
+          const vulnerabilities = Array.from({ length: 200 }, (_, i) => ({ cve: { id: `CVE-2026-${i + 1}` } }));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ totalResults: 999, vulnerabilities }));
+          return;
+        }
+        res.writeHead(503);
+        res.end('unavailable');
+      });
+
+      await expect(
+        jsonAdapter.fetch(makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }), null, new Date('2026-08-14T03:00:00.000Z')),
+      ).rejects.toThrow();
+      expect(requestCount).toBe(2);
+    }, 15000); // 2 real requests (1 gap x 2s)
+
+    it('malformed entries on any page are counted in skipped, not silently dropped, and do not stop pagination', async () => {
+      const baseUrl = await serve((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://placeholder.test');
+        const startIndex = Number(url.searchParams.get('startIndex') ?? '0');
+        const vulnerabilities: unknown[] =
+          startIndex === 0
+            ? [{ cve: { id: 'CVE-2026-00001' } }, { cve: { id: '' } }, 'not even an object', ...Array.from({ length: 197 }, (_, i) => ({ cve: { id: `CVE-2026-${i + 2}` } }))]
+            : []; // short (empty) second page -- stop after page 1
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ totalResults: 200, vulnerabilities }));
+      });
+
+      const result = await jsonAdapter.fetch(
+        makeSource({ id: 'nvd-cve', url: `${baseUrl}/feed` }),
+        null,
+        new Date('2026-08-14T03:00:00.000Z'),
+      );
+
+      expect(result.items).toHaveLength(198);
+      expect(result.skipped).toBe(2);
+      // All 200 raw entries on this one page were genuinely retrieved
+      // (198 usable + 2 malformed) -- fully covers a 200-total window, so
+      // nothing was excluded BY POLICY and capped must be undefined.
+      expect(result.capped).toBeUndefined();
+    }, 15000); // 2 real requests (1 gap x 2s) -- page 1 is a FULL 200-entry page (malformed entries still occupy a slot), so pagination genuinely continues to a short, empty page 2 before stopping
   });
 });
