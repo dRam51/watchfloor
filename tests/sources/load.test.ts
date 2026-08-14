@@ -131,13 +131,19 @@ sources:
 
     // Intentionally an exact count, not `toBeGreaterThan`: a future edit that adds or
     // removes a source should update this number deliberately, not slide past it
-    // unnoticed. See task-11-report.md for the full list and reasoning; two of the
-    // plan's 22 verified sources (scotus-slip, nws-fl-alerts) are documented in
-    // docs/sources-wishlist.md instead of here -- both are blocked by the target
-    // site's own robots.txt (verified against src/fetch/robots.ts's real isAllowed
-    // logic, not assumed), the same category as the pre-existing Reuters-direct entry.
-    it('has exactly 20 configured sources', () => {
-      expect(sources.length).toBe(20);
+    // unnoticed. See task-11-report.md for the full list and reasoning.
+    //
+    // THREE of the plan's 22 verified sources are in docs/sources-wishlist.md instead
+    // of here, all blocked by the target site's own robots.txt (verified against
+    // src/fetch/robots.ts's real isAllowed logic, not assumed):
+    //   - scotus-slip    supremecourt.gov disallows /rss/
+    //   - nws-fl-alerts  api.weather.gov disallows / (the whole host)
+    //   - reuters-gnews  removed 2026-08-14 after the first live run: news.google.com
+    //                    also opens `User-agent: * / Disallow: /`, so BOTH the direct
+    //                    route and the indirect one are shut. This test caught that
+    //                    removal, which is exactly what the exact count is for.
+    it('has exactly 19 configured sources', () => {
+      expect(sources.length).toBe(19);
     });
 
     it('has no duplicate ids', () => {
