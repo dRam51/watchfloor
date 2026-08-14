@@ -45,6 +45,30 @@ sources:
     expect(() => loadSources(bad)).toThrow(SourceConfigError);
   });
 
+  // M1 task 10, constraint 3: a zero poll_interval is a live landmine --
+  // src/db/fetchState.ts's recordFailure would compute a zero backoff delay,
+  // making a FAILING source eligible again on every scheduler tick. Gate 1
+  // of two independent gates against the same hazard (gate 2 is
+  // src/scheduler/run.ts's own runtime guard on the parsed millisecond
+  // value, tested in tests/scheduler/run.test.ts).
+  it.each(['0m', '0h', '0d'])('rejects a zero poll_interval (%s)', (pollInterval) => {
+    const bad = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: ${pollInterval}, enabled: true }
+`;
+    expect(() => loadSources(bad)).toThrow(SourceConfigError);
+  });
+
+  it('still accepts every previously-valid poll_interval shape after the zero-rejecting tightening', () => {
+    for (const pollInterval of ['1m', '15m', '6h', '1d', '99999d']) {
+      const yaml = `
+sources:
+  - { id: a, name: A, type: rss, url: 'https://a.test/f', beats: [ai], weight: 1, poll_interval: ${pollInterval}, enabled: true }
+`;
+      expect(() => loadSources(yaml), pollInterval).not.toThrow();
+    }
+  });
+
   it('loads the real config/sources.yaml', () => {
     const sources = loadSourcesFile(join(process.cwd(), 'config', 'sources.yaml'));
     expect(sources.length).toBeGreaterThan(0);

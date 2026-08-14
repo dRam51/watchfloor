@@ -24,7 +24,22 @@ const SourceSchema = z.object({
   url: z.string().url(),
   beats: z.array(z.enum(BEATS)).min(1),
   weight: z.number().min(0.1).max(2.0),
-  poll_interval: z.string().regex(/^\d+[mhd]$/, 'must look like 15m, 6h, or 1d'),
+  // Tightened from /^\d+[mhd]$/ (M1 task 10, constraint 3): the original
+  // pattern accepted "0m"/"0h"/"0d". A zero poll_interval is a live landmine
+  // downstream -- src/db/fetchState.ts's recordFailure computes
+  // nextEligibleAt = now + min(pollIntervalMs * 2^n, ceiling), so a zero
+  // pollIntervalMs makes that delay zero regardless of n, meaning a FAILING
+  // source becomes eligible again on every single scheduler tick: backoff is
+  // completely defeated for exactly the source that most needs it (one
+  // that's already failing against a struggling server). Requiring a
+  // nonzero leading digit (`[1-9]` before the rest) rejects "0m"/"0h"/"0d"
+  // at config-load time while still accepting every legitimate value
+  // ("1m".."99999d" etc.). This is gate 1 of two independent gates against
+  // the same hazard -- src/scheduler/run.ts's parsePollIntervalMs is gate 2,
+  // a runtime guard on the parsed millisecond value itself, so the hazard is
+  // closed even if this regex were ever accidentally reverted. See that
+  // module's doc comment for the full defense-in-depth reasoning.
+  poll_interval: z.string().regex(/^[1-9]\d*[mhd]$/, 'must look like 15m, 6h, or 1d (a nonzero leading digit)'),
   enabled: z.boolean(),
   filters: z.record(z.unknown()).optional(),
   /** Markets sources only. Drives decay and which consumer sees the item (§5.1). */
