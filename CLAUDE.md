@@ -7,15 +7,23 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **M0 complete (tagged `m0-scaffold`). M1 ingest complete. M2 dedupe+scoring in
-progress** — Wave 1 landed, Waves 2–3 in flight. 670+ tests. The first live ingest ran on
-2026-08-14 and pulled **3,325 real items in 10.3s across 17 sources**; the second cycle cost
-zero network requests.
+Status: **M0 complete (tagged `m0-scaffold`). M1 ingest complete. M2 dedupe+scoring complete
+and accepted** (2026-08-14). **1,081 tests.** All 19 sources enabled, robots-verified, and
+parsing dates at **0% null**.
 
-**M2 Wave 1, landed:** interest profile (`2f74029`), recency decay (`6fc2bb7`), beats union
-(`5836fe2`), entities union (`d6d49a9`). Two fix rounds were open at last handoff — decay's
-first-seen timestamp and `nvd-cve`'s tail pagination; check `git log` for whether they landed
-rather than assuming either way.
+**M2 acceptance passed on a real 4,135-item corpus.** `npm run ingest` → `npm run score` →
+`npm run rank`. The US news top 10 is *entirely* multi-source stories (clusters of 2–3), with
+no sports and no Spanish-language copy; a story carried by AP *and* NPR *and* PBS tops it. The
+cyber top 10 is entirely CISA KEV override pins, at signal 0.000 — old enough that computed
+signal decayed to zero, pinned anyway, which is what "regardless of computed score" means.
+
+> [!important] The acceptance run is what found the milestone's worst bug
+> Clustering chained **1,543 unrelated CVEs into one cluster** (37% of the corpus) via
+> transitive single-linkage over formulaic titles, which *promoted* churn because cluster size
+> feeds `signal_score`. It took two fix rounds: stop writing bad clusters (cross-source-only +
+> boilerplate-trigram filtering), then — because the first fix was **inert on any existing
+> database** under append-only storage — scope `getClusterSizeAsOf` to the latest clustering
+> *run* rather than an item's latest membership. Unit tests could not have caught either half.
 
 > [!important] The scoring read path is three functions, not one
 > `getCurrentItem` returns a single stored *version*, and three separate facts about an item
