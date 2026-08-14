@@ -83,10 +83,21 @@ const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
  * (~12.6 MiB) -- room for years of future posts at this blog's historical
  * growth rate (~1.1 MB/year averaged over its ~12-year archive) -- while
  * still firmly rejecting a truly pathological response, the same spirit as
- * DEFAULT_MAX_BYTES's own headroom above. This is a deliberate, disclosed
- * trade-off, not a permanent fix: the archive only grows, and this value
- * will eventually need raising again -- there is no bounded url to fall
- * back to instead.
+ * DEFAULT_MAX_BYTES's own headroom above.
+ *
+ * This 20 MiB cost is also far rarer in practice than it first looks.
+ * `rss.ts` already threads `state.etag`/`state.lastModified` into every
+ * politeFetch call (unconditionally, for every source it fetches -- there is
+ * nothing project-zero-specific to wire up), and re-review confirmed live
+ * that this feed genuinely honors conditional GET: an If-None-Match against
+ * its current ETag gets a real 304, 0 bytes downloaded. So the full ~12.6 MB
+ * body is only ever paid on a cold start (no prior state) or a poll where
+ * the feed's content genuinely changed since last time -- an UNCHANGED poll,
+ * the common case at this feed's real publishing cadence, costs a 304, not
+ * a repeat of the full 20 MiB ceiling every 12h. The archive still only
+ * grows and this ceiling will still need raising eventually, but "eventually"
+ * is measured in however often Project Zero actually publishes, not every
+ * poll -- worth not overstating.
  */
 export const MAX_BYTES_OVERRIDES: Readonly<Record<string, number>> = {
   'https://projectzero.google/feed.xml': 20 * 1024 * 1024,

@@ -11,6 +11,7 @@ import {
   USER_AGENT,
   MAX_BYTES_OVERRIDES,
 } from '../../src/fetch/http.ts';
+import { loadSourcesFile } from '../../src/sources/load.ts';
 
 type Handler = RequestListener;
 
@@ -494,6 +495,28 @@ describe('politeFetch', () => {
       } finally {
         delete (MAX_BYTES_OVERRIDES as Record<string, number>)[url];
       }
+    });
+
+    // -----------------------------------------------------------------
+    // Fix round 1, Important item: nothing previously tied
+    // MAX_BYTES_OVERRIDES's key to config/sources.yaml's actual
+    // project-zero url -- an edit to either file (a tracking param added
+    // to the yaml, a cleanup pass here) would silently drop this source
+    // back to the ordinary 5 MiB default. It would still surface as a
+    // real, backoff-driven failure rather than corrupt anything (see
+    // ResponseTooLargeError -- non-retryable but honestly reported), but
+    // nothing would point a maintainer at MAX_BYTES_OVERRIDES as the
+    // cause. This test reads the REAL checked-in config (no network --
+    // loadSourcesFile only touches the local filesystem) so drift between
+    // the two files fails here, at CI, rather than in a live poll cycle.
+    // -----------------------------------------------------------------
+    it("config/sources.yaml's project-zero url is a key in MAX_BYTES_OVERRIDES, so the two files cannot silently drift apart", () => {
+      const repoRoot = join(import.meta.dirname, '..', '..');
+      const sources = loadSourcesFile(join(repoRoot, 'config', 'sources.yaml'));
+      const projectZero = sources.find((s) => s.id === 'project-zero');
+
+      expect(projectZero).toBeDefined();
+      expect(Object.keys(MAX_BYTES_OVERRIDES)).toContain(projectZero!.url);
     });
   });
 });
