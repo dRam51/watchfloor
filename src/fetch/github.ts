@@ -208,7 +208,23 @@ function intHeader(headers: Headers, name: string): number | null {
  * always sends it in practice (observed on every live response, including
  * a 404 and a 403), so this fallback is defensive rather than routine.
  */
-function readRateLimit(headers: Headers, path: string): GitHubRateLimit | null {
+/**
+ * Which rate-limit resource a path belongs to, derived from the resolved
+ * URL's PATHNAME rather than the raw argument.
+ *
+ * The distinction is load-bearing, not pedantry: `request` accepts a full
+ * URL as well as a bare path, and GitHub's own `link` header hands back
+ * absolute URLs for pagination. Matching on the raw string would classify
+ * `https://api.github.com/search/repositories?page=2` as `core` — whose
+ * budget is 6x larger unauthenticated — so a paginated search would be
+ * gated against the wrong, more permissive budget and overrun the real one.
+ */
+function resourceForPath(path: string, baseUrl: string): string {
+  const { pathname } = new URL(path, baseUrl);
+  return pathname.startsWith('/search') ? 'search' : 'core';
+}
+
+function readRateLimit(headers: Headers, fallbackResource: string): GitHubRateLimit | null {
   const limit = intHeader(headers, 'x-ratelimit-limit');
   const remaining = intHeader(headers, 'x-ratelimit-remaining');
   const used = intHeader(headers, 'x-ratelimit-used');
@@ -220,7 +236,7 @@ function readRateLimit(headers: Headers, path: string): GitHubRateLimit | null {
   }
 
   return {
-    resource: resource ?? (path.startsWith('/search') ? 'search' : 'core'),
+    resource: resource ?? fallbackResource,
     limit,
     remaining,
     used,
@@ -310,8 +326,9 @@ export class GitHubClient {
     } = opts;
 
     const url = new URL(path, this.#baseUrl).toString();
+    const resource = resourceForPath(path, this.#baseUrl);
 
-    this.#assertBudget(path);
+    this.#assertBudget(path, resource);
 
     await this.#acquireSlot(minIntervalMs);
 
@@ -349,7 +366,7 @@ export class GitHubClient {
       });
     }
 
-    const rateLimit = readRateLimit(response.headers, path);
+    const rateLimit = readRateLimit(response.headers, resource);
     if (rateLimit !== null) this.#budgets.set(rateLimit.resource, rateLimit);
 
     if (response.status === 304) {
@@ -412,8 +429,7 @@ export class GitHubClient {
    * only get by trying. A missing `resetAt` is treated as "cannot prove it
    * refilled" and keeps refusing until a real response updates it.
    */
-  #assertBudget(path: string): void {
-    const resource = path.startsWith('/search') ? 'search' : 'core';
+  #assertBudget(path: string, resource: string): void {
     const budget = this.#budgets.get(resource);
     if (!budget || budget.remaining === null) return;
     if (budget.remaining > this.#reserve) return;

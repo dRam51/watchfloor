@@ -597,14 +597,61 @@ describe('response parsing', () => {
       res.end('{}');
     });
 
-    const five = await new GitHubClient({ baseUrl: serverError })
-      .request('/repos/a/b')
-      .catch((e: unknown) => e as GitHubApiError);
-    const four = await new GitHubClient({ baseUrl: notFound })
-      .request('/repos/a/b')
-      .catch((e: unknown) => e as GitHubApiError);
+    /** Resolves to the thrown error, or fails loudly if the request succeeded. */
+    async function errorFrom(baseUrl: string): Promise<GitHubApiError> {
+      try {
+        await new GitHubClient({ baseUrl }).request('/repos/a/b');
+      } catch (e) {
+        return e as GitHubApiError;
+      }
+      throw new Error(`expected ${baseUrl} to reject`);
+    }
 
-    expect(five.retryable).toBe(true);
-    expect(four.retryable).toBe(false);
+    expect((await errorFrom(serverError)).retryable).toBe(true);
+    expect((await errorFrom(notFound)).retryable).toBe(false);
+  });
+});
+
+describe('resource derivation from a full URL', () => {
+  it('gates a search request passed as a full URL against the search budget, not core', async () => {
+    // request() resolves its argument with `new URL(path, baseUrl)`, so a full
+    // URL is a legitimate way to call it — and GitHub's own `link` header
+    // pagination hands back exactly that. Deriving the resource from the raw
+    // string means a paginated search URL would be gated against `core`,
+    // whose budget is 6x larger, so the search budget would be overrun.
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    let hits = 0;
+    const baseUrl = await serve((_req, res) => {
+      hits += 1;
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'x-ratelimit-limit': '10',
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-resource': 'search',
+        'x-ratelimit-reset': String(future),
+      });
+      res.end('{}');
+    });
+
+    const client = new GitHubClient({ baseUrl });
+    await client.request('/search/repositories?q=x', { minIntervalMs: 0 });
+    expect(client.budget('search')?.remaining).toBe(0);
+
+    // The follow-up page, as GitHub's `link` header would give it: absolute.
+    await expect(
+      client.request(`${baseUrl}/search/repositories?q=x&page=2`, { minIntervalMs: 0 }),
+    ).rejects.toBeInstanceOf(GitHubRateLimitError);
+    expect(hits).toBe(1);
+  });
+
+  it('falls back to the search resource for a full URL when the header is absent', async () => {
+    const baseUrl = await serve((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'x-ratelimit-limit': '10' });
+      res.end('{}');
+    });
+
+    const response = await new GitHubClient({ baseUrl }).request(`${baseUrl}/search/repositories?q=x`);
+
+    expect(response.rateLimit?.resource).toBe('search');
   });
 });
