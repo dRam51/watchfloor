@@ -91,6 +91,16 @@
      (global.css) rather than repeating this on every component. ---- */
   --touch-target-min: 44px;
 
+  /* ---- lanes: M3 task 10, the six-lane wide-viewport arrangement. A
+     collapsed lane shrinks to this fixed strip (label + toggle only) so the
+     five expanded lanes can reclaim its share of the grid -- collapsing is
+     meant to be worth doing ("I expect to keep US news collapsed most of
+     the day", §7), not just a cosmetic dim. `--lane-body-max-height` bounds
+     each lane's own scroll region so six columns scroll INDEPENDENTLY of
+     the page and of each other, rather than one tall page scroll. ---- */
+  --lane-collapsed-width: 2.75rem;
+  --lane-body-max-height: calc(100vh - 14rem);
+
   /* ---- motion: §7.4 -- micro-transitions are 150-200ms, ease-out, never
      bouncy. No animation ships in this task; the tokens exist so the first
      component that DOES animate (M3 task 12) reads a variable rather than

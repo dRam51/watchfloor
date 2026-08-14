@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchFeedFirstPage, fetchFeedNextPage } from '../api/feed.ts';
-import { ApiError } from '../api/client.ts';
-import { dismissItem, markItemRead, saveItem, unsaveItem } from '../api/itemState.ts';
 import type { Beat, FeedItem } from '../api/types.ts';
 import { BeatFilter } from './BeatFilter.tsx';
 import { ItemRow } from './ItemRow.tsx';
 import { SearchBox } from './SearchBox.tsx';
 import { prefersReducedMotion } from '../lib/motion.ts';
 import { beatForDigitKey, hasNavModifier, isEditableTarget, nextFocusIndex } from '../lib/keyboardNav.ts';
+import { useItemFeed } from '../hooks/useItemFeed.ts';
 
 /**
  * The merged stream (M3 task 8) -- a single scrollable list of item rows
@@ -34,8 +32,6 @@ import { beatForDigitKey, hasNavModifier, isEditableTarget, nextFocusIndex } fro
 
 const PAGE_SIZE = 25;
 
-type LoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' };
-
 export interface StreamProps {
   token: string;
   onUnauthorized: () => void;
@@ -43,16 +39,6 @@ export interface StreamProps {
 
 export function Stream({ token, onUnauthorized }: StreamProps) {
   const [beat, setBeat] = useState<Beat | null>(null);
-  const [items, setItems] = useState<FeedItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>({ status: 'loading' });
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [dismissingKeys, setDismissingKeys] = useState<Set<string>>(new Set());
-  // Bumped by the retry button (and now `refresh`, below) to re-run the
-  // load effect without adding a second source of truth for "which beat is
-  // selected".
-  const [retryToken, setRetryToken] = useState(0);
-  const dismissTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   // ---------------------------------------------------------------------
   // Real-focus model (task brief, decision 3). `focusedItemKey` is the ONE
@@ -73,6 +59,26 @@ export function Stream({ token, onUnauthorized }: StreamProps) {
   // longer present at all, `focusedIndex` below becomes `null` and the
   // next `j`/`k` press re-enters the list rather than acting on a wrong row.
   const [focusedItemKey, setFocusedItemKey] = useState<string | null>(null);
+
+  // The fetch/paginate/mutate guts live in one shared hook (M3 task 10) so
+  // `Lane.tsx`'s beat-fixed lists reuse the exact same logic rather than a
+  // second implementation -- see hooks/useItemFeed.ts's own doc comment.
+  // `onBeforeDismiss` is where this component's OWN concern (real focus)
+  // plugs into the hook's generic "a dismiss is about to happen" moment,
+  // unchanged in substance from before the extraction.
+  const { items, loadState, loadingMore, nextCursor, dismissingKeys, loadMore, handleOpen, handleToggleSave, handleDismiss, refresh } =
+    useItemFeed({
+      token,
+      beat,
+      onUnauthorized,
+      pageSize: PAGE_SIZE,
+      onBeforeDismiss: (item, dismissedIndex, itemsAtDismiss) => {
+        if (focusedItemKey !== item.itemKey) return;
+        const neighborIndex = dismissedIndex < itemsAtDismiss.length - 1 ? dismissedIndex + 1 : dismissedIndex - 1;
+        if (neighborIndex >= 0) focusRowAt(neighborIndex);
+      },
+    });
+
   const rawFocusedIndex = focusedItemKey === null ? -1 : items.findIndex((it) => it.itemKey === focusedItemKey);
   const focusedIndex = rawFocusedIndex === -1 ? null : rawFocusedIndex;
 
@@ -103,160 +109,6 @@ export function Stream({ token, onUnauthorized }: StreamProps) {
   function moveFocus(delta: 1 | -1): void {
     const next = nextFocusIndex(focusedIndex, delta, items.length);
     if (next !== null) focusRowAt(next);
-  }
-
-  // Changing the beat filter starts a FRESH page -- no cursor carried over,
-  // because a cursor's `beat` is fixed at the instant it was minted (task
-  // brief, point 2) and this is a deliberate new query, not a continuation.
-  useEffect(() => {
-    let cancelled = false;
-    setLoadState({ status: 'loading' });
-    setItems([]);
-    setNextCursor(null);
-
-    fetchFeedFirstPage(token, { beat: beat ?? undefined, limit: PAGE_SIZE })
-      .then((response) => {
-        if (cancelled) return;
-        setItems(response.items);
-        setNextCursor(response.nextCursor);
-        setLoadState({ status: 'ready' });
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        if (error instanceof ApiError && error.status === 401) {
-          onUnauthorized();
-          return;
-        }
-        setLoadState({
-          status: 'error',
-          message: error instanceof Error ? error.message : 'unknown error',
-        });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-    // Deliberately excludes `onUnauthorized`: AuthContext's setToken (what
-    // App.tsx passes as this prop) is stable across renders because it comes
-    // straight from useState, but it is not memoized at this call site, so
-    // listing it here would refetch on every parent render for no reason.
-  }, [token, beat, retryToken]);
-
-  useEffect(() => {
-    const timers = dismissTimers.current;
-    return () => {
-      for (const t of timers) clearTimeout(t);
-    };
-  }, []);
-
-  function loadMore(): void {
-    if (nextCursor === null || loadingMore) return;
-    setLoadingMore(true);
-    // The cursor is passed back VERBATIM -- no `beat`/`profile` reconstructed
-    // from this component's own state (task brief, point 2; also enforced by
-    // FeedCursorParams's type, which has no `beat` field to pass even if
-    // this tried to).
-    fetchFeedNextPage(token, { cursor: nextCursor, limit: PAGE_SIZE })
-      .then((response) => {
-        setItems((prev) => [...prev, ...response.items]);
-        setNextCursor(response.nextCursor);
-        setLoadingMore(false);
-      })
-      .catch((error: unknown) => {
-        setLoadingMore(false);
-        if (error instanceof ApiError && error.status === 401) {
-          onUnauthorized();
-          return;
-        }
-        setLoadState({
-          status: 'error',
-          message: error instanceof Error ? error.message : 'unknown error',
-        });
-      });
-  }
-
-  function handleOpen(item: FeedItem): void {
-    // Fire-and-forget: opening the link must never wait on this (§7.4,
-    // "nothing visual may block or delay data"), and a failed read-mark is
-    // not worth surfacing an error for -- the user's own action (opening the
-    // article) already succeeded regardless of whether the server recorded it.
-    markItemRead(token, item.itemKey)
-      .then((state) => {
-        setItems((prev) => prev.map((it) => (it.itemKey === item.itemKey ? { ...it, state } : it)));
-      })
-      .catch(() => {
-        /* best-effort */
-      });
-  }
-
-  function handleToggleSave(item: FeedItem): void {
-    const wasSaved = item.state.savedAt !== null;
-    const call = wasSaved ? unsaveItem(token, item.itemKey) : saveItem(token, item.itemKey);
-    call
-      .then((state) => {
-        setItems((prev) => prev.map((it) => (it.itemKey === item.itemKey ? { ...it, state } : it)));
-      })
-      .catch((error: unknown) => {
-        if (error instanceof ApiError && error.status === 401) onUnauthorized();
-        // Otherwise leave the row as it was -- no optimistic flip to undo.
-      });
-  }
-
-  function handleDismiss(item: FeedItem): void {
-    // If this row currently holds real focus, move it to a neighbor BEFORE
-    // marking the row aria-hidden and fading it out -- a focused descendant
-    // inside an aria-hidden ancestor is invalid, and once the removal timer
-    // below actually splices the row out of `items`, its DOM node is gone
-    // and focus would otherwise fall back to <body> with nothing left to
-    // tell `focusedItemKey` where to go. Synchronous, not deferred to the
-    // timer: the keyboard `x` path (task brief) makes "the focused row gets
-    // dismissed" the common case, not an edge case a mouse-only user rarely
-    // hit.
-    const dismissedIndex = items.findIndex((it) => it.itemKey === item.itemKey);
-    if (dismissedIndex !== -1 && focusedItemKey === item.itemKey) {
-      const neighborIndex = dismissedIndex < items.length - 1 ? dismissedIndex + 1 : dismissedIndex - 1;
-      if (neighborIndex >= 0) focusRowAt(neighborIndex);
-    }
-
-    dismissItem(token, item.itemKey)
-      .then(() => {
-        setDismissingKeys((prev) => new Set(prev).add(item.itemKey));
-        // Dismissal is IRREVERSIBLE (§7) -- this timer only delays the row's
-        // removal from the DOM so the 150-200ms fade transition can play; it
-        // never offers the user a way back. Respect prefers-reduced-motion by
-        // removing immediately rather than "quickly" -- there is no motion to
-        // wait out.
-        const delay = prefersReducedMotion() ? 0 : 200;
-        const timer = setTimeout(() => {
-          setItems((prev) => prev.filter((it) => it.itemKey !== item.itemKey));
-          setDismissingKeys((prev) => {
-            const next = new Set(prev);
-            next.delete(item.itemKey);
-            return next;
-          });
-          dismissTimers.current.delete(timer);
-        }, delay);
-        dismissTimers.current.add(timer);
-      })
-      .catch((error: unknown) => {
-        if (error instanceof ApiError && error.status === 401) onUnauthorized();
-      });
-  }
-
-  /**
-   * `r` (task brief, decision 2). `nextCursor` freezes page 1's `now` so
-   * pagination re-applies ONE consistent decay snapshot across every page
-   * (docs/api.md, "nextCursor carries a frozen now") -- so refresh is
-   * explicitly NOT "fetch the next page" (that would be `loadMore`, which
-   * passes the frozen cursor back verbatim). Bumping `retryToken` re-runs
-   * the load effect above, which calls `fetchFeedFirstPage` with no `now`
-   * of its own -- the server computes a brand new "now" for that request,
-   * discarding the old snapshot entirely and starting a fresh ranking. Also
-   * the SAME function the (error-only) Retry button already used before
-   * this task; it is now additionally always-visible and bound to `r`.
-   */
-  function refresh(): void {
-    setRetryToken((n) => n + 1);
   }
 
   /**

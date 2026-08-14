@@ -3,6 +3,8 @@ import { AuthProvider, useAuth } from './auth/AuthContext.tsx';
 import { AuthGate } from './auth/AuthGate.tsx';
 import { apiFetch, ApiError } from './api/client.ts';
 import { Stream } from './components/Stream.tsx';
+import { LaneBoard } from './components/LaneBoard.tsx';
+import { useIsWideViewport } from './lib/viewport.ts';
 
 /**
  * Shape of GET /api/dashboard/header (src/api/routes/dashboard.ts, M3 task 6).
@@ -24,6 +26,13 @@ type LoadState =
 function Dashboard() {
   const { token, setToken } = useAuth();
   const [state, setState] = useState<LoadState>({ status: 'loading' });
+  // §7.1: "Build the merged-stream view first and treat lanes as the
+  // wide-viewport arrangement of it" -- exactly one of Stream/LaneBoard is
+  // ever mounted (never both), so there is only ever one keyboard listener
+  // and one set of live feed requests on the page at a time. ~700px per the
+  // M3 task 10 brief; see lib/viewport.ts for why the guarded default is
+  // narrow (Stream) rather than wide.
+  const isWide = useIsWideViewport();
 
   useEffect(() => {
     if (!token) return;
@@ -84,7 +93,12 @@ function Dashboard() {
           only renders Dashboard once a token exists, but that fact isn't
           visible to the type checker from here, so this makes it explicit
           rather than asserting it away. */}
-      {token && <Stream token={token} onUnauthorized={() => setToken(null)} />}
+      {token &&
+        (isWide ? (
+          <LaneBoard token={token} onUnauthorized={() => setToken(null)} />
+        ) : (
+          <Stream token={token} onUnauthorized={() => setToken(null)} />
+        ))}
     </main>
   );
 }

@@ -574,3 +574,224 @@ a {
   font-size: var(--text-xs);
   word-break: break-all;
 }
+
+/* ---------------------------------------------------------------------
+ * Lane board (web/src/components/LaneBoard.tsx + Lane.tsx, M3 task 10) --
+ * the wide-viewport ARRANGEMENT of the same rows Stream.tsx renders below
+ * ~700px. Nothing in this section styles a row; `.item-row*` above (Task 8)
+ * is used verbatim inside a lane. §7: six lanes, one per beat, each
+ * independently scrollable and collapsible.
+ * --------------------------------------------------------------------- */
+.lane-board {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+.lane-board__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.lane-board__refresh {
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.lane-board__refresh:hover {
+  border-color: var(--color-accent);
+}
+
+.lane-board__status {
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.lane-board__status--error {
+  color: var(--color-error);
+}
+
+.lane-board__retry {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-sm);
+  color: var(--color-error);
+  cursor: pointer;
+}
+
+/* Column widths are computed inline per render (LaneBoard.tsx) from each
+   lane's own collapsed flag -- a collapsed lane's track is
+   var(--lane-collapsed-width), every expanded lane shares the remaining
+   space equally via minmax(0, 1fr). The transition on grid-template-columns
+   is what makes a collapse toggle a micro-transition (§7.4, 150-200ms,
+   ease-out) rather than an instant snap; prefers-reduced-motion zeroes
+   var(--motion-base) globally (tokens.css), so this needs no media query
+   of its own. */
+.lane-board__grid {
+  display: grid;
+  gap: 1px; /* hairline separators via the grid gap + surface background, not a border per lane */
+  background: var(--color-border);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  transition: grid-template-columns var(--motion-base) var(--motion-ease);
+}
+
+.lane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--color-bg);
+}
+
+.lane__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.lane__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+  letter-spacing: 0.03em;
+}
+
+.lane__count {
+  flex: 0 0 auto;
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Collapsed: the header rotates to a vertical strip so the beat's full
+   name stays legible in a narrow column, rather than truncating to
+   something unreadable. The toggle stays >=44px (touch-target) regardless
+   of the rotation -- §7.1 does not carve out an exception for a dense or
+   collapsed state. */
+.lane--collapsed .lane__header {
+  flex-direction: column;
+  writing-mode: vertical-rl;
+  padding: var(--space-3) 0;
+  gap: var(--space-2);
+}
+
+.lane--collapsed .lane__label {
+  writing-mode: vertical-rl;
+  text-overflow: clip;
+}
+
+/* §7.1: touch targets >=44px even in the dense desktop view, and the
+   collapse control is ALWAYS rendered (never hover-revealed) -- this is
+   the one control every lane has regardless of its state. */
+.lane__collapse-toggle {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.lane__collapse-toggle:hover {
+  border-color: var(--color-accent);
+}
+
+.lane__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: var(--lane-body-max-height);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.lane__status {
+  padding: var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.lane__status--error {
+  color: var(--color-error);
+}
+
+.lane__retry {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-sm);
+  color: var(--color-error);
+  cursor: pointer;
+}
+
+.lane__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Explicit pagination only, same as Stream's own list (§7: no infinite
+   scroll anywhere in the tree) -- this button is the one way a lane ever
+   requests a second page. */
+.lane__load-more {
+  align-self: center;
+  margin: var(--space-2) 0;
+  padding: 0 var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.lane__load-more:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.lane__load-more:disabled {
+  color: var(--color-text-dim);
+  cursor: default;
+}
+
+/* Below ~700px, App.tsx mounts Stream instead of LaneBoard entirely (see
+   lib/viewport.ts) -- this media query is a defensive backstop, not the
+   primary mechanism, so the grid never regresses to an unreadable
+   six-sliver layout if it were ever mounted at a narrow width (e.g. a
+   window resized between renders before React re-evaluates isWide). */
+@media (max-width: 700px) {
+  .lane-board__grid {
+    grid-template-columns: 1fr !important;
+    overflow-x: visible;
+  }
+}
