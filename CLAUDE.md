@@ -84,6 +84,30 @@ stay consistent with decay-at-read-time: an override evaluated at read time may 
 reader's `now`; one evaluated at scoring time may not. Note also that a KEV entry's own
 `dateAdded` is not when *we* first saw it — on a cold start those differ by years.
 
+**`item_type` is effectively binary, and `press` is empty.** Accepted deliberately on
+2026-08-14 — documented rather than fixed, revisit at M4b. After task 7's refinement the
+classifier returns `event` for the four government-primary sources and **`analysis` for
+everything else**; `press` (PR-wire syndication: PRNewswire, Business Wire, IR boilerplate)
+matches **0 of 3,325** real items, because none of the 19 configured sources is a PR-wire.
+
+The cause is structural, not a weak token list. `ItemType` is `event | analysis | press`,
+fixed by a CHECK constraint, and **none of them means "ordinary news story"** — which is what
+most of the corpus is. So whichever value you default to is wrong for the majority: M1
+defaulted to `press` and called everything churn, M2 defaults to `analysis` and calls a box
+score depth. Verified against real rows — *"Phillies beat Twins 7-1 at Field of Dreams"* and
+*"Swiatek vence a Rybakina en Toronto"* both classify as `analysis`.
+
+Why it is safe to defer: `item_type` only affects decay for the **markets** beat, which has
+no configured sources yet. Every other beat keys decay on the beat itself. **Why it must not
+be forgotten:** `config/decay.yaml` gives markets `analysis` a 240h signal half-life against
+`press`'s 6h — a **40× gap** that starts mattering the moment M4b adds markets sources.
+
+Also note the plan's line that "`press` is the churn bucket that must be suppressed in both
+views" is, in substance, unmet — nothing is in that bucket. Sports and Spanish-language
+suppression rests entirely on the interest profile (`config/interests.yaml`), which catches
+28 of 150 AP titles. Judge the M2 acceptance question — *is the AP sports and Spanish copy
+gone from US news?* — against that mechanism, not against `item_type`.
+
 **Reuters has no permitted route at all** — its own robots.txt blocks us, and the Google News
 workaround is blocked by Google's. The `google_news` adapter stays in the tree, tested,
 pointing at nothing. Any future indirect route must check **every host in the chain**, which
