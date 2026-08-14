@@ -172,3 +172,70 @@ title, canonical URL, and publication date for ~585 articles. That is the `ap-ne
 on quality. It returns zero articles for an exact-domain AP query, rate-limits to one request per
 five seconds, and its default domain filter is substring-based: a first query appeared to find AP
 articles that were actually from `kelownacapnews.com`.
+
+---
+
+# Wanted beats — features, not blocked sources
+
+Everything above is a source we tried to reach and could not. This section is different:
+things the owner wants **built** once the current milestones are done. Recorded here so the
+intent survives, with the groundwork already measured.
+
+## New York sports — a beat of its own
+
+**Status:** wanted, deferred until the core project is finished. Requested 2026-08-14.
+**Scope:** New York teams — Yankees, Knicks, Giants — news *and* stats.
+
+**Why this is worth doing properly rather than loosening a filter.** Sports is currently
+*noise* in this system: §4 names it a suppression target for US news, `config/interests.yaml`
+suppresses it, and the M2 acceptance run found AP sports boilerplate topping the `usnews` beat.
+Giving it a dedicated beat converts that from a problem into content — the same items stop
+being churn in a national-news lane and become the point of a sports lane. **Nothing should be
+un-suppressed from `usnews` to achieve this**; a separate beat is exactly what keeps both lanes
+honest.
+
+**What already exists.** AP carries NY sports today and it is already being ingested. Measured
+against the 2026-08-14 corpus (4,135 items, one poll cycle):
+
+| team | items |
+| --- | --- |
+| Yankees | 2 |
+| Giants | 2 (one is the *San Francisco* Giants — see below) |
+| Rangers | 3 (ambiguous — see below) |
+| Liberty | 2 |
+| Mets | 1 |
+| Knicks | 0 |
+
+Real examples: *"Gilbert pitches Mariners to 1-0 win over Yankees"*, *"Malik Nabers takes a
+'big step' forward at Giants training camp"*. So a news half of this beat needs **no new
+source** to start — but AP's volume is thin (a handful per cycle, from a rolling ~48h sitemap
+window), so dedicated team feeds would be needed for real coverage.
+
+**The hard part, already identified: team names are ambiguous.** In the corpus above,
+*"Giants host the Rockies in first of 3-game series"* is the **San Francisco** Giants (MLB)
+while *"Malik Nabers … Giants training camp"* is the **New York** Giants (NFL). *"Rangers"* is
+Texas (MLB) or New York (NHL) depending on the story. A naive team-name filter will pull in the
+wrong city constantly. This is the same taxonomy problem M2 hit when trying to *suppress*
+sports, and it does not get easier when the goal is to *select* it — sport and league have to
+be part of the match, not just the nickname. AP's URL slugs help (`sabally-liberty-wnba`,
+`jacob-degrom-texas-rangers` carry league or city), but they are a heuristic, not a declared
+field — AP's sitemap publishes only `title`, `publication_date`, `publication`, `name`, and
+`language`, with no `<news:keywords>` or `<news:genres>`.
+
+**Stats are a different problem from news** and should be scoped separately. Scores, standings
+and box scores are structured data on a schedule, not articles — they likely want their own
+adapter type and their own storage, not `items` rows with a 300-character excerpt. Note also
+that §5.1's `item_type` half-lives were designed for filings and essays; a final score is
+stale in hours and a season standings table is never quite stale.
+
+**Before building, check:**
+- **`robots.txt` on every host in the chain** — the rule that cost us Reuters. League sites
+  (`mlb.com`, `nba.com`, `nfl.com`), team sites, and any stats API each need checking
+  independently, and an aggregator does not inherit its upstream's permission.
+- **The zero-dollar rule.** Several sports-stats APIs are commercial, and a free tier that
+  requires a card on file counts as paid (§15). Anything needing a key gets a
+  `WF_ALLOW_PAID_*` flag and a `docs/costs.md` entry, or it does not ship.
+- **Whether the beat needs a new `Beat` union value** (`src/domain/item.ts`) plus a decay
+  half-life entry in `config/decay.yaml`. Note `item_beats` has no CHECK constraint, unlike
+  `items.item_type` — so an unknown beat string will insert happily and fail later at decay
+  resolution, which is a trap worth closing at the same time.
