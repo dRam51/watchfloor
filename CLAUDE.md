@@ -7,7 +7,31 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **M0 scaffold complete, tagged `m0-scaffold`.** `npm run dev` starts, `npm test` passes, `npm run check:portability` passes.
+Status: **M0 complete (tagged `m0-scaffold`). M1 ingest in progress** — tasks 1–6 done,
+7–9 in review, 10–11 not started. 417 tests. **Nothing has been ingested yet**; the DB is
+empty until M1 task 11 runs the first live cycle.
+
+## Resuming work — read these first
+
+Conversation context does not survive a reset; these do.
+
+| Where | What it holds |
+| --- | --- |
+| `.superpowers/sdd/2026-08-13-m1-ingest/progress.md` | **The M1 recovery map.** Every task's status, fix rounds, controller rulings, and carry-forward constraints. Trust it and `git log` over recollection. |
+| `.superpowers/sdd/2026-08-12-m0-scaffold/progress.md` | Same for M0 |
+| `docs/superpowers/plans/2026-08-13-m1-ingest.md` | The M1 plan — note it has been corrected four times; the ledger records why |
+| `docs/brief.md` | **Missing.** The authority every plan cites by section number. Ask the human for it. |
+
+`.superpowers/` is gitignored, so it survives on this machine but **not in a fresh clone**.
+Anything that must outlive the machine belongs in `docs/`.
+
+### Blocking before M1 task 11 (first live ingest)
+
+**The CVE URL collision.** `cisa-kev` and `nvd-cve` construct the same NVD URL, so the same
+CVE from both sources yields the same `item_key`. Under append-only storage one source
+silently masks the other and clustering cannot see two pickups. Fixing it later does not
+repair existing rows — it fragments each CVE's history. Give CISA its own `cisa.gov` URL;
+a fragment disambiguator is stripped by canonicalization, a query parameter survives.
 
 ## Settled decisions
 
@@ -65,4 +89,14 @@ malformed `weight`, `beat`, or `poll_interval` fails at load, not at fetch time.
 
 ## Portability debt
 
-None yet. Anything macOS-only gets recorded here rather than left silent.
+**The Obsidian vault is on iCloud Drive** — `~/Library/Mobile Documents/iCloud~md~obsidian/
+Documents/Obsidian-Vault`, with Watchfloor owning `01 Tech Projects/Watchfloor/`. iCloud does
+not exist on Linux, so if the always-on host is Linux the §8.1 integration cannot run there.
+Decide before M5: Mac host, move the vault to Syncthing/git, or split ingest from vault-sync.
+
+**`WF_VAULT_ROOT` cannot point at that vault.** `src/config/env.ts` validates it as
+relative-only — an over-application of the zero-absolute-paths rule, which governs the source
+tree, not a gitignored `.env`. Relax it for this one variable before M5.
+
+**Local LLM inference** will differ on the target host. Ollama on Apple Silicon uses Metal; a
+mini PC without a capable GPU may not run the same model at all.
