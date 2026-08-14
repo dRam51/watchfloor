@@ -634,6 +634,178 @@ a {
 }
 
 /* ---------------------------------------------------------------------
+ * Repo row (web/src/components/RepoRow.tsx, M4a task 8) -- §7: "Repos lane
+ * rows differ: repo name, one-line description, language, stars + velocity
+ * arrow, last-commit age."
+ *
+ * Only the CONTENT columns are styled here. Everything structural -- the
+ * left accent, focus ring, dismiss fade, pulse, detail accordion, action
+ * buttons -- comes from `.item-row*` above, unchanged, because RepoRow
+ * renders those exact classes. That is what makes "a different row in the
+ * same lane container" true in the stylesheet as well as in the component
+ * tree, and it means retuning row chrome retunes both rows at once.
+ *
+ * Every colour is a token (§7.1). The four velocity states each read a
+ * `--color-velocity-*` variable rather than picking a hue here; see
+ * tokens.css for why up/down deliberately spend accent+amber instead of
+ * green/red, which stay reserved for M4b's market direction.
+ * --------------------------------------------------------------------- */
+
+/* The repo name is the row's identity, so it is the one thing that never
+   gives up space: a truncated `owner/` prefix would make two different
+   repos look identical in a narrow lane. The description yields instead. */
+.repo-row__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+/* The only genuinely elastic column. Dimmer than the name so a glance down
+   a lane reads as a column of repo names, with prose as context -- the
+   "terminal, not a content feed" distinction §7 asks for. */
+.repo-row__description {
+  flex: 1 1 auto;
+  min-width: var(--repo-description-min-width);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.repo-row__description--missing,
+.repo-row__language--missing {
+  color: var(--color-text-dim);
+  font-style: italic;
+}
+
+.repo-row__meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-dim);
+  white-space: nowrap;
+}
+
+.repo-row__language {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Tabular figures on every number in the row, so a column of star counts
+   and rates lines up digit-for-digit down a lane rather than jittering --
+   the single cheapest thing that makes a dense list read as instrumentation
+   rather than as prose. */
+.repo-row__stars,
+.repo-row__velocity,
+.repo-row__pushed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.repo-row__stars {
+  color: var(--color-text-secondary);
+}
+
+/* The velocity arrow (§7). Four states, four tokens. `--unknown` is the one
+   that matters most in practice: on a fresh database every repo sits in it
+   for seven days, so it must be legible as "not measured yet" at a glance
+   and must NOT compete visually with the measured rates beside it. */
+.repo-row__velocity--up {
+  color: var(--color-velocity-up);
+}
+
+.repo-row__velocity--down {
+  color: var(--color-velocity-down);
+}
+
+.repo-row__velocity--flat {
+  color: var(--color-velocity-flat);
+}
+
+.repo-row__velocity--unknown {
+  color: var(--color-velocity-unknown);
+  font-style: italic;
+}
+
+/* A true rate for an interval that stopped `staleDays` ago (src/score/
+   velocity.ts, decision 4: reported, never gated). Dimmed rather than
+   hidden or re-coloured -- it is still the real number, just older than the
+   window implies, and the `*` mark plus the title carry the detail. */
+.repo-row__velocity--stale .repo-row__velocity-label,
+.repo-row__velocity-stale-mark {
+  opacity: 0.7;
+}
+
+.repo-row__velocity-glyph {
+  /* Fixed width so up/down/flat/unknown glyphs of different advance widths
+     do not shift the label beside them between rows. */
+  display: inline-block;
+  width: 1em;
+  text-align: center;
+}
+
+.repo-row__pushed--never {
+  font-style: italic;
+}
+
+/* The three README states RepoRow distinguishes. `--absent` is a fact we
+   established; `--unknown` is a fact we did not, and the two must never
+   render alike (see RepoRow.tsx, prohibition 3). Both are dim and italic
+   because neither is repo prose, but only one is styled as a gap in our own
+   data. */
+.repo-row__readme {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.repo-row__readme--absent {
+  color: var(--color-text-dim);
+  font-style: italic;
+}
+
+.repo-row__readme--unknown {
+  color: var(--color-text-secondary);
+  font-style: italic;
+  border-left: 2px solid var(--color-border-strong);
+  padding-left: var(--space-2);
+}
+
+/* Below the lane-board breakpoint the phone gets Stream, not lanes, and a
+   five-fact single line is unreadable at that width -- so the meta group
+   drops to its own line and the description is allowed to keep its own.
+   The row stays dense (two short lines, not a card), which is the §7
+   "legible on a phone browser" half of the same deliverable. */
+@media (max-width: 700px) {
+  .repo-row__toggle {
+    flex-wrap: wrap;
+  }
+
+  .repo-row__description {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+
+  .repo-row__meta {
+    flex-basis: 100%;
+    gap: var(--space-2);
+  }
+}
+
+/* ---------------------------------------------------------------------
  * Lane board (web/src/components/LaneBoard.tsx + Lane.tsx, M3 task 10) --
  * the wide-viewport ARRANGEMENT of the same rows Stream.tsx renders below
  * ~700px. Nothing in this section styles a row; `.item-row*` above (Task 8)

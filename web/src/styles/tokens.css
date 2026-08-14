@@ -52,6 +52,42 @@
      --color-alert, which is a watchfloor *signal*, not a UI failure. ---- */
   --color-error: #f87171;
 
+  /* ---- velocity: M4a task 8, §7's "stars + velocity arrow" on the repos
+     row. FOUR values, because velocity has four display states and one of
+     them is "we have not measured this yet" -- on a fresh database that is
+     EVERY repo for seven days (M4a plan: "this is not a bug to engineer
+     around; it is the shape of the feature").
+
+     Why this does NOT spend green/red, which the note at the top of this
+     file reserves for M4b's market direction: a rising repo and a rising
+     ticker are different kinds of claim. §4 ranks repos BY star velocity,
+     so "up" here is the ordering signal the lane is built on, not a
+     good/bad judgement -- while the standing rule that "the markets beat is
+     a research feed, never a directional score" means M4b's green/red is
+     precisely the judgement-adjacent hue this must not borrow. So up
+     reuses the existing accent (the ops-wall glow, already "this is the
+     signal"), and down gets amber -- the same "something is worth your
+     attention" family as the hard-override accent, because a star count
+     going DOWN is usually a spam-star purge, i.e. evidence the earlier
+     spike was manufactured (src/score/velocity.ts, decision 3).
+
+     --color-velocity-unknown is deliberately the dimmest text token, not a
+     hue of its own: an unmeasured velocity must recede rather than compete
+     with the measured ones beside it. It is a separate token anyway so
+     retuning "how loud is 'we do not know yet'" stays a one-line edit --
+     that state is on screen for the lane's entire first week. ---- */
+  --color-velocity-up: var(--color-accent);
+  --color-velocity-down: var(--color-alert);
+  --color-velocity-flat: var(--color-text-secondary);
+  --color-velocity-unknown: var(--color-text-dim);
+
+  /* ---- repos lane: the one-line description is the only genuinely elastic
+     column in the repo row, so it is the one that gets truncated when a lane
+     narrows. A floor stops it collapsing to nothing in a six-lane grid on a
+     laptop; below the lane-board breakpoint the row reflows to two lines
+     (global.css) and this stops applying. ---- */
+  --repo-description-min-width: 6rem;
+
   /* ---- type: one family, used everywhere (title, body, timestamps,
      scores) -- "monospace-leaning" per §7, taken literally rather than
      paired with a second sans-serif for prose. System fonts only: no
