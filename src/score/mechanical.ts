@@ -10,6 +10,7 @@ import { getClusterSizeAsOf } from '../cluster/store.ts';
 import { matchProfile, type InterestProfile, type ProfileMatches } from '../interests/load.ts';
 import type { Source } from '../sources/load.ts';
 import { tryReadPortfolioFile } from './overrides.ts';
+import { RepoScoringConfigSchema, resolveRepoSignal, type RepoSignal } from './repoSignal.ts';
 
 // ---------------------------------------------------------------------------
 // The mechanical scorer (M2 task 5 / §5, §5.1): combines source trust weight,
@@ -373,6 +374,14 @@ const MechanicalScoreConfigSchema = z
     interest: InterestConfigSchema,
     high_on_both: HighOnBothConfigSchema,
     portfolio: PortfolioConfigSchema,
+    // OPTIONAL, and that is load-bearing in two directions. A config without a
+    // `repos:` block scores exactly as it did before M4a -- which is what keeps
+    // every existing hand-built test config valid, and what makes "the repos
+    // mechanism is absent" an expressible state rather than an inert table
+    // (this project's convention: an absent mechanism is documented as absent,
+    // never implied to work). And because the block is the ONLY thing that
+    // enables the two repo terms, deleting it is a complete, one-edit rollback.
+    repos: RepoScoringConfigSchema.optional(),
   })
   .strict();
 
@@ -444,10 +453,37 @@ export function computeInterestMultiplier(matches: ProfileMatches, config: Mecha
   return clamp(raw, config.interest.multiplier_floor, config.interest.multiplier_ceiling);
 }
 
+/**
+ * The repos lane's two components, as ALREADY-RESOLVED NUMBERS (M4a task 7).
+ *
+ * Numbers, not a `VelocityResult`, and the reason is the same structural
+ * guarantee this module's header opens with: a VelocityResult carries
+ * observation INSTANTS, so accepting one here would put a timestamp inside
+ * computeMechanicalScore's input type and destroy the "structurally incapable
+ * of applying decay" property. src/score/repoSignal.ts's velocityComponentFor
+ * and hnComponentFor are where the union is unwrapped -- and they are the only
+ * place, so the "insufficient history is exactly 0" decision is made once, in
+ * the open, rather than by whichever caller reached for `?? 0` first.
+ *
+ * Both are decay-invariant: `velocityComponent` describes a rate measured
+ * between two fixed past instants, and `hnComponent` describes what the corpus
+ * contained as of the scoring pass's own `now` -- neither moves after the row
+ * is written. That is the identical shape (and identical justification) as
+ * clusterSize, which getClusterSizeAsOf already resolves `asOf` the pass's now.
+ */
+export interface RepoScoreComponents {
+  /** Signed, in [-1, 1]. 0 means "no evidence", which includes "no history yet". */
+  velocityComponent: number;
+  /** In [0, 1]. How strongly HN has already covered this repo. Subtracted. */
+  hnComponent: number;
+}
+
 export interface MechanicalScoreComponents {
   sourceWeight: number;
   clusterSize: number;
   interestMatches: ProfileMatches;
+  /** Absent for every non-repo item -- the overwhelming majority. */
+  repo?: RepoScoreComponents;
 }
 
 export interface MechanicalScoreResult {
@@ -467,8 +503,37 @@ export function computeMechanicalScore(components: MechanicalScoreComponents, co
   const clusterComponent = normalizeClusterSize(components.clusterSize, config);
   const interestMultiplier = computeInterestMultiplier(components.interestMatches, config);
 
-  const baseSignal = config.cluster.signal_weight * clusterComponent + config.source.signal_weight * sourceComponent;
-  const baseRead = config.cluster.read_weight * clusterComponent + config.source.read_weight * sourceComponent;
+  let baseSignal = config.cluster.signal_weight * clusterComponent + config.source.signal_weight * sourceComponent;
+  let baseRead = config.cluster.read_weight * clusterComponent + config.source.read_weight * sourceComponent;
+
+  // The repos lane's two terms (M4a task 7 / §4). Applied only when BOTH the
+  // item is a repo and the config carries weights for it -- either missing and
+  // the formula is byte-identical to the pre-M4a one.
+  //
+  // ADDITIVE AND SUBTRACTIVE, never a multiplier. A multiplier would scale the
+  // source and cluster terms, so a repo from a high-trust source would be
+  // rewarded for velocity twice; and a de-rank expressed as a multiplier below
+  // 1 approaches suppression asymptotically, which is precisely the boundary
+  // §4 draws (its suppression list has four rules and HN overlap is not one).
+  //
+  // VELOCITY IS WEIGHTED FOR SIGNAL AS CORROBORATION IS: a repo's star rate is
+  // the repos lane's direct evidence of §5.1's "materiality" -- the same role
+  // "carried by AP *and* NPR *and* PBS" plays for a news story -- so
+  // velocity.signal_weight mirrors cluster.signal_weight, and its read_weight
+  // mirrors cluster.read_weight for the mirror-image reason: a rocketing repo
+  // is materially significant NOW, but its star rate says little about whether
+  // reading it repays the time.
+  //
+  // HN OVERLAP IS WEIGHTED IDENTICALLY FOR BOTH, deliberately, for exactly the
+  // reason sourceComponent is (see this module's header): there is no grounded
+  // basis to claim "I have already seen this" bears more on materiality than on
+  // read-value, and inventing an asymmetry would repeat the item_type mistake
+  // this scorer already had to correct once.
+  if (config.repos && components.repo) {
+    const { velocityComponent, hnComponent } = components.repo;
+    baseSignal += config.repos.velocity.signal_weight * velocityComponent - config.repos.hn.signal_weight * hnComponent;
+    baseRead += config.repos.velocity.read_weight * velocityComponent - config.repos.hn.read_weight * hnComponent;
+  }
 
   return {
     signalScore: baseSignal * interestMultiplier,
@@ -577,8 +642,27 @@ export function scoreItem(db: Db, itemKey: string, now: string, deps: ScoreItemD
   // the item), not once per beat.
   resolvePortfolioProximity(deps.config.portfolio.portfolio_path);
 
+  // The repos lane (M4a task 7). Gated on the SOURCE TYPE, not on the beat and
+  // not on the URL alone: `github_search` is the one source type that emits
+  // repositories, so an HN story that happens to link to a repo root -- which
+  // shares an item_key with the repo under append-only storage, and is a real
+  // case -- never gets scored as if it were the repo. `now` reaches this only
+  // as the `asOf` bound on both reads, exactly as it already does for
+  // getClusterSizeAsOf; nothing here varies with the clock after the row lands.
+  const repoSignal: RepoSignal | null =
+    deps.config.repos && source.type === 'github_search'
+      ? resolveRepoSignal(db, itemKey, current.canonicalUrl, now, deps.config.repos)
+      : null;
+
   const { signalScore, readScore } = computeMechanicalScore(
-    { sourceWeight: source.weight, clusterSize, interestMatches },
+    {
+      sourceWeight: source.weight,
+      clusterSize,
+      interestMatches,
+      ...(repoSignal
+        ? { repo: { velocityComponent: repoSignal.velocityComponent, hnComponent: repoSignal.hnComponent } }
+        : {}),
+    },
     deps.config,
   );
 

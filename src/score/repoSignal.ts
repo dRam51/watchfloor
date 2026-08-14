@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import type { Db } from '../db/connection.ts';
+import { assertCanonicalTimestamp } from '../domain/item.ts';
+import { resolveRepoId } from '../db/repoSnapshots.ts';
+import { computeStarVelocityForItem, type VelocityResult } from './velocity.ts';
 
 // ---------------------------------------------------------------------------
 // The repos lane's own score inputs (M4a task 7 / §4, and the M4a acceptance
@@ -429,4 +433,344 @@ export function titleMentionsRepo(title: string, repoName: string, config: HnSco
   if (config.generic_names.some((g) => slugTokens(g).join('') === slug)) return false;
 
   return containsTokenRun(slugTokens(title), needle);
+}
+
+// ---------------------------------------------------------------------------
+// The database reads
+// ---------------------------------------------------------------------------
+
+/** One HN story that names this repository, and how we knew. */
+export interface HnMention {
+  itemKey: string;
+  itemId: string;
+  title: string;
+  canonicalUrl: string;
+  sourceId: string;
+  publishedAt: string | null;
+  fetchedAt: string;
+  /** `url` is a link that names the repo; `title` is a headline that does. */
+  via: 'url' | 'title';
+}
+
+export interface HnOverlap {
+  seen: boolean;
+  /**
+   * The STRONGEST single piece of evidence, not a sum. Ten HN posts about a
+   * repo do not make it more already-seen than one -- the reader either has
+   * met it or has not -- and summing would let a popular project accumulate an
+   * unbounded penalty that no amount of velocity could outweigh, which is
+   * suppression by arithmetic (see the module doc comment, point 2).
+   */
+  strength: number;
+  /** Every matching story, oldest first, one per item_key. */
+  mentions: HnMention[];
+}
+
+/**
+ * Every story from a configured aggregator source that names this repository,
+ * as of `asOf`.
+ *
+ * ## The gate is the SOURCE, never the item_key
+ * A repo ingested by the github_search adapter has canonical_url
+ * `https://github.com/{owner}/{name}`. When HN links to that same root, the two
+ * canonicalize identically, so under append-only storage they are two VERSIONS
+ * of one item_key -- and an item_key-based self-exclusion would throw away the
+ * strongest possible evidence of overlap. Filtering on `source_id in
+ * (config.source_ids)` keeps the repo's own row out of its own evidence while
+ * keeping HN's row in, which is exactly right in both directions.
+ *
+ * ## Cost
+ * The SQL narrows to aggregator rows matching a cheap LIKE prefilter; the
+ * precise decision is made in JavaScript on that small candidate set, so a
+ * wildcard character inside a repo name (`_` is a LIKE wildcard and a legal
+ * GitHub name character) can only ever over-select, never mis-decide. One query
+ * per repo per scoring pass -- the same not-yet-batched shape
+ * src/domain/itemBeats.ts and src/score/mechanical.ts's getLatestItemScore
+ * already have, and left unbatched for the same reason.
+ */
+export function findHnOverlap(
+  db: Db,
+  ref: GithubRepoRef,
+  asOf: string,
+  config: HnScoringConfig,
+): HnOverlap {
+  assertCanonicalTimestamp('asOf', asOf);
+  if (config.source_ids.length === 0) return { seen: false, strength: 0, mentions: [] };
+
+  const nameTokens = slugTokens(ref.name);
+  const titleRuleApplies =
+    nameTokens.length > 0 &&
+    nameTokens.join('').length >= config.min_title_slug_length &&
+    !config.generic_names.some((g) => slugTokens(g).join('') === nameTokens.join(''));
+
+  // Necessary conditions, not sufficient ones -- every candidate is re-decided
+  // below. SQLite's LIKE is already case-insensitive over ASCII, which is the
+  // whole of a GitHub owner/name.
+  const likes = [`%/${ref.owner}/${ref.name}%`, `%${ref.owner}.github.io%`];
+  if (titleRuleApplies) likes.push(`%${nameTokens[0]}%`);
+
+  const sourcePlaceholders = config.source_ids.map(() => '?').join(', ');
+  const urlOrTitle = titleRuleApplies
+    ? 'canonical_url like ? or canonical_url like ? or title like ?'
+    : 'canonical_url like ? or canonical_url like ?';
+
+  // Inline type literal, not a named interface -- see CLAUDE.md, "The
+  // node:sqlite cast quirk", and src/cluster/store.ts:88-100.
+  const rows = db
+    .prepare(
+      `select item_id, item_key, title, canonical_url, source_id, published_at, fetched_at
+         from items
+        where source_id in (${sourcePlaceholders})
+          and fetched_at <= ?
+          and (${urlOrTitle})
+        order by fetched_at asc, item_key asc, rowid asc`,
+    )
+    .all(...config.source_ids, asOf, ...likes) as Array<{
+    item_id: string;
+    item_key: string;
+    title: string;
+    canonical_url: string;
+    source_id: string;
+    published_at: string | null;
+    fetched_at: string;
+  }>;
+
+  const wanted = repoRefKey(ref);
+  const mentions: HnMention[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const row of rows) {
+    // `items` is append-only and never dedupes, so one HN story can be present
+    // as many versions; the oldest is when it was first seen, which is what
+    // "already seen" means.
+    if (seenKeys.has(row.item_key)) continue;
+
+    const linked = parseGithubRepoRef(row.canonical_url);
+    let via: 'url' | 'title' | null = null;
+    if (linked !== null && repoRefKey(linked) === wanted) via = 'url';
+    else if (titleMentionsRepo(row.title, ref.name, config)) via = 'title';
+    if (via === null) continue;
+
+    seenKeys.add(row.item_key);
+    mentions.push({
+      itemKey: row.item_key,
+      itemId: row.item_id,
+      title: row.title,
+      canonicalUrl: row.canonical_url,
+      sourceId: row.source_id,
+      publishedAt: row.published_at,
+      fetchedAt: row.fetched_at,
+      via,
+    });
+  }
+
+  const strength = mentions.reduce(
+    (best, m) => Math.max(best, m.via === 'url' ? config.url_strength : config.title_strength),
+    0,
+  );
+  return { seen: mentions.length > 0, strength, mentions };
+}
+
+/**
+ * The zone `repoId`'s snapshot days were bucketed in, taken from its NEWEST
+ * reading -- or `null` for a repo with no readings.
+ *
+ * ## Why this is read from the data rather than from WF_TZ
+ * `getSnapshotWindow` selects on day LABELS, so a caller that computes
+ * `throughDay` in the wrong zone shifts the whole window by a day and can drop
+ * a real endpoint (proved in tests/score/repoSignal.test.ts, where reading a
+ * Tokyo-bucketed history as UTC degrades a perfectly good rate to
+ * single_snapshot). The zone the rows were ACTUALLY bucketed under is stored
+ * on every row (Task 2), so reading it back is exact, needs no config, cannot
+ * drift from WF_TZ, and keeps this module's "no environment read" property.
+ *
+ * The NEWEST reading is the right one when WF_TZ changed mid-window: it is the
+ * convention currently in force, and `SnapshotWindow.mixedTimezone` already
+ * surfaces the seam to anyone who cares. Per src/score/velocity.ts's own
+ * decision 5, the seam cannot perturb the rate itself in any case.
+ */
+export function snapshotTimeZone(db: Db, repoId: number): string | null {
+  const row = db
+    .prepare(
+      `select tz from github_repo_star_snapshots
+        where repo_id = ?
+        order by snapshot_day desc
+        limit 1`,
+    )
+    .get(repoId) as { tz: string } | undefined;
+  return row ? row.tz : null;
+}
+
+/**
+ * Star velocity for the repo an `item_key` names, read in that repo's own
+ * bucketing zone -- {@link snapshotTimeZone}'s whole purpose.
+ *
+ * Returns src/score/velocity.ts's discriminated union untouched, so
+ * `starsPerDay` still exists only on the `ok` branch and "insufficient history"
+ * still cannot be unwrapped into a confident zero anywhere downstream.
+ *
+ * The `'UTC'` fallback applies only when there are no readings to take a zone
+ * from, in which case every branch of the union is already insufficient and the
+ * zone affects nothing but the cosmetic day labels on the refusal.
+ */
+export function resolveRepoVelocity(db: Db, itemKey: string, asOf: string): VelocityResult {
+  const repoId = resolveRepoId(db, itemKey);
+  const tz = repoId === null ? 'UTC' : (snapshotTimeZone(db, repoId) ?? 'UTC');
+  return computeStarVelocityForItem(db, itemKey, { now: asOf, tz });
+}
+
+// ---------------------------------------------------------------------------
+// The two components -- the ONE place each signal becomes a number
+// ---------------------------------------------------------------------------
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * How much of a measurement's own strength survives its span coverage.
+ *
+ * `coverage_floor` is 0.5 rather than 0 deliberately. src/score/velocity.ts
+ * refuses any window spanning under `DEFAULT_MIN_SPAN_DAYS` (3 of the 6 days a
+ * 7-day window can span), so a measurement that reaches this function has
+ * `spanCoverage >= 0.5` already -- multiplying by coverage alone would halve a
+ * just-qualifying sample, which is a second gate wearing the costume of an
+ * attenuation. A floor keeps it a nudge: at the minimum span a measurement
+ * keeps 75% of its weight, at full span 100%.
+ */
+function attenuateForCoverage(spanCoverage: number, config: VelocityScoringConfig): number {
+  return config.coverage_floor + (1 - config.coverage_floor) * clamp(spanCoverage, 0, 1);
+}
+
+/**
+ * §4's star velocity as a bounded, signed, decay-invariant score component.
+ *
+ * ## INSUFFICIENT HISTORY CONTRIBUTES EXACTLY 0, AND THAT IS A DECISION
+ * Not a default, and not a `?? 0` -- src/score/velocity.ts's discriminated
+ * union makes that impossible to write, which is why the choice has to be made
+ * here, once, in the open.
+ *
+ * The lane's FIRST SEVEN DAYS are entirely this case, so whatever number is
+ * chosen is a constant applied to every repo at once. It therefore changes
+ * nothing about the order WITHIN the lane and everything about where the lane
+ * sits relative to the other five beats. Zero is the only value that leaves
+ * repos ranked exactly as every other beat is -- on source trust, corroboration
+ * and interest match -- until there is evidence to add. A positive constant
+ * would float the whole lane above better-evidenced items for a week; a
+ * negative one would sink it, and both would then LURCH the moment the seventh
+ * day landed. Zero also makes the term purely additive evidence: a repo can
+ * only gain from velocity it actually demonstrates.
+ *
+ * The cost, stated: 0 is also what a genuinely FLAT repo scores, so the number
+ * alone cannot tell "no growth" from "we were not looking". That is precisely
+ * why `/api/feed` ships the whole `VelocityResult` beside the component rather
+ * than the component alone, and why §7's row must say "velocity unavailable --
+ * N days of history" rather than drawing a flat arrow.
+ *
+ * ## Shape
+ * `sign(v) * log2(1 + |v|) / log2(1 + saturation_stars_per_day)`, clamped to
+ * [-1, 1] and then attenuated by span coverage. Log-scaled and saturating for
+ * the same reason `normalizeClusterSize` is (src/score/mechanical.ts): the jump
+ * from 5 to 50 stars/day says far more than the jump from 500 to 545, and an
+ * unbounded term would let one viral week dominate every ranking afterwards.
+ * `saturation_stars_per_day` is calibrated so §4's own worked example -- 40 to
+ * 400 in a week, ~60/day over the six days a 7-day window spans -- scores full
+ * marks, rather than being picked round.
+ *
+ * ## NEGATIVE VELOCITY IS NOT CLAMPED TO 0 HERE EITHER
+ * src/score/velocity.ts deliberately leaves the sign intact and hands this
+ * choice down; the same three reasons still hold at this layer. §4 ranks BY
+ * velocity, so a repo shedding stars must sort below a flat one and clamping
+ * ties them. A bulk spam-star purge is the single strongest evidence that an
+ * earlier spike was manufactured -- exactly the repo this lane must not promote
+ * -- and clamping discards it. What IS bounded is the magnitude: the same
+ * saturation applies in both directions, so a catastrophic unstarring costs at
+ * most one `velocity.signal_weight`, never an unbounded amount.
+ *
+ * A repo whose signal_score goes negative sorts last, which is the intended
+ * meaning. Renderers must handle a negative score rather than assuming a
+ * non-negative range.
+ *
+ * ## Staleness is reported, not attenuated
+ * `staleDays` is left out of the arithmetic on purpose. Snapshots are written
+ * for the whole lane by one poller in one pass, so a gap at the end of the
+ * window is a property of the POLLER, not of any repo -- attenuating on it
+ * would rescale every repo by the same factor and change no ordering, at the
+ * cost of a knob. It is surfaced on `/api/feed` so §7's row can say "as of
+ * Tuesday". (The exception, noted rather than handled: a repo that drops out of
+ * search results goes stale on its own.)
+ */
+export function velocityComponentFor(result: VelocityResult, config: VelocityScoringConfig): number {
+  if (result.status !== 'ok') return 0;
+
+  const rate = result.starsPerDay;
+  const magnitude = clamp(
+    Math.log2(1 + Math.abs(rate)) / Math.log2(1 + config.saturation_stars_per_day),
+    0,
+    1,
+  );
+  return Math.sign(rate) * magnitude * attenuateForCoverage(result.spanCoverage, config);
+}
+
+/**
+ * "Already seen on HN" as a de-rank magnitude in [0, 1].
+ *
+ * Bounded by the strongest configured strength rather than by 1 so that
+ * lowering both strengths in config genuinely lowers the ceiling, instead of
+ * leaving a stale 1 reachable through a hand-built HnOverlap.
+ */
+export function hnComponentFor(overlap: HnOverlap, config: HnScoringConfig): number {
+  if (!overlap.seen) return 0;
+  return clamp(overlap.strength, 0, Math.max(config.url_strength, config.title_strength));
+}
+
+// ---------------------------------------------------------------------------
+// Both halves, one read
+// ---------------------------------------------------------------------------
+
+export interface RepoSignal {
+  ref: GithubRepoRef;
+  /** `${owner}/${name}` as GitHub served it. */
+  fullName: string;
+  /** GitHub's numeric id, or `null` for a repo with no snapshot history yet. */
+  repoId: number | null;
+  velocity: VelocityResult;
+  /** {@link velocityComponentFor}'s output for `velocity`. */
+  velocityComponent: number;
+  hn: HnOverlap;
+  /** {@link hnComponentFor}'s output for `hn`. */
+  hnComponent: number;
+}
+
+/**
+ * Everything the repos lane knows about one item, or `null` if the item's own
+ * URL names no GitHub repository at all.
+ *
+ * The identity comes from the item's canonical URL rather than from
+ * `github_repo_names`, so a repo that has never been snapshotted still resolves
+ * -- which is every repo for the lane's first day. Velocity then reports
+ * `unknown_repo`, honestly, instead of the item silently ceasing to be a repo.
+ */
+export function resolveRepoSignal(
+  db: Db,
+  itemKey: string,
+  canonicalUrl: string,
+  asOf: string,
+  config: RepoScoringConfig,
+): RepoSignal | null {
+  const ref = parseGithubRepoRef(canonicalUrl);
+  if (ref === null) return null;
+
+  const velocity = resolveRepoVelocity(db, itemKey, asOf);
+  const hn = findHnOverlap(db, ref, asOf, config.hn);
+
+  return {
+    ref,
+    fullName: `${ref.owner}/${ref.name}`,
+    repoId: velocity.repoId,
+    velocity,
+    velocityComponent: velocityComponentFor(velocity, config.velocity),
+    hn,
+    hnComponent: hnComponentFor(hn, config.hn),
+  };
 }

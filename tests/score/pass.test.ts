@@ -498,7 +498,11 @@ describe('runScoringPassFromConfigFiles -- real config wiring', () => {
     );
 
     expect(viaFile).toEqual(viaManual);
-    expect(viaFile.scorerVersion).toBe('mechanical-v1');
+    // mechanical-v1 -> mechanical-v2 on 2026-08-14 (M4a task 7): the formula
+    // gained the repos lane's velocity and HN-overlap terms, so config/
+    // scoring.yaml's scorer_version was bumped per its own documented
+    // convention. No non-repo item's score changed; only the version string did.
+    expect(viaFile.scorerVersion).toBe('mechanical-v2');
     expect(viaFile.itemsScored).toBe(1);
   });
 });

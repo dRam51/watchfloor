@@ -140,6 +140,73 @@
 #                     absence plumbing has something real to point at, not
 #                     because anything downstream reads the path's contents.
 #
+#   repos             M4a task 7 / §4 -- the repos lane's own two components,
+#                     and the ONLY optional block in this file. Delete it and
+#                     the scorer reverts, exactly, to the pre-M4a formula for
+#                     every item including repos; that is the intended
+#                     one-edit rollback. Both terms are ADDITIVE (not
+#                     multipliers) and both are decay-invariant.
+#
+#                     velocity.saturation_stars_per_day is the stars/day at
+#                     which the component saturates at 1.0. 60 is not a round
+#                     number picked for tidiness: §4's own worked example is "a
+#                     repo going 40->400 in a week", which is 360 stars over
+#                     the six days a seven-day window can span -- exactly
+#                     60/day. So §4's example scores full marks by
+#                     construction, and a 30k-star repo drifting +2/day scores
+#                     ~0.267. Log2-scaled and saturating for the same reason
+#                     cluster is: 5->50 stars/day says far more than 500->545,
+#                     and an unbounded term would let one viral week dominate
+#                     every ranking after it.
+#
+#                     velocity.coverage_floor is how much of the component a
+#                     MINIMALLY-covered measurement keeps. src/score/velocity.ts
+#                     already refuses any window spanning under 3 of the 6 days
+#                     a 7-day window can span, so every measurement reaching the
+#                     scorer has spanCoverage >= 0.5 -- multiplying by coverage
+#                     alone would halve a just-qualifying sample, which is a
+#                     second gate wearing an attenuation's costume. 0.5 keeps it
+#                     a nudge: 75% of full weight at the minimum span, 100% at
+#                     full span. Set to 1.0 to disable coverage attenuation.
+#
+#                     velocity.signal_weight/read_weight MIRROR cluster's,
+#                     deliberately and not by coincidence: a repo's star rate
+#                     is the repos lane's direct evidence of §5.1's
+#                     "materiality" -- the role corroboration plays for a news
+#                     story -- while saying little about whether reading it
+#                     repays the time, which is the same asymmetry cluster
+#                     already encodes. NOTE: velocity is SIGNED and is not
+#                     clamped at 0 (src/score/velocity.ts's decision 3, upheld
+#                     in src/score/repoSignal.ts), so a repo shedding stars can
+#                     take signal_score NEGATIVE. That is the intended meaning
+#                     -- it sorts last -- and renderers must not assume a
+#                     non-negative range.
+#
+#                     hn.* is the M4a acceptance question itself: "does the
+#                     repos lane surface things I haven't already seen on HN?"
+#                     A repo already covered on HN is DE-RANKED, never
+#                     suppressed -- §4's suppression list is exactly four rules
+#                     (fork, archived, no README, dismissed) and this is not one
+#                     of them. source_ids is a LIST so adding a second
+#                     aggregator is an edit here, and so that a source added by
+#                     another task cannot silently start moving scores.
+#                     url_strength/title_strength are the two match confidences:
+#                     a link that names the repo is certain, a headline that
+#                     names it is not, and Zod refuses a config where the
+#                     weaker rule outweighs the stronger one. min_title_slug_
+#                     length and generic_names are the two guards that stop the
+#                     title rule firing on every headline containing "models" or
+#                     "dmca" -- both config, so tuning them touches no code.
+#                     signal_weight == read_weight deliberately: there is no
+#                     grounded basis to claim "I already saw this" bears more on
+#                     materiality than on read-value, and inventing an asymmetry
+#                     would repeat the item_type mistake corrected above.
+#
+#                     src/score/repoSignal.ts's DEFAULT_REPO_SCORING_CONFIG is a
+#                     byte-for-byte copy of this block, used by the API when its
+#                     deps carry no loaded scoring config; a test asserts the two
+#                     are deep-equal, so they cannot drift.
+#
 # ---------------------------------------------------------------------------
 # How the pieces combine (src/score/mechanical.ts's computeMechanicalScore)
 # ---------------------------------------------------------------------------
@@ -151,10 +218,28 @@
 #                                 - interest.suppress_gain * sum(suppress weights),
 #                               interest.multiplier_floor, interest.multiplier_ceiling)
 #
+#   velocityComponent  = sign(v) * clamp(log2(1 + |v|)
+#                             / log2(1 + repos.velocity.saturation_stars_per_day), 0, 1)
+#                          * (repos.velocity.coverage_floor
+#                             + (1 - repos.velocity.coverage_floor) * spanCoverage)
+#                        -- and exactly 0 for insufficient history, which is a
+#                           DECISION (src/score/repoSignal.ts), never a default
+#   hnComponent        = 0, repos.hn.title_strength, or repos.hn.url_strength
+#
 #   signal_score = (cluster.signal_weight * clusterComponent
-#                    + source.signal_weight * sourceComponent) * interestMultiplier
+#                    + source.signal_weight * sourceComponent
+#                    + repos.velocity.signal_weight * velocityComponent      <- repos only
+#                    - repos.hn.signal_weight * hnComponent)                 <- repos only
+#                  * interestMultiplier
 #   read_score   = (cluster.read_weight * clusterComponent
-#                    + source.read_weight * sourceComponent) * interestMultiplier
+#                    + source.read_weight * sourceComponent
+#                    + repos.velocity.read_weight * velocityComponent        <- repos only
+#                    - repos.hn.read_weight * hnComponent)                   <- repos only
+#                  * interestMultiplier
+#
+# The two repos terms are present ONLY when the item came from a github_search
+# source AND this file carries a repos: block; otherwise both are absent and the
+# arithmetic is byte-identical to mechanical-v1's.
 #
 # Worked example against these exact numbers, a single-source (clusterSize=1)
 # AP item (weight 1.8) with no interest match: sourceComponent = 0.8947,
@@ -164,7 +249,11 @@
 # a real boosted arXiv title, the high-on-both case) computed by hand against
 # this file and asserted with toBeCloseTo, so a coefficient change here that
 # silently changes ranking shows up as a reviewable, explained test failure.
-scorer_version: mechanical-v1
+# Bumped from mechanical-v1 on 2026-08-14 (M4a task 7): the formula gained two
+# inputs it did not have, so a repo scored under the old ruleset and the new one
+# gets different numbers -- which is exactly what this string exists to tell
+# apart. No non-repo item's score changes by so much as a float ulp.
+scorer_version: mechanical-v2
 
 source:
   min_weight: 0.1
@@ -189,3 +278,77 @@ high_on_both:
 
 portfolio:
   portfolio_path: config/portfolio.yaml
+
+# ---------------------------------------------------------------------------
+# The repos lane (M4a task 7 / §4). OPTIONAL -- see the header. Deleting this
+# whole block reverts the scorer to mechanical-v1's arithmetic exactly.
+# Kept byte-identical to src/score/repoSignal.ts's DEFAULT_REPO_SCORING_CONFIG,
+# which a test asserts.
+# ---------------------------------------------------------------------------
+repos:
+  velocity:
+    # §4's "40 -> 400 in a week" is 360 stars over the six days a seven-day
+    # window can span. Calibrated so that example scores exactly 1.0.
+    saturation_stars_per_day: 60.0
+    coverage_floor: 0.5
+    signal_weight: 3.5
+    read_weight: 1.5
+
+  hn:
+    source_ids:
+      - hn-algolia
+    url_strength: 1.0
+    title_strength: 0.5
+    # `github/dmca` is a real repo and "DMCA" is a word that appears in
+    # headlines about anything; four characters is not evidence. Its one real
+    # row is caught by the URL rule regardless.
+    min_title_slug_length: 6
+    # Names that clear the length floor and still are not evidence. Config, not
+    # code, so tuning this never touches a source file.
+    generic_names:
+      - agents
+      - articles
+      - awesome
+      - benchmark
+      - benchmarks
+      - client
+      - cookbook
+      - course
+      - courses
+      - dataset
+      - datasets
+      - demos
+      - documentation
+      - dotfiles
+      - examples
+      - framework
+      - handbook
+      - homepage
+      - javascript
+      - library
+      - models
+      - notebook
+      - notebooks
+      - papers
+      - playground
+      - plugins
+      - project
+      - projects
+      - prompts
+      - python
+      - research
+      - resources
+      - roadmap
+      - sandbox
+      - scripts
+      - server
+      - starter
+      - template
+      - templates
+      - toolkit
+      - tutorial
+      - tutorials
+      - typescript
+      - website
+    signal_weight: 2.0
+    read_weight: 2.0

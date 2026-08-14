@@ -8,6 +8,7 @@ import { insertItem, getCurrentItem, type NewItem } from '../../src/domain/item.
 import { writeClusters } from '../../src/cluster/store.ts';
 import { loadInterestsFile, matchProfile, type InterestProfile, type ProfileMatches } from '../../src/interests/load.ts';
 import { loadSourcesFile, type Source } from '../../src/sources/load.ts';
+import { recordStarSnapshot } from '../../src/db/repoSnapshots.ts';
 import {
   MechanicalScoreConfigError,
   UnknownItemKeyError,
@@ -195,7 +196,7 @@ describe('the real config/scoring.yaml', () => {
 
   it('loads without error and matches the documented shape', () => {
     const config = loadMechanicalScoreConfig(REAL_CONFIG_PATH);
-    expect(config.scorer_version).toBe('mechanical-v1');
+    expect(config.scorer_version).toBe('mechanical-v2');
     expect(config.source).toEqual({ min_weight: 0.1, max_weight: 2.0, signal_weight: 3.5, read_weight: 3.5 });
     expect(config.cluster).toEqual({ saturation_size: 8, signal_weight: 3.5, read_weight: 1.5 });
   });
@@ -838,5 +839,261 @@ describe('getLatestItemScore', () => {
     const deps = { sources: testSources(), interestProfile: { boosts: [], suppressions: [] }, config: testConfig({ scorer_version: 'a-only' }) };
     scoreItem(db, a.item_key, NOW, deps);
     expect(getLatestItemScore(db, b.item_key, 'usnews')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M4a task 7 -- the repos lane's two new components
+//
+// Both are DECAY-INVARIANT stored components, exactly like sourceComponent and
+// clusterComponent: computeMechanicalScore still takes no timestamp of any
+// kind, and the repo inputs reach it as already-resolved numbers rather than as
+// a VelocityResult (which carries instants). src/score/repoSignal.ts owns the
+// reads and the "insufficient history is exactly 0" decision.
+// ---------------------------------------------------------------------------
+describe('the repos component (M4a task 7)', () => {
+  const REAL_CONFIG_PATH = join(process.cwd(), 'config', 'scoring.yaml');
+
+  function repoConfig(): MechanicalScoreConfig {
+    return testConfig({
+      repos: {
+        velocity: { saturation_stars_per_day: 60, coverage_floor: 0.5, signal_weight: 4, read_weight: 2 },
+        hn: {
+          source_ids: ['hn-algolia'],
+          url_strength: 1,
+          title_strength: 0.5,
+          min_title_slug_length: 6,
+          generic_names: [],
+          signal_weight: 3,
+          read_weight: 3,
+        },
+      },
+    });
+  }
+
+  it('the real config/scoring.yaml ships a repos block and a bumped scorer_version', () => {
+    const config = loadMechanicalScoreConfig(REAL_CONFIG_PATH);
+    // Bumped because the formula now takes two inputs it did not before: a repo
+    // scored under the old ruleset and the new one gets different numbers, which
+    // is exactly what this string exists to tell apart.
+    expect(config.scorer_version).toBe('mechanical-v2');
+    expect(config.repos?.velocity.signal_weight).toBe(3.5);
+    expect(config.repos?.hn.source_ids).toEqual(['hn-algolia']);
+  });
+
+  it('the repos block is OPTIONAL, so a config without one still parses (and scores exactly as it did)', () => {
+    const config = parseMechanicalScoreConfig(testConfigYaml());
+    expect(config.repos).toBeUndefined();
+    const withRepo = computeMechanicalScore(
+      { sourceWeight: 5, clusterSize: 1, interestMatches: emptyProfileMatches(), repo: { velocityComponent: 1, hnComponent: 1 } },
+      config,
+    );
+    const without = computeMechanicalScore({ sourceWeight: 5, clusterSize: 1, interestMatches: emptyProfileMatches() }, config);
+    expect(withRepo).toEqual(without);
+  });
+
+  it('NON-REPO ITEMS ARE UNTOUCHED: omitting `repo` scores identically to the pre-M4a formula', () => {
+    const config = repoConfig();
+    const base = { sourceWeight: 5, clusterSize: 2, interestMatches: emptyProfileMatches() };
+    // 4*0.5 (source) + 4*0.5 (cluster) = 4 for signal; 2*0.5 + 1*0.5 = 1.5 for read.
+    const result = computeMechanicalScore(base, config);
+    expect(result.signalScore).toBeCloseTo(4, 10);
+    expect(result.readScore).toBeCloseTo(1.5, 10);
+  });
+
+  it('velocity raises both scores, signal more than read', () => {
+    const config = repoConfig();
+    const base = { sourceWeight: 5, clusterSize: 2, interestMatches: emptyProfileMatches() };
+    const flat = computeMechanicalScore({ ...base, repo: { velocityComponent: 0, hnComponent: 0 } }, config);
+    const rising = computeMechanicalScore({ ...base, repo: { velocityComponent: 1, hnComponent: 0 } }, config);
+
+    expect(rising.signalScore - flat.signalScore).toBeCloseTo(4, 10); // velocity.signal_weight
+    expect(rising.readScore - flat.readScore).toBeCloseTo(2, 10); // velocity.read_weight
+    expect(rising.signalScore - flat.signalScore).toBeGreaterThan(rising.readScore - flat.readScore);
+  });
+
+  it('A NEGATIVE VELOCITY LOWERS THE SCORE -- a repo shedding stars sorts below a flat one, as §4 demands', () => {
+    const config = repoConfig();
+    const base = { sourceWeight: 5, clusterSize: 2, interestMatches: emptyProfileMatches() };
+    const declining = computeMechanicalScore({ ...base, repo: { velocityComponent: -1, hnComponent: 0 } }, config);
+    const flat = computeMechanicalScore({ ...base, repo: { velocityComponent: 0, hnComponent: 0 } }, config);
+    expect(declining.signalScore).toBeLessThan(flat.signalScore);
+  });
+
+  it('HN OVERLAP DE-RANKS, IT DOES NOT ZERO: a repo seen on HN scores lower than the same repo unseen', () => {
+    const config = repoConfig();
+    const base = { sourceWeight: 5, clusterSize: 2, interestMatches: emptyProfileMatches(), repo: { velocityComponent: 1, hnComponent: 0 } };
+    const unseen = computeMechanicalScore(base, config);
+    const seen = computeMechanicalScore({ ...base, repo: { velocityComponent: 1, hnComponent: 1 } }, config);
+
+    expect(unseen.signalScore - seen.signalScore).toBeCloseTo(3, 10); // hn.signal_weight
+    expect(seen.signalScore).toBeGreaterThan(0); // de-ranked, not annihilated
+  });
+
+  it('a weaker (title-only) HN match de-ranks less than a URL match', () => {
+    const config = repoConfig();
+    const base = { sourceWeight: 5, clusterSize: 2, interestMatches: emptyProfileMatches(), repo: { velocityComponent: 1, hnComponent: 0.5 } };
+    const byTitle = computeMechanicalScore(base, config);
+    const byUrl = computeMechanicalScore({ ...base, repo: { velocityComponent: 1, hnComponent: 1 } }, config);
+    expect(byTitle.signalScore).toBeGreaterThan(byUrl.signalScore);
+  });
+
+  it('§4 SATISFIED AGAINST THE REAL SHIPPED WEIGHTS: the 40->400 repo outranks the static 30k-star one even when HN has already covered it', () => {
+    // This is a CALIBRATION CONSTRAINT on config/scoring.yaml, not a property
+    // of the formula: it holds only while repos.hn.signal_weight stays well
+    // below repos.velocity.signal_weight. Asserted against the real file (not
+    // the hand-built test config, whose deliberately-round hn weight of 3-of-4
+    // violates it) so that retuning the shipped numbers into a state where "on
+    // HN" beats "actually rising" fails here rather than in the lane.
+    const config = loadMechanicalScoreConfig(REAL_CONFIG_PATH);
+    const source = { sourceWeight: 1.0, clusterSize: 1, interestMatches: emptyProfileMatches() };
+    // Components as src/score/repoSignal.ts computes them: 60/day saturates at
+    // 1.0; a 30k-star repo drifting +2/day normalizes to ~0.267.
+    const risingOnHn = computeMechanicalScore({ ...source, repo: { velocityComponent: 1, hnComponent: 1 } }, config);
+    const staticUnseen = computeMechanicalScore({ ...source, repo: { velocityComponent: 0.267, hnComponent: 0 } }, config);
+    expect(risingOnHn.signalScore).toBeGreaterThan(staticUnseen.signalScore);
+  });
+
+  it('AND THE CONVERSE, so the de-rank is not merely decorative: two equally-rising repos separate by exactly repos.hn.signal_weight', () => {
+    const config = loadMechanicalScoreConfig(REAL_CONFIG_PATH);
+    const source = { sourceWeight: 1.0, clusterSize: 1, interestMatches: emptyProfileMatches() };
+    const onHn = computeMechanicalScore({ ...source, repo: { velocityComponent: 1, hnComponent: 1 } }, config);
+    const notOnHn = computeMechanicalScore({ ...source, repo: { velocityComponent: 1, hnComponent: 0 } }, config);
+    expect(notOnHn.signalScore - onHn.signalScore).toBeCloseTo(config.repos!.hn.signal_weight, 10);
+  });
+
+  it('computeMechanicalScore STILL takes no timestamp: the repo inputs are plain numbers, not a VelocityResult', () => {
+    const config = repoConfig();
+    const components = { sourceWeight: 1.5, clusterSize: 3, interestMatches: emptyProfileMatches(), repo: { velocityComponent: 0.4, hnComponent: 0.5 } };
+    expect(computeMechanicalScore(components, config)).toEqual(computeMechanicalScore(components, config));
+  });
+});
+
+describe('scoreItem, for a repos-lane item', () => {
+  const GITHUB_SOURCE: Source = {
+    id: 'github-mcp',
+    name: 'GitHub topic: mcp',
+    type: 'github_search',
+    url: 'https://api.github.com/search/repositories',
+    beats: ['repos'],
+    weight: 1.0,
+    poll_interval: '6h',
+    enabled: true,
+    enrichment: true,
+  };
+
+  function reposConfig(): MechanicalScoreConfig {
+    return testConfig({
+      repos: {
+        velocity: { saturation_stars_per_day: 60, coverage_floor: 0.5, signal_weight: 4, read_weight: 2 },
+        hn: {
+          source_ids: ['hn-algolia'],
+          url_strength: 1,
+          title_strength: 0.5,
+          min_title_slug_length: 6,
+          generic_names: [],
+          signal_weight: 3,
+          read_weight: 3,
+        },
+      },
+    });
+  }
+
+  function deps(config = reposConfig()) {
+    return { sources: [...testSources(), GITHUB_SOURCE], interestProfile: { boosts: [], suppressions: [] } as InterestProfile, config };
+  }
+
+  function repoItem(owner: string, name: string): NewItem {
+    return baseItem({
+      url: `https://github.com/${owner}/${name}`,
+      canonicalUrl: `https://github.com/${owner}/${name}`,
+      title: `${name}: a thing`,
+      sourceId: 'github-mcp',
+      beats: ['repos'],
+    });
+  }
+
+  function withHistory(db: ReturnType<typeof migratedDb>, repoId: number, itemKey: string, fullName: string) {
+    // 40 -> 400 across six days: §4's own example, ~60 stars/day.
+    recordStarSnapshot(db, { repoId, itemKey, fullName, stars: 40, observedAt: '2026-08-08T12:00:00.000Z', tz: 'UTC' });
+    recordStarSnapshot(db, { repoId, itemKey, fullName, stars: 400, observedAt: '2026-08-14T12:00:00.000Z', tz: 'UTC' });
+  }
+
+  it('A REPO WITH NO SNAPSHOT HISTORY SCORES AS IF VELOCITY WERE ABSENT -- the lane\'s first seven days, and not a zero pretending to be flat', () => {
+    const db = migratedDb();
+    const item = insertItem(db, repoItem('someone', 'brand-new-thing'));
+    const rows = scoreItem(db, item.item_key, '2026-08-14T18:00:00.000Z', deps());
+
+    // 4*(1.0/10) source + 4*0 cluster = 0.4, with no repo contribution at all.
+    expect(rows[0]!.signalScore).toBeCloseTo(0.4, 10);
+  });
+
+  it('A REPO WITH REAL HISTORY OUTSCORES AN IDENTICAL ONE WITHOUT: velocity is in the stored component', () => {
+    const db = migratedDb();
+    const rising = insertItem(db, repoItem('someone', 'rising-thing'));
+    const unknown = insertItem(db, repoItem('someone', 'unknown-thing'));
+    withHistory(db, 991, rising.item_key, 'someone/rising-thing');
+
+    const now = '2026-08-14T18:00:00.000Z';
+    const risingScore = scoreItem(db, rising.item_key, now, deps())[0]!;
+    const unknownScore = scoreItem(db, unknown.item_key, now, deps())[0]!;
+
+    expect(risingScore.signalScore).toBeGreaterThan(unknownScore.signalScore);
+    expect(risingScore.signalScore - unknownScore.signalScore).toBeCloseTo(4, 6); // full velocity weight
+  });
+
+  it('THE MILESTONE\'S OWN TEST, ON THE ROW THAT MOTIVATED IT: github/dmca scores LOWER because of a real HN DEEP LINK, which no item_key comparison would have matched', () => {
+    const now = '2026-08-14T18:00:00.000Z';
+
+    function score(withHnRow: boolean) {
+      const db = migratedDb();
+      const repo = insertItem(db, repoItem('github', 'dmca'));
+      withHistory(db, 991, repo.item_key, 'github/dmca');
+      if (withHnRow) {
+        // Transcribed verbatim from attic/wf-m1-firstrun-2026-08-14.db: the
+        // archived corpus's ONLY github.com row. It is a link INTO the repo, so
+        // its item_key is a different sha256 than the repo root's -- which is
+        // exactly why the naive match would have fired on nothing.
+        const hn = insertItem(
+          db,
+          baseItem({
+            url: 'https://github.com/github/dmca/blob/master/2020/10/2020-10-23-RIAA.md',
+            canonicalUrl: 'https://github.com/github/dmca/blob/master/2020/10/2020-10-23-RIAA.md',
+            title: 'YouTube-dl has received a DMCA takedown from RIAA',
+            sourceId: 'hn-algolia',
+            beats: ['ai'],
+          }),
+        );
+        expect(hn.item_key).not.toBe(repo.item_key);
+      }
+      return scoreItem(db, repo.item_key, now, deps())[0]!.signalScore;
+    }
+
+    const seen = score(true);
+    const unseen = score(false);
+    expect(seen).toBeLessThan(unseen);
+    expect(unseen - seen).toBeCloseTo(3, 6); // hn.signal_weight, at url_strength 1
+  });
+
+  it('A NON-GITHUB ITEM IS COMPLETELY UNAFFECTED, even when an HN row would match its title', () => {
+    const db = migratedDb();
+    const item = insertItem(db, baseItem({ title: 'rustdesk something' }));
+    insertItem(db, baseItem({ url: 'https://x.test/1', canonicalUrl: 'https://x.test/1', title: 'RustDesk now supports Wayland', sourceId: 'hn-algolia' }));
+
+    const withRepos = scoreItem(db, item.item_key, '2026-08-14T18:00:00.000Z', deps())[0]!;
+    const db2 = migratedDb();
+    const item2 = insertItem(db2, baseItem({ title: 'rustdesk something' }));
+    const withoutRepos = scoreItem(db2, item2.item_key, '2026-08-14T18:00:00.000Z', deps(testConfig()))[0]!;
+
+    expect(withRepos.signalScore).toBe(withoutRepos.signalScore);
+  });
+
+  it('an absent repos config leaves a repo item scoring exactly as it did before M4a', () => {
+    const db = migratedDb();
+    const repo = insertItem(db, repoItem('someone', 'rising-thing'));
+    withHistory(db, 991, repo.item_key, 'someone/rising-thing');
+
+    const rows = scoreItem(db, repo.item_key, '2026-08-14T18:00:00.000Z', deps(testConfig()));
+    expect(rows[0]!.signalScore).toBeCloseTo(0.4, 10);
   });
 });

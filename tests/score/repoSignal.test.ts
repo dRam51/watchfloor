@@ -5,10 +5,20 @@ import { join } from 'node:path';
 import { openDb, closeDb } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
 import { insertItem, type NewItem } from '../../src/domain/item.ts';
+import { recordStarSnapshot } from '../../src/db/repoSnapshots.ts';
+import { makeRepo, repoItemKey } from '../../src/domain/repo.ts';
+import { parseMechanicalScoreConfig } from '../../src/score/mechanical.ts';
+import { readFileSync } from 'node:fs';
 import {
   parseGithubRepoRef,
   repoRefKey,
   titleMentionsRepo,
+  findHnOverlap,
+  snapshotTimeZone,
+  resolveRepoVelocity,
+  velocityComponentFor,
+  hnComponentFor,
+  resolveRepoSignal,
   DEFAULT_REPO_SCORING_CONFIG,
 } from '../../src/score/repoSignal.ts';
 
@@ -258,5 +268,310 @@ describe('titleMentionsRepo', () => {
 describe('DEFAULT_REPO_SCORING_CONFIG', () => {
   it('names hn-algolia as the aggregator this signal reads', () => {
     expect(DEFAULT_REPO_SCORING_CONFIG.hn.source_ids).toContain('hn-algolia');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findHnOverlap -- the whole signal, run against the real rows
+//
+// Every HN row below goes into a real temp-file SQLite database through the
+// real insertItem, exactly as the hn-algolia adapter would have. Nothing is
+// mocked and nothing is stubbed; the only thing standing in for the live
+// corpus is that the rows were transcribed rather than read from a gitignored
+// archive at test time.
+// ---------------------------------------------------------------------------
+describe('findHnOverlap, against the real hn-algolia rows', () => {
+  const cfg = DEFAULT_REPO_SCORING_CONFIG.hn;
+  const ALL_REAL_HN_ROWS = [HN_DMCA, HN_MCP_STAMA, HN_EVERY_WEBSITE, HN_OPUS5, HN_RUSTDESK, HN_UNSLOTH, ...HN_GITHUB_DECOYS];
+
+  function corpus() {
+    const db = migratedDb();
+    for (const row of ALL_REAL_HN_ROWS) insertItem(db, hnItem(row));
+    return db;
+  }
+
+  it('FIRES ON THE DEEP LINK: github/dmca is matched by a URL that is NOT the repo root', () => {
+    const db = corpus();
+    const overlap = findHnOverlap(db, { owner: 'github', name: 'dmca' }, NOW, cfg);
+
+    expect(overlap.seen).toBe(true);
+    expect(overlap.strength).toBe(cfg.url_strength);
+    expect(overlap.mentions).toHaveLength(1);
+    expect(overlap.mentions[0]!.via).toBe('url');
+    expect(overlap.mentions[0]!.title).toBe(HN_DMCA.title);
+    expect(overlap.mentions[0]!.canonicalUrl).toBe(HN_DMCA.canonicalUrl);
+  });
+
+  it('fires on a repo root', () => {
+    const overlap = findHnOverlap(corpus(), { owner: 'StamManif', name: 'mcp-stama' }, NOW, cfg);
+    expect(overlap.seen).toBe(true);
+    expect(overlap.mentions[0]!.via).toBe('url');
+  });
+
+  it('fires on a GitHub Pages project site', () => {
+    const overlap = findHnOverlap(corpus(), { owner: 'lxe', name: 'everywebsite' }, NOW, cfg);
+    expect(overlap.seen).toBe(true);
+    expect(overlap.mentions[0]!.via).toBe('url');
+  });
+
+  it('FIRES WITH NO GITHUB URL ANYWHERE: rustdesk/rustdesk, from a title over a rustdesk.com link', () => {
+    const overlap = findHnOverlap(corpus(), { owner: 'rustdesk', name: 'rustdesk' }, NOW, cfg);
+    expect(overlap.seen).toBe(true);
+    expect(overlap.strength).toBe(cfg.title_strength);
+    expect(overlap.mentions[0]!.via).toBe('title');
+    expect(overlap.mentions[0]!.canonicalUrl).toBe(HN_RUSTDESK.canonicalUrl);
+  });
+
+  it('fires for unslothai/unsloth from a Hugging Face mirror link', () => {
+    const overlap = findHnOverlap(corpus(), { owner: 'unslothai', name: 'unsloth' }, NOW, cfg);
+    expect(overlap.seen).toBe(true);
+    expect(overlap.mentions[0]!.via).toBe('title');
+  });
+
+  it('matching is case-insensitive on owner/name, as GitHub is', () => {
+    expect(findHnOverlap(corpus(), { owner: 'stammanif', name: 'MCP-STAMA' }, NOW, cfg).seen).toBe(true);
+  });
+
+  it('DOES NOT FIRE for a repo none of the nine real rows mentions', () => {
+    const overlap = findHnOverlap(corpus(), { owner: 'openai', name: 'whisper' }, NOW, cfg);
+    expect(overlap.seen).toBe(false);
+    expect(overlap.strength).toBe(0);
+    expect(overlap.mentions).toEqual([]);
+  });
+
+  it('DOES NOT FIRE off the three real rows that say "GitHub" and name no repo', () => {
+    const db = corpus();
+    for (const name of ['models', 'leak', 'jobs', 'ci']) {
+      expect(findHnOverlap(db, { owner: 'someone', name }, NOW, cfg).seen, name).toBe(false);
+    }
+  });
+
+  it('a URL match outranks a title match when both exist -- strength is the strongest evidence, not a sum', () => {
+    const db = corpus();
+    // mcp-stama is linked directly AND named in the title of the same story.
+    const overlap = findHnOverlap(db, { owner: 'StamManif', name: 'mcp-stama' }, NOW, cfg);
+    expect(overlap.strength).toBe(cfg.url_strength);
+    // Two mentions of the same repo never push strength above one url_strength.
+    expect(overlap.strength).toBeLessThanOrEqual(1);
+  });
+
+  it('IS BOUNDED BY asOf, exactly like getClusterSizeAsOf -- a story fetched later is not yet evidence', () => {
+    const db = migratedDb();
+    insertItem(db, hnItem(HN_MCP_STAMA, { fetchedAt: '2026-08-14T12:00:00.000Z' }));
+
+    expect(findHnOverlap(db, { owner: 'StamManif', name: 'mcp-stama' }, '2026-08-14T00:00:00.000Z', cfg).seen).toBe(false);
+    expect(findHnOverlap(db, { owner: 'StamManif', name: 'mcp-stama' }, '2026-08-14T23:00:00.000Z', cfg).seen).toBe(true);
+  });
+
+  it('ONLY the configured source_ids count: the identical URL from a non-aggregator source is not "seen on HN"', () => {
+    const db = migratedDb();
+    insertItem(db, hnItem(HN_MCP_STAMA, { sourceId: 'simonwillison' }));
+    expect(findHnOverlap(db, { owner: 'StamManif', name: 'mcp-stama' }, NOW, cfg).seen).toBe(false);
+  });
+
+  it('THE REPO ITEM DOES NOT MATCH ITSELF: an ingested repo row shares its URL with an HN story and is still not a mention', () => {
+    // A repo ingested by the github_search adapter has canonical_url
+    // https://github.com/StamManif/mcp-stama -- byte-identical to the HN
+    // story's, so under append-only storage they share one item_key and sit in
+    // `items` as two versions. Gating on source_id (never on item_key) is what
+    // keeps the repo's own row out of its own evidence.
+    const db = migratedDb();
+    insertItem(db, hnItem(HN_MCP_STAMA, { sourceId: 'github-mcp', beats: ['repos'] }));
+    expect(findHnOverlap(db, { owner: 'StamManif', name: 'mcp-stama' }, NOW, cfg).seen).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Velocity, read through the zone the snapshots were actually bucketed in
+// ---------------------------------------------------------------------------
+describe('snapshotTimeZone', () => {
+  it('is the zone the NEWEST reading was bucketed under, so no caller has to be told WF_TZ', () => {
+    const db = migratedDb();
+    const key = 'k'.repeat(64);
+    recordStarSnapshot(db, { repoId: 7, itemKey: key, fullName: 'a/b', stars: 1, observedAt: '2026-08-01T12:00:00.000Z', tz: 'America/New_York' });
+    recordStarSnapshot(db, { repoId: 7, itemKey: key, fullName: 'a/b', stars: 9, observedAt: '2026-08-09T12:00:00.000Z', tz: 'Asia/Tokyo' });
+    expect(snapshotTimeZone(db, 7)).toBe('Asia/Tokyo');
+  });
+
+  it('is null for a repo with no readings at all', () => {
+    expect(snapshotTimeZone(migratedDb(), 7)).toBeNull();
+  });
+});
+
+describe('resolveRepoVelocity', () => {
+  function repoWithHistory(db: ReturnType<typeof migratedDb>, tz: string) {
+    const repo = makeRepo({
+      githubId: 4242,
+      owner: 'someone',
+      name: 'rising-thing',
+      description: null,
+      language: null,
+      licenseSpdxId: null,
+      stars: 400,
+      openIssuesAndPullRequests: 0,
+      lastCommitAt: null,
+      isFork: false,
+      isArchived: false,
+      readmeFirstParagraph: 'x',
+    });
+    const key = repoItemKey(repo);
+    // §4's own example: 40 -> 400 across the six days a seven-day window spans.
+    //
+    // The two instants are chosen so the ZONE is load-bearing: 16:00 UTC is the
+    // next calendar day in Tokyo, so these bucket as 2026-08-09 and 2026-08-15
+    // there and as 2026-08-08 / 2026-08-14 in UTC. Read with the wrong zone the
+    // window misses one end and the result degrades to single_snapshot.
+    recordStarSnapshot(db, { repoId: 4242, itemKey: key, fullName: repo.fullName, stars: 40, observedAt: '2026-08-08T16:00:00.000Z', tz });
+    recordStarSnapshot(db, { repoId: 4242, itemKey: key, fullName: repo.fullName, stars: 400, observedAt: '2026-08-14T16:00:00.000Z', tz });
+    return key;
+  }
+
+  it('reads the window in the zone the rows were bucketed in, with no tz argument and no environment read', () => {
+    const db = migratedDb();
+    const key = repoWithHistory(db, 'Asia/Tokyo');
+    const result = resolveRepoVelocity(db, key, '2026-08-14T16:30:00.000Z');
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unreachable');
+    expect(result.starsPerDay).toBeCloseTo(60, 10);
+    expect(result.starsGained).toBe(360);
+  });
+
+  it('an item that is not a repo comes back as insufficient_history/unknown_repo, never as a zero', () => {
+    const result = resolveRepoVelocity(migratedDb(), 'f'.repeat(64), NOW);
+    expect(result.status).toBe('insufficient_history');
+    if (result.status !== 'insufficient_history') throw new Error('unreachable');
+    expect(result.reason).toBe('unknown_repo');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two pure component functions -- where "insufficient history" becomes a
+// number, deliberately and in exactly one place
+// ---------------------------------------------------------------------------
+describe('velocityComponentFor', () => {
+  const vcfg = DEFAULT_REPO_SCORING_CONFIG.velocity;
+
+  function ok(starsPerDay: number, spanCoverage = 1) {
+    return {
+      status: 'ok' as const,
+      repoId: 1,
+      starsPerDay,
+      starsGained: starsPerDay * 6,
+      spanDays: 6,
+      spanCoverage,
+      staleDays: 0,
+      first: { day: '2026-08-08', stars: 0, observedAt: '2026-08-08T12:00:00.000Z' },
+      last: { day: '2026-08-14', stars: 0, observedAt: '2026-08-14T12:00:00.000Z' },
+      mixedTimezone: false,
+      fromDay: '2026-08-08',
+      throughDay: '2026-08-14',
+      expectedDays: 7,
+      observedDays: 2,
+      missingDays: [],
+    };
+  }
+
+  function insufficient(reason: 'unknown_repo' | 'no_snapshots' | 'single_snapshot' | 'span_too_short') {
+    return {
+      status: 'insufficient_history' as const,
+      reason,
+      repoId: reason === 'unknown_repo' ? null : 1,
+      spanDays: 0,
+      minSpanDays: 3,
+      fromDay: '2026-08-08',
+      throughDay: '2026-08-14',
+      expectedDays: 7,
+      observedDays: 0,
+      missingDays: [],
+    };
+  }
+
+  it('EVERY insufficient reason contributes exactly 0 -- the lane ranks on evidence it has, never on evidence it lacks', () => {
+    for (const reason of ['unknown_repo', 'no_snapshots', 'single_snapshot', 'span_too_short'] as const) {
+      expect(velocityComponentFor(insufficient(reason), vcfg), reason).toBe(0);
+    }
+  });
+
+  it('§4 SATISFIED: a 40->400-in-a-week repo scores full marks and a static 30k-star one scores far less', () => {
+    const rising = velocityComponentFor(ok(60), vcfg); // 360 stars over 6 days
+    const static30k = velocityComponentFor(ok(2), vcfg); // a huge, flat repo
+    expect(rising).toBeCloseTo(1, 10);
+    expect(rising).toBeGreaterThan(static30k * 3);
+  });
+
+  it('a repo gaining nothing scores exactly 0 -- the same number as "we do not know", which is why the API reports the status separately', () => {
+    expect(velocityComponentFor(ok(0), vcfg)).toBe(0);
+  });
+
+  it('NEGATIVE VELOCITY STAYS NEGATIVE: a repo shedding stars must sort below a flat one', () => {
+    expect(velocityComponentFor(ok(-30), vcfg)).toBeLessThan(0);
+    expect(velocityComponentFor(ok(-30), vcfg)).toBeLessThan(velocityComponentFor(ok(0), vcfg));
+  });
+
+  it('is bounded to [-1, 1] however extreme the rate', () => {
+    expect(velocityComponentFor(ok(500_000), vcfg)).toBeCloseTo(1, 10);
+    expect(velocityComponentFor(ok(-500_000), vcfg)).toBeCloseTo(-1, 10);
+  });
+
+  it('saturates rather than growing without limit, so one viral week cannot dominate every future one', () => {
+    expect(velocityComponentFor(ok(600), vcfg)).toBeLessThanOrEqual(1);
+    expect(velocityComponentFor(ok(600), vcfg)).toBeGreaterThan(velocityComponentFor(ok(60), vcfg) - 1e-9);
+  });
+
+  it('ATTENUATES A HALF-COVERED MEASUREMENT: the same rate over half the window counts for less', () => {
+    const full = velocityComponentFor(ok(60, 1), vcfg);
+    const half = velocityComponentFor(ok(60, 0.5), vcfg);
+    expect(half).toBeLessThan(full);
+    expect(half).toBeCloseTo(full * 0.75, 10); // coverage_floor 0.5 + 0.5 * 0.5
+  });
+
+  it('attenuation applies to a decline too, so a barely-covered drop is not overstated either', () => {
+    expect(velocityComponentFor(ok(-60, 0.5), vcfg)).toBeGreaterThan(velocityComponentFor(ok(-60, 1), vcfg));
+  });
+});
+
+describe('hnComponentFor', () => {
+  const hcfg = DEFAULT_REPO_SCORING_CONFIG.hn;
+
+  it('is 0 for a repo never seen', () => {
+    expect(hnComponentFor({ seen: false, strength: 0, mentions: [] }, hcfg)).toBe(0);
+  });
+
+  it('is the match strength for a repo that was', () => {
+    expect(hnComponentFor({ seen: true, strength: 1, mentions: [] }, hcfg)).toBe(1);
+    expect(hnComponentFor({ seen: true, strength: 0.5, mentions: [] }, hcfg)).toBe(0.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveRepoSignal -- both halves, one read
+// ---------------------------------------------------------------------------
+describe('resolveRepoSignal', () => {
+  it('returns null for an item whose URL names no repository', () => {
+    expect(resolveRepoSignal(migratedDb(), 'x'.repeat(64), 'https://example.test/a', NOW, DEFAULT_REPO_SCORING_CONFIG)).toBeNull();
+  });
+
+  it('carries both halves for a real repo, with the HN evidence attached', () => {
+    const db = migratedDb();
+    insertItem(db, hnItem(HN_MCP_STAMA));
+    const signal = resolveRepoSignal(db, 'y'.repeat(64), 'https://github.com/StamManif/mcp-stama', NOW, DEFAULT_REPO_SCORING_CONFIG);
+
+    expect(signal).not.toBeNull();
+    expect(signal!.ref).toEqual({ owner: 'StamManif', name: 'mcp-stama' });
+    expect(signal!.hn.seen).toBe(true);
+    expect(signal!.hnComponent).toBe(1);
+    expect(signal!.velocity.status).toBe('insufficient_history');
+    expect(signal!.velocityComponent).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The shipped config IS the default -- asserted, so the two cannot drift
+// ---------------------------------------------------------------------------
+describe('config/scoring.yaml', () => {
+  it("its repos: block deep-equals DEFAULT_REPO_SCORING_CONFIG, so feed.ts's fallback is never a different scorer", () => {
+    const yaml = readFileSync(join(process.cwd(), 'config', 'scoring.yaml'), 'utf8');
+    expect(parseMechanicalScoreConfig(yaml).repos).toEqual(DEFAULT_REPO_SCORING_CONFIG);
   });
 });
