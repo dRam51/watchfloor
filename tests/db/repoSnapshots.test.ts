@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import { openDb, closeDb } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
 import { InvalidTimestampError } from '../../src/domain/item.ts';
-import { localDay } from '../../src/db/repoSnapshots.ts';
+import {
+  localDay,
+  recordStarSnapshot,
+  getStarSnapshots,
+} from '../../src/db/repoSnapshots.ts';
 
 const open: Array<ReturnType<typeof openDb>> = [];
 function migratedDb() {
@@ -48,5 +52,37 @@ describe('localDay', () => {
     // snapshot day derived from a coerced instant would land in the wrong
     // bucket with nothing to show for it.
     expect(() => localDay('2026-08-14', NY)).toThrow(InvalidTimestampError);
+  });
+});
+
+// A repo the tests reuse. `repoId` is GitHub's immutable numeric id -- the
+// identity every snapshot row keys on; `itemKey` is what the rest of the
+// system keys on (sha256 of the canonical URL), carried alongside so a
+// consumer holding only an item_key can still reach this history.
+const AGENTKIT = {
+  repoId: 900001,
+  itemKey: 'a'.repeat(64),
+  fullName: 'acme/agentkit',
+};
+
+describe('recordStarSnapshot', () => {
+  it('stores one snapshot, readable back by repo id', () => {
+    const db = migratedDb();
+    recordStarSnapshot(db, {
+      ...AGENTKIT,
+      stars: 40,
+      observedAt: '2026-08-08T13:00:00.000Z',
+      tz: NY,
+    });
+
+    expect(getStarSnapshots(db, AGENTKIT.repoId)).toEqual([
+      {
+        repoId: AGENTKIT.repoId,
+        snapshotDay: '2026-08-08',
+        stars: 40,
+        observedAt: '2026-08-08T13:00:00.000Z',
+        tz: NY,
+      },
+    ]);
   });
 });
