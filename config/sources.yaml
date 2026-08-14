@@ -5,18 +5,49 @@
 #
 #   id            unique, stable, kebab-case ([a-z0-9] then [a-z0-9-])
 #   name          human-readable label, shown in the UI and source-health page
-#   type          rss | atom | json | github_search | api | market_data
+#   type          rss | atom | json | news_sitemap | google_news | github_search | api | market_data
+#                 (only rss, atom, json, news_sitemap, and google_news have an adapter as of M1;
+#                 github_search/api/market_data are M4a/M4b and will fail to route if used now)
 #   url           absolute feed URL
 #   beats         one or more of: ai, cyber, aisec, repos, markets, usnews
-#   weight        0.1–2.0 trust multiplier
-#   poll_interval e.g. 15m, 6h, 1d
+#   weight        0.1–2.0 trust multiplier (feeds M2 scoring)
+#   poll_interval e.g. 15m, 6h, 1d (nonzero leading digit required — a zero interval
+#                 defeats backoff, see src/sources/load.ts)
 #   enabled       true | false — false keeps the entry but stops polling it
 #
 # Optional:
 #
-#   filters       free-form map, interpreted per source type
+#   filters       free-form map, interpreted per source type. NOT YET CONSUMED by any
+#                 M1 adapter (src/adapters/*.ts always fetch `url` verbatim) — present here
+#                 only as forward documentation of intent for M2 scoring/filtering.
 #   tier          markets sources only: event | analysis
+#   enrichment    true | false, default true (AP-only in M1, set false below). NOTE: this
+#                 key is NOT YET IN src/sources/load.ts's Zod schema — zod's default object
+#                 parsing silently strips unrecognized keys rather than rejecting them, so
+#                 this loads fine but has no effect yet. It documents intent (AP's robots.txt
+#                 blocks AI crawlers by name; AP items must never reach an LLM) ahead of the
+#                 schema catching up — see task-11-report.md.
+#
+# M1 weight bands (see task-11-report.md for full per-source reasoning):
+#   2.0       hard-override: CISA KEV, and government primaries whose documents ARE the news
+#             (Federal Register, White House actions). SCOTUS opinions and NWS alerts were
+#             also planned at this tier but are NOT configured below — see the two robots.txt
+#             findings in task-11-report.md.
+#   1.5–1.8   high-trust, low-editorial: AP, Reuters, NPR, PBS, NVD, established security
+#             research (Project Zero).
+#   1.2–1.4   strong practitioner/trade writing: Simon Willison, Latent Space, Krebs,
+#             BleepingComputer, vendor research blogs, OWASP.
+#   0.8–1.1   high-volume/high-noise: arXiv feeds, Hacker News.
+#
+# Two sources are configured but enabled: false — real, reachable feeds that cannot be
+# usefully polled with M1's adapters as they stand today (not a src/ file this task may
+# touch). Re-enable only after the noted gap is closed. See task-11-report.md for the full
+# investigation.
 sources:
+  # ---------------------------------------------------------------------------
+  # cyber
+  # ---------------------------------------------------------------------------
+
   - id: cisa-kev
     name: CISA Known Exploited Vulnerabilities
     type: json
@@ -24,4 +55,234 @@ sources:
     beats: [cyber]
     weight: 2.0
     poll_interval: 30m
+    enabled: true
+
+  - id: cisa-advisories
+    name: CISA Cybersecurity Advisories
+    type: rss
+    url: https://www.cisa.gov/cybersecurity-advisories/all.xml
+    beats: [cyber]
+    weight: 1.7
+    poll_interval: 1h
+    enabled: true
+
+  # DISABLED — verified live (2026-08-13) but structurally unusable as configured.
+  # The unfiltered/default query (no date-range params) returns the OLDEST CVEs in
+  # NVD's catalog (confirmed: CVE-1999-0095, published 1988-10-01, was entry 1 of the
+  # live default response) — the API sorts ascending from the start of the catalog when
+  # no date filter is given, not by recency. A recency filter (lastModStartDate/
+  # lastModEndDate) DOES work (verified: a 12-day window returned 8,950 current
+  # results) but NVD rejects a wide/static range (verified: a >120-day span 404s) and
+  # requires the window to be computed relative to "now" at request time. The M1 JSON
+  # adapter (src/adapters/json.ts) fetches `url` verbatim with no per-poll templating,
+  # so there is no way to express "the last N days" in a static config value — every
+  # poll would return the identical 1988-era handful forever. Needs either adapter-level
+  # dynamic date-window support or a different approach; out of this task's file scope
+  # (src/ is off-limits). URL below is the exact one verified live, unchanged.
+  - id: nvd-cve
+    name: NVD CVE Database (API 2.0)
+    type: json
+    url: https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=5
+    beats: [cyber]
+    weight: 1.6
+    poll_interval: 3h
+    enabled: false
+
+  - id: krebs
+    name: Krebs on Security
+    type: rss
+    url: https://krebsonsecurity.com/feed/
+    beats: [cyber]
+    weight: 1.3
+    poll_interval: 6h
+    enabled: true
+
+  - id: bleepingcomputer
+    name: BleepingComputer
+    type: rss
+    url: https://www.bleepingcomputer.com/feed/
+    beats: [cyber]
+    weight: 1.3
+    poll_interval: 3h
+    enabled: true
+
+  # DISABLED — the plan's verified URL (googleprojectzero.blogspot.com, which needed
+  # ?max-results=25 to stay under ~13 MB) now permanently 302-redirects to a new site,
+  # https://projectzero.google/feed.xml (confirmed live 2026-08-13: Blogger has been
+  # retired in favor of a static Jekyll site). The new feed.xml is a complete,
+  # ever-growing history dump with NO pagination/bounding mechanism of any kind —
+  # verified live that ?max-results=25 has zero effect on it (still 13,212,453 bytes
+  # with the param attached). src/fetch/http.ts's politeFetch has a hardcoded 5 MiB
+  # DEFAULT_MAX_BYTES ceiling with no per-source override reachable from config (no
+  # adapter forwards `filters` or any other config field into politeFetch's maxBytes
+  # option) — every poll of this URL would throw ResponseTooLargeError, permanently,
+  # after downloading ~13 MB it then discards. Needs a source-configurable byte ceiling
+  # (a src/ change, out of this task's scope) before this can run. URL below is the
+  # real, current location (not the stale blogspot one, to avoid an unnecessary
+  # redirect hop once this is re-enabled) — no query param, since none has any effect.
+  - id: project-zero
+    name: Google Project Zero
+    type: rss
+    url: https://projectzero.google/feed.xml
+    beats: [cyber, aisec]
+    weight: 1.6
+    poll_interval: 12h
+    enabled: false
+
+  # ---------------------------------------------------------------------------
+  # aisec
+  # ---------------------------------------------------------------------------
+
+  - id: arxiv-cs-cr
+    name: arXiv — Cryptography and Security (cs.CR)
+    type: rss
+    url: https://rss.arxiv.org/rss/cs.CR
+    beats: [aisec]
+    weight: 0.9
+    poll_interval: 1d
+    filters:
+      # Not yet consumed by src/adapters/rss.ts (M1) — forward documentation for M2,
+      # matching this source's plan note ("filter for LLM/agent/prompt-injection
+      # terms"). cs.CR's daily volume is broad computer-security research; most of it
+      # is out of scope for the aisec beat's specifically LLM/agent focus.
+      keywords: ["prompt injection", jailbreak, "large language model", LLM, agent]
+    enabled: true
+
+  - id: owasp-genai
+    name: OWASP GenAI Security Project
+    type: rss
+    url: https://genai.owasp.org/feed/
+    beats: [aisec]
+    weight: 1.3
+    poll_interval: 12h
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # ai
+  # ---------------------------------------------------------------------------
+
+  - id: arxiv-cs-ai
+    name: arXiv — Artificial Intelligence (cs.AI)
+    type: rss
+    url: https://rss.arxiv.org/rss/cs.AI
+    beats: [ai]
+    weight: 0.9
+    poll_interval: 1d
+    enabled: true
+
+  - id: simonwillison
+    name: Simon Willison's Weblog
+    type: rss
+    url: https://simonwillison.net/atom/everything/
+    beats: [ai]
+    weight: 1.4
+    poll_interval: 6h
+    enabled: true
+
+  - id: latent-space
+    name: Latent Space
+    type: rss
+    url: https://www.latent.space/feed
+    beats: [ai]
+    weight: 1.2
+    poll_interval: 12h
+    enabled: true
+
+  - id: deepmind-blog
+    name: Google DeepMind Blog
+    type: rss
+    url: https://deepmind.google/blog/rss.xml
+    beats: [ai]
+    weight: 1.4
+    poll_interval: 6h
+    enabled: true
+
+  - id: huggingface-blog
+    name: Hugging Face Blog
+    type: rss
+    url: https://huggingface.co/blog/feed.xml
+    beats: [ai]
+    weight: 1.2
+    poll_interval: 6h
+    enabled: true
+
+  - id: hn-algolia
+    name: Hacker News (via Algolia)
+    type: json
+    url: https://hn.algolia.com/api/v1/search?tags=story&hitsPerPage=20
+    beats: [ai]
+    weight: 0.9
+    poll_interval: 1h
+    filters:
+      # Not yet consumed by src/adapters/json.ts (M1) — forward documentation for M2,
+      # matching this source's plan note ("points threshold + keyword filter"). This
+      # beat is `ai`; unfiltered results are every trending HN story regardless of topic.
+      min_points: 50
+      keywords: [ai, llm, "large language model", agent, anthropic, openai, gemini, claude, gpt]
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # usnews
+  # ---------------------------------------------------------------------------
+
+  - id: ap-news
+    name: AP News
+    type: news_sitemap
+    url: https://apnews.com/news-sitemap-content.xml
+    beats: [usnews]
+    weight: 1.8
+    poll_interval: 30m
+    # AP's robots.txt blocks AI crawlers by name — AP items must never be sent to an
+    # LLM. See the header comment above re: this field's current (inert) status.
+    enrichment: false
+    enabled: true
+
+  - id: reuters-gnews
+    name: Reuters (via Google News)
+    type: google_news
+    url: "https://news.google.com/rss/search?q=site:reuters.com+when:1d&hl=en-US&gl=US&ceid=US:en"
+    beats: [usnews]
+    weight: 1.8
+    poll_interval: 30m
+    enabled: true
+
+  - id: npr-news
+    name: NPR News
+    type: rss
+    url: https://feeds.npr.org/1001/rss.xml
+    beats: [usnews]
+    weight: 1.6
+    poll_interval: 1h
+    enabled: true
+
+  - id: pbs-newshour
+    name: PBS NewsHour
+    type: rss
+    url: https://www.pbs.org/newshour/feeds/rss/headlines
+    beats: [usnews]
+    weight: 1.6
+    poll_interval: 2h
+    enabled: true
+
+  - id: federal-register
+    name: Federal Register
+    type: json
+    url: https://www.federalregister.gov/api/v1/documents.json?per_page=20
+    beats: [usnews]
+    weight: 2.0
+    poll_interval: 3h
+    enabled: true
+
+  - id: whitehouse-actions
+    name: White House Presidential Actions
+    type: rss
+    # Corrected from the plan's implied /briefing-room/presidential-actions/feed/ path,
+    # which 404s (verified live 2026-08-13) — the site has dropped the "briefing-room"
+    # prefix. This exact URL was verified live: 200, a genuine WordPress RSS 2.0 feed
+    # titled "Presidential Actions – The White House", self-referencing correctly.
+    # robots.txt (www.whitehouse.gov) is allow-all (bare "Disallow:" under "User-agent: *").
+    url: https://www.whitehouse.gov/presidential-actions/feed/
+    beats: [usnews]
+    weight: 2.0
+    poll_interval: 1h
     enabled: true

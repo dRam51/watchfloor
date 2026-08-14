@@ -16,8 +16,40 @@ introductory price, and is disqualified from the default path.
 | id | Service | Class | Flag | Rate limit | At the limit |
 | --- | --- | --- | --- | --- | --- |
 | `cisa-kev` | CISA KEV catalog | free-forever | — | none published | requests fail; shown on source-health |
+| `cisa-advisories` | CISA Cybersecurity Advisories RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `nvd-cve` | NVD CVE Database (API 2.0) | free-forever | — | 5 req/30s unauthenticated (no API key used) | requests fail; shown on source-health |
+| `krebs` | Krebs on Security RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `bleepingcomputer` | BleepingComputer RSS | free-forever | — | none published; `Crawl-delay: 1` honored via politeFetch's per-host spacing | requests fail; shown on source-health |
+| `project-zero` | Google Project Zero feed | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `arxiv-cs-cr` | arXiv cs.CR RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `arxiv-cs-ai` | arXiv cs.AI RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `owasp-genai` | OWASP GenAI Security Project RSS | free-forever | — | none published | requests fail; shown on source-health |
+| `simonwillison` | Simon Willison's Weblog (Atom) | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `latent-space` | Latent Space RSS (Substack-hosted) | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `deepmind-blog` | Google DeepMind Blog RSS | free-forever | — | none published | requests fail; shown on source-health |
+| `huggingface-blog` | Hugging Face Blog RSS | free-forever | — | none published | requests fail; shown on source-health |
+| `hn-algolia` | Hacker News Search API (Algolia) | free-forever | — | none formally published for this public endpoint | requests fail; shown on source-health |
+| `ap-news` | AP News sitemap | free-forever | — | none published; declared in AP's own `robots.txt` | requests fail; shown on source-health |
+| `reuters-gnews` | Google News RSS (search endpoint) | free-forever | — | none published for this public endpoint | requests fail; shown on source-health |
+| `npr-news` | NPR News RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `pbs-newshour` | PBS NewsHour RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
+| `federal-register` | Federal Register API | free-forever | — | none published (public GSA-style API) | requests fail; shown on source-health |
+| `whitehouse-actions` | White House Presidential Actions RSS | free-forever | — | none published; web-served feed | requests fail; shown on source-health |
 | `ollama-local` | Ollama local inference | free-forever | — | local hardware | queues locally; no charge possible |
 | `anthropic-api` | Anthropic API (enrichment) | paid | `WF_ALLOW_PAID_ANTHROPIC` | per account | hard-disabled without the flag |
+
+None of the 19 sources above require an account, an API key, or a card on file — every
+one is a public, unauthenticated RSS/Atom/JSON/sitemap endpoint. `nvd-cve` and
+`project-zero` are configured with `enabled: false` in `config/sources.yaml` (real,
+reachable services — see that file's comments and task-11-report.md for why they can't
+usefully run yet); they are registered here regardless, since the zero-dollar rule is
+about what the system is *capable* of touching, not only what is currently enabled.
+No per-host rate limit above is a number this project invented — where a source
+publishes one (NVD), it's quoted from that source; everywhere else, "none published"
+means exactly that: no formal limit is declared, so the only throttling in effect is
+this project's own politeness layer (`politeFetch`'s 2s/host minimum spacing and each
+source's configured `poll_interval`), not a server-side quota we could exhaust into a
+bill — there is no billing relationship with any of these hosts at all.
 
 ## Before the first paid integration
 

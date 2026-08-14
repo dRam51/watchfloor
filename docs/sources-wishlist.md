@@ -51,6 +51,82 @@ only moves the fetching to our server. The tool does not change the permission.
 
 ---
 
+## SCOTUS slip opinions
+
+**Status:** blocked by `robots.txt` — deliberately, and permanently unless they change it.
+**Why it matters:** the M1 plan named this a verified source (`scotus-slip`, usnews beat, hard-override
+tier) after confirming `https://www.supremecourt.gov/rss/slipopinion.xml` returns a real, parseable RSS
+feed (the plan's own note: "the `/rss/cases.xml` in §4 is a 404" — meaning the *reachability* of the
+corrected path was checked). Robots-compliance was not checked at the same time.
+
+**Tried:** fetched `https://www.supremecourt.gov/robots.txt` during Task 11 config work (2026-08-13).
+The `User-agent: *` group reads:
+
+```
+User-agent:*
+Disallow: /images/
+Disallow: /rss/
+Disallow: /cdn/
+Crawl-delay:1
+```
+
+`/rss/` is explicitly disallowed for every agent this site doesn't name individually (it names only
+`discobot` and `SOTScraper`, both fully blocked, never a "yes" for anyone else). `slipopinion.xml` lives
+under `/rss/`, so `src/fetch/robots.ts`'s `isAllowed` — traced through directly, not assumed — returns
+`false` for this exact path: the `*` group's only matching rule is the 5-character `Disallow: /rss/`,
+there is no competing `Allow`, and `maxDisallowLen (5) <= maxAllowLen (-1)` is false. This is not a
+theoretical block; it is what the already-shipped robots gate would actually decide.
+
+**Not configured in `config/sources.yaml`** — matching how Reuters-direct is handled above: no entry,
+rather than an `enabled: false` row, since this isn't a technical gap that a future code change closes
+on its own. Only the Court changing its own policy would.
+
+**Revisit if:** the Court's `robots.txt` ever drops the `/rss/` disallow, or opens a general crawler
+allowance the way AP's does. No indirect route (a Google-News-style redirect, as used for Reuters) was
+investigated for this task — that would be new source research, outside Task 11's scope of configuring
+the already-verified 22.
+
+---
+
+## NWS Florida alerts (`api.weather.gov`)
+
+**Status:** blocked by `robots.txt` — deliberately, and permanently unless they change it.
+**Why it matters:** the M1 plan named this a verified, hard-override-tier source (`nws-fl-alerts`) and
+it is fully implemented — `src/adapters/json.ts` has a working mapper, `tests/fixtures/adapters/
+nws-fl-alerts.json` is a real, live-captured fixture, and the adapter's own test suite passes. The block
+found here is not a parsing or adapter problem; it is a permission problem discovered only during
+Task 11's config pass, after the adapter had already shipped.
+
+**Tried:** fetched `https://api.weather.gov/robots.txt` during Task 11 config work (2026-08-13),
+confirmed with a verbose request to rule out truncation or a proxy artifact. The complete file is:
+
+```
+User-agent: *
+Disallow: /
+```
+
+No named-agent group, no `Allow` exception anywhere — a blanket disallow of the entire host for every
+agent, including ours. Traced through `src/fetch/robots.ts`'s real `isAllowed` logic: the `*` group's
+only rule is `Disallow: /` (pattern length 1), no `Allow` rule exists, so every path on this host —
+including `/alerts/active?area=FL` — resolves to `false`. This is not specific to the alerts path; the
+entire `api.weather.gov` host is off-limits by its own declared policy.
+
+**No alternative host found.** `alerts.weather.gov`, the legacy CAP-alerts subdomain this kind of feed
+used to live on, no longer resolves at all (DNS failure, confirmed live) — apparently fully decommissioned
+in favor of the unified `api.weather.gov` API, which is the one host that disallows us. `www.weather.gov`
+publishes no `robots.txt` of its own (404, i.e. no restrictions *declared* — but it also doesn't appear to
+serve the same active-alerts data; it is a forecast/informational site, not the CAP alerts API).
+
+**Not configured in `config/sources.yaml`** — same reasoning as SCOTUS above: this is the site's own
+declared policy, not a gap this project's code can close. The finished, tested adapter code
+(`parseNwsFlAlertEntry` in `src/adapters/json.ts`) is unaffected and stays in the tree; it simply has no
+active source pointed at it until this changes.
+
+**Revisit if:** NWS ever narrows `api.weather.gov`'s `robots.txt` to allow general read access (or adds
+a named allowance), or publishes the same CAP alert data through a different, unrestricted host.
+
+---
+
 ## `oss-security` mailing list
 
 **Status:** blocked — connection refused during verification.
