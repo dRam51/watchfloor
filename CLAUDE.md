@@ -20,7 +20,16 @@ Conversation context does not survive a reset; these do.
 | `.superpowers/sdd/2026-08-13-m1-ingest/progress.md` | **The M1 recovery map.** Every task's status, fix rounds, controller rulings, and carry-forward constraints. Trust it and `git log` over recollection. |
 | `.superpowers/sdd/2026-08-12-m0-scaffold/progress.md` | Same for M0 |
 | `docs/superpowers/plans/2026-08-13-m1-ingest.md` | The M1 plan — note it has been corrected four times; the ledger records why |
-| `docs/brief.md` | **Missing.** The authority every plan cites by section number. Ask the human for it. |
+| `docs/brief.md` | **Local-only, gitignored — see the warning below.** The authority every plan cites by section number. Ask the human for it; do not commit it. |
+
+> [!warning] This repository is PUBLIC.
+> `docs/brief.md` and `config/portfolio.yaml` are gitignored and **must never be committed**.
+> Both carry the owner's real financial positions — holdings with weights, sector
+> concentration — plus location and employer context. Keep them locally; nothing in the
+> codebase reads either at build or test time, so a clone is unaffected.
+>
+> Before adding any file that quotes the brief's §11 appendix, or any ticker list, check
+> whether it belongs in git at all. The same applies to `.env`, already ignored.
 
 `.superpowers/` is gitignored, so it survives on this machine but **not in a fresh clone**.
 Anything that must outlive the machine belongs in `docs/`.

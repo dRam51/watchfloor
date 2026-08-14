@@ -5,3 +5,12 @@ dist/
 *.db-wal
 *.db-shm
 .superpowers/
+
+# THIS REPOSITORY IS PUBLIC. Neither of these may ever be committed.
+# Both contain the owner's real financial positions and personal context:
+# holdings with weights, concentration, location, and employer details.
+# docs/brief.md is the project spec and CLAUDE.md tells you to put it there --
+# keep it locally, but it stays out of git. Nothing in the codebase reads either
+# file at build or test time, so their absence breaks nothing for a clone.
+docs/brief.md
+config/portfolio.yaml
