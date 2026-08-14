@@ -1,0 +1,135 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import type { Db } from '../../db/connection.ts';
+import type { Source } from '../../sources/load.ts';
+import { BEATS } from '../../domain/item.ts';
+import { getBeatRefreshStatus, getFailingSourceCount, getEnrichmentSpendToday } from '../../domain/headerStrip.ts';
+import {
+  getLaneLayout,
+  setLaneLayout,
+  InvalidLaneLayoutError,
+  type LaneLayoutEntry,
+} from '../../domain/laneState.ts';
+
+/**
+ * §7 header strip + server-side lane layout (M3 task 6).
+ *
+ * Deliberately its own `registerDashboard(server, deps)` rather than a
+ * change to `src/api/server.ts` -- two Wave 2 siblings (feed, source
+ * health) are adding routes to that same file in parallel this wave, and
+ * editing it here would clobber them. The coordinator wires this function
+ * into `buildServer` separately, after all three land. See
+ * tests/api/dashboard.test.ts for the "build a server locally" pattern this
+ * module is tested against (Fastify() + registerAuth + registerDashboard).
+ *
+ * JSON convention (shared across this wave's three route files, per the
+ * coordinator's brief): camelCase on the wire, snake_case stays in the DB;
+ * bare objects, no `{ data: ... }` envelope; errors are always
+ * `{ error: string }`; timestamps are canonical `YYYY-MM-DDTHH:mm:ss.sssZ`
+ * strings, never epoch numbers or pre-formatted relative time; nulls stay
+ * null rather than being coerced to `""` or omitted.
+ */
+export interface DashboardDeps {
+  db: Db;
+  /** Normally `config/sources.yaml`, loaded once at boot via `loadSourcesFile`. */
+  sources: Source[];
+  /** Defaults to `process.env`; overridable for tests. */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Overrides `getFailingSourceCount`'s minimal definition
+   * (src/domain/headerStrip.ts) with a fuller one -- intended for Task 5's
+   * source-health module, once it exports one, to be wired in here without
+   * touching this file's logic. Defaults to the minimal definition.
+   */
+  countFailingSources?: (db: Db, sources: readonly Source[]) => number;
+  /** Overridable clock for tests; defaults to the wall clock. */
+  now?: () => string;
+}
+
+function defaultNow(): string {
+  return new Date().toISOString();
+}
+
+// ---------------------------------------------------------------------------
+// PUT /dashboard/layout request validation
+// ---------------------------------------------------------------------------
+
+// Zod checks shape (a beat is A string, collapsed is a boolean, and there
+// are exactly BEATS.length entries); it deliberately does NOT check for
+// duplicates or that all six particular beats are present -- that
+// permutation check already lives in src/domain/laneState.ts's
+// assertIsCompletePermutation, and duplicating it here in a second form
+// would be exactly the kind of drift-prone double validation this project
+// keeps flagging elsewhere. A schema-shape failure and a permutation
+// failure both end up as the same 400 `{ error }` response below; the
+// caller cannot tell which layer caught it, nor does it need to.
+const LaneEntrySchema = z.object({
+  beat: z.string().min(1),
+  collapsed: z.boolean(),
+});
+
+const PutLayoutBodySchema = z.object({
+  lanes: z.array(LaneEntrySchema).length(
+    BEATS.length,
+    `lanes must contain exactly ${BEATS.length} entries, one per beat -- PUT is a full replace, not a partial update`,
+  ),
+});
+
+function serializeLayout(lanes: LaneLayoutEntry[]): { lanes: LaneLayoutEntry[] } {
+  return { lanes };
+}
+
+export function registerDashboard(server: FastifyInstance, deps: DashboardDeps): void {
+  const now = deps.now ?? defaultNow;
+  const countFailingSources = deps.countFailingSources ?? getFailingSourceCount;
+
+  // -------------------------------------------------------------------
+  // GET /dashboard/header
+  // -------------------------------------------------------------------
+  server.get('/dashboard/header', () => {
+    const env = deps.env ?? process.env;
+    const refreshStatus = getBeatRefreshStatus(deps.db, deps.sources);
+
+    const beats: Record<string, { lastRefreshAt: string | null; sourceCount: number }> = {};
+    for (const status of refreshStatus) {
+      beats[status.beat] = { lastRefreshAt: status.lastRefreshAt, sourceCount: status.sourceCount };
+    }
+
+    return {
+      beats,
+      failingSources: countFailingSources(deps.db, deps.sources),
+      enrichmentSpend: getEnrichmentSpendToday(env, now()),
+    };
+  });
+
+  // -------------------------------------------------------------------
+  // GET /dashboard/layout
+  // -------------------------------------------------------------------
+  server.get('/dashboard/layout', () => {
+    return serializeLayout(getLaneLayout(deps.db));
+  });
+
+  // -------------------------------------------------------------------
+  // PUT /dashboard/layout -- full replace (see module doc comment and
+  // src/domain/laneState.ts for why a partial per-lane PATCH was rejected).
+  // -------------------------------------------------------------------
+  server.put('/dashboard/layout', async (request, reply) => {
+    const parsed = PutLayoutBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? 'invalid layout';
+      await reply.code(400).send({ error: message });
+      return;
+    }
+
+    try {
+      const saved = setLaneLayout(deps.db, parsed.data.lanes, now());
+      return serializeLayout(saved);
+    } catch (cause) {
+      if (cause instanceof InvalidLaneLayoutError) {
+        await reply.code(400).send({ error: cause.message });
+        return;
+      }
+      throw cause;
+    }
+  });
+}
