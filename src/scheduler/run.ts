@@ -96,6 +96,58 @@
  *    confused with `SourceOutcome.kind === 'skipped'` (a SOURCE-level
  *    outcome meaning "never attempted, source.enabled is false") -- those are
  *    unrelated concepts that happen to share the English word "skip".
+ *
+ * ---------------------------------------------------------------------------
+ * Fix round 1 (four changes, task-10-report.md has the full findings)
+ * ---------------------------------------------------------------------------
+ * Finding 1 (CRITICAL) -- `isEligible` reflects BACKOFF only
+ * (`FetchState.nextEligibleAt`, written only by `recordFailure`);
+ * `recordSuccess` always clears it back to `null`, so a healthy source that
+ * just succeeded was unconditionally `isEligible` again on the very next
+ * tick. `poll_interval` was being consumed only as the backoff base, never
+ * as a source's own healthy polling cadence -- every enabled, healthy
+ * source's real-world cadence was `src/bin/scheduler.ts`'s tick interval,
+ * not its configured `poll_interval`, and every re-fetch of an
+ * unconditional-request feed (no ETag/Last-Modified support) re-inserted
+ * the same items as new append-only versions. Fixed by a second gate, after
+ * the backoff check: a source whose `lastSuccessAt` is more recent than its
+ * own `poll_interval` (via `safePollIntervalMs`, so a malformed value fails
+ * toward LESS frequent polling, not more) is `'not-due'` -- a new outcome
+ * kind, distinct from `'backoff'` (failure-driven) and `'skipped'`
+ * (`enabled: false`) so a health page can tell all three apart. A source
+ * with no recorded success yet (first attempt, or one that has only ever
+ * failed) is never gated by this -- there is nothing to measure a healthy
+ * cadence against, and backoff already governs failure-retry timing.
+ *
+ * Finding 2 (Important) -- one item with an unusable URL (e.g. a relative
+ * link -- `src/adapters/rss.ts` passes `<link>` through with no
+ * absolute-URL check, so this is genuinely reachable) used to throw
+ * `InvalidUrlError` out of `canonicalizeUrl`, aborting the whole item loop:
+ * every item after the bad one was silently lost, AND the source was marked
+ * `'failure'` even though the adapter's own fetch had succeeded -- which
+ * meant `recordSuccess` never ran, `etag`/`lastModified` never advanced, and
+ * a feed with no conditional-request support would re-fetch and re-insert
+ * the SAME surviving items as new rows on every subsequent retry, forever,
+ * under append-only storage. Fixed by moving normalize+insert inside its
+ * OWN per-item try/catch: a bad item is now counted (`itemFailures`) and
+ * skipped, exactly like an adapter's own per-entry `skipped` count, and the
+ * source still reports `'success'` with `recordSuccess` run normally.
+ *
+ * Finding 4 (Important) -- the plan is explicit that a robots.txt denial
+ * "must be skipped and marked in fetch state, never fetched anyway"; the
+ * original version marked nothing. `recordFailure` is the only marking
+ * mechanism `source_fetch_state` has, so a denial now goes through it (via
+ * `safePollIntervalMs`, same as every other failure path), applying normal
+ * backoff. Deliberately NOT applied to `robots-unavailable` just above it
+ * (upheld, Finding 5): a denial is a confirmed, stable answer (the
+ * operator's rules were read successfully and clearly say no); an
+ * unreachable robots.txt is transient uncertainty with no analogous upside
+ * to backing off, since `fetchRobots` already retries on its own.
+ *
+ * Minor -- `skippedEntries`/`capped` are now tracked in outer-scoped
+ * variables (alongside `insertedCount`) so a 'failure' outcome reached after
+ * `adapter.fetch` succeeded carries them too, rather than silently dropping
+ * a partially-failed batch's adapter-reported counts.
  */
 
 import type { Db } from '../db/connection.ts';
@@ -251,6 +303,7 @@ export type SourceOutcomeKind =
   | 'success'
   | 'skipped'
   | 'backoff'
+  | 'not-due'
   | 'robots-denied'
   | 'robots-unavailable'
   | 'failure';
@@ -260,7 +313,9 @@ export interface SourceOutcome {
   kind: SourceOutcomeKind;
   /** Items normalized and inserted this cycle. 0 for every non-'success' kind, and for a notModified success. On 'failure', reflects however many items were inserted before the failure, not necessarily 0 -- a partial batch's earlier items are genuinely persisted (append-only storage; nothing rolls them back). */
   itemCount: number;
-  /** AdapterResult.skipped -- entries that were individually defective. Undefined when no fetch attempt happened (skipped/backoff/robots-*) or a notModified response had nothing to parse. Named distinctly from `kind: 'skipped'`, which is an unrelated, source-level concept -- see the module doc comment. */
+  /** How many items in this fetch's batch threw during normalize/insert (e.g. an unusable URL) and were skipped rather than aborting the rest of the batch -- fix round 1, Finding 2. Undefined until the fetch actually reached the item-processing phase (a notModified response, or any earlier failure, has nothing to report); a definite 0-or-higher number once it did, even if the outcome later became 'failure' for an unrelated reason after the loop ran. Distinct from `skippedEntries` (an ADAPTER-level count, before a RawItem ever existed) -- this is a SCHEDULER-level count, one layer downstream. */
+  itemFailures?: number;
+  /** AdapterResult.skipped -- entries that were individually defective. Undefined when no fetch attempt happened (skipped/backoff/not-due/robots-*) or a notModified response had nothing to parse. Named distinctly from `kind: 'skipped'`, which is an unrelated, source-level concept -- see the module doc comment. */
   skippedEntries?: number;
   /** AdapterResult.capped -- entries that parsed fine but were excluded by an adapter's own volume cap. Deliberately never fabricated as 0; undefined unless the adapter actually reported a cap binding this fetch. */
   capped?: number;
@@ -268,7 +323,7 @@ export interface SourceOutcome {
   notModified?: boolean;
   /** Present for 'backoff': when this source next becomes eligible (FetchState.nextEligibleAt). */
   nextEligibleAt?: string | null;
-  /** Present for 'failure' and 'robots-unavailable': the recorded error message. */
+  /** Present for 'failure', 'robots-unavailable', and 'robots-denied' (fix round 1, Finding 4): the recorded error/reason message. */
   error?: string;
   /** Wall-clock time this source's whole pipeline took, ms. */
   durationMs: number;
@@ -318,7 +373,32 @@ async function pollOneSource(
     };
   }
 
+  // Fix round 1, Finding 1 (CRITICAL): isEligible above reflects BACKOFF
+  // only. A healthy source that just succeeded has no gate at all without
+  // this check -- see the module doc comment for the full reasoning and the
+  // reproduction this fixes. Queried once here and reused below (for
+  // adapter.fetch's second argument) rather than queried again later --
+  // nothing between here and there writes to source_fetch_state, so it
+  // stays accurate, and this also removes a second identical query the
+  // pre-fix version had.
+  const priorState = getFetchState(db, source.id);
+  if (priorState?.lastSuccessAt != null) {
+    const dueIntervalMs = safePollIntervalMs(source);
+    const sinceLastSuccessMs = Date.parse(now) - Date.parse(priorState.lastSuccessAt);
+    if (sinceLastSuccessMs < dueIntervalMs) {
+      return { sourceId: source.id, kind: 'not-due', itemCount: 0, durationMs: elapsed() };
+    }
+  }
+  // A source with no recorded success yet (first-ever attempt, or one that
+  // has only ever failed) has nothing to measure a healthy cadence against
+  // and falls through unconditionally -- backoff (above) already governs
+  // failure-retry timing for that case.
+
   let insertedCount = 0;
+  let itemFailureCount = 0;
+  let itemsAttempted = false; // true once the item-processing phase actually starts, even over an empty batch
+  let skippedEntries: number | undefined;
+  let capped: number | undefined;
   try {
     const url = new URL(source.url);
     const origin = url.origin;
@@ -351,12 +431,20 @@ async function pollOneSource(
     // deliberately NOT caught here: it falls to the generic catch-all below,
     // which records it as a real 'failure', never silently allow or deny.
     if (!isAllowed(robotsTxt, PRODUCT_TOKEN, path, origin)) {
-      return { sourceId: source.id, kind: 'robots-denied', itemCount: 0, durationMs: elapsed() };
+      // Fix round 1, Finding 4: the plan is explicit that a denial "must be
+      // skipped and marked in fetch state, never fetched anyway" --
+      // recordFailure is the only marking mechanism source_fetch_state has,
+      // so this now applies normal backoff, same as any other failure.
+      // Deliberately different from robots-unavailable just above (upheld,
+      // Finding 5, unchanged here): a denial is a confirmed, stable answer,
+      // not transient uncertainty -- see the module doc comment.
+      const reason = `robots.txt at ${origin} disallows ${path}`;
+      recordFailure(db, source.id, reason, safePollIntervalMs(source), now);
+      return { sourceId: source.id, kind: 'robots-denied', itemCount: 0, error: reason, durationMs: elapsed() };
     }
 
     const adapter = resolveAdapter(adapters, source);
-    const state = getFetchState(db, source.id);
-    const result = await adapter.fetch(source, state);
+    const result = await adapter.fetch(source, priorState);
 
     if (result.notModified) {
       // Constraint: 304 short-circuits without inserting and without
@@ -372,10 +460,31 @@ async function pollOneSource(
       };
     }
 
+    skippedEntries = result.skipped;
+    capped = result.capped;
+    itemsAttempted = true;
+
+    // Fix round 1, Finding 2 (Important): each item is normalized and
+    // inserted inside its OWN try/catch. A throw here (e.g. an unusable URL
+    // -- canonicalizeUrl's InvalidUrlError; src/adapters/rss.ts passes
+    // <link> through with no absolute-URL check, so this is genuinely
+    // reachable) used to abort the whole loop, silently discarding every
+    // item after it AND marking the whole source 'failure' despite the
+    // adapter's own fetch having succeeded -- see the module doc comment for
+    // why that was also self-perpetuating under append-only storage.
+    // Isolating each item keeps the surviving ones (matching
+    // src/adapters/types.ts's own "every other case must leave the
+    // surviving items usable" principle, extended one layer downstream from
+    // the adapter's own entry parsing to this one) and still lets
+    // recordSuccess run normally below.
     for (const raw of result.items) {
-      const newItem = normalizeItem(raw, source, now);
-      insertItem(db, newItem);
-      insertedCount++;
+      try {
+        const newItem = normalizeItem(raw, source, now);
+        insertItem(db, newItem);
+        insertedCount++;
+      } catch {
+        itemFailureCount++;
+      }
     }
 
     recordSuccess(
@@ -388,8 +497,9 @@ async function pollOneSource(
       sourceId: source.id,
       kind: 'success',
       itemCount: insertedCount,
-      skippedEntries: result.skipped,
-      capped: result.capped,
+      itemFailures: itemFailureCount,
+      skippedEntries,
+      capped,
       notModified: false,
       durationMs: elapsed(),
     };
@@ -400,6 +510,14 @@ async function pollOneSource(
       sourceId: source.id,
       kind: 'failure',
       itemCount: insertedCount,
+      // Minor (fix round 1): carried through rather than dropped, so a
+      // 'failure' reached AFTER the adapter's own fetch succeeded (e.g.
+      // recordSuccess itself failing) still reports what the adapter saw.
+      // itemFailures only when the item-processing phase actually started;
+      // skippedEntries/capped are already undefined-until-assigned above.
+      itemFailures: itemsAttempted ? itemFailureCount : undefined,
+      skippedEntries,
+      capped,
       error: message,
       durationMs: elapsed(),
     };

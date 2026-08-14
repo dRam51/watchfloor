@@ -68,6 +68,15 @@ const EnvSchema = z.object({
   // treat every route as unauthenticated. Also stated in docs/layout.md.
   WF_API_TOKEN: z.string().min(8),
   WF_API_PORT: z.coerce.number().int().positive().default(8787),
+  // How often src/bin/scheduler.ts's tick loop checks which sources are due
+  // (self-rescheduling setTimeout, not setInterval -- see that file). M1
+  // task 10 fix round 1, minor: this used to be a hardcoded literal in
+  // scheduler.ts itself, moved here once src/config/env.ts was no longer a
+  // concurrently-edited sibling's file. `.positive()` (matching WF_API_PORT)
+  // rejects 0 and negative values at config-load time, closing off the same
+  // class of hazard as the poll_interval hardening elsewhere in this task --
+  // a 0 tick would busy-loop `setTimeout(tick, 0)` indefinitely.
+  WF_SCHEDULER_TICK_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

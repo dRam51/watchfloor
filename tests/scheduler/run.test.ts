@@ -5,7 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, closeDb, type Db } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
-import { getFetchState, recordFailure, isEligible, MAX_BACKOFF_MS } from '../../src/db/fetchState.ts';
+import {
+  getFetchState,
+  recordFailure,
+  recordSuccess,
+  isEligible,
+  MAX_BACKOFF_MS,
+} from '../../src/db/fetchState.ts';
 import { getCurrentItem, deriveItemKey, InvalidTimestampError } from '../../src/domain/item.ts';
 import { canonicalizeUrl } from '../../src/normalize/url.ts';
 import type { RawItem } from '../../src/normalize/item.ts';
@@ -217,6 +223,158 @@ describe('runPollCycle -- one dead feed does not take down the run', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fix round 1, Finding 1 (CRITICAL): poll_interval governs a healthy
+// source's own cadence, not just the backoff base. isEligible only reflects
+// backoff (FetchState.nextEligibleAt, written only by recordFailure);
+// recordSuccess always clears it to null, so before this fix a healthy
+// source was unconditionally isEligible again on the very next tick,
+// regardless of poll_interval.
+// ---------------------------------------------------------------------------
+
+describe("runPollCycle -- poll_interval governs a healthy source's own cadence, not just backoff (fix round 1, Finding 1)", () => {
+  it('a source polled on three cycles one minute apart is fetched only once, not once per cycle', async () => {
+    const db = migratedDb();
+    const baseUrl = await servePermissive();
+    const source = makeSource({ id: 'src-1', type: 'rss', url: `${baseUrl}/feed`, poll_interval: '6h' });
+    const articleUrl = `${baseUrl}/article-1`;
+
+    let fetchCount = 0;
+    const adapters = registry({
+      rss: cannedAdapter('rss', async () => {
+        fetchCount++;
+        return { items: [rawItem(articleUrl)], etag: null, lastModified: null, notModified: false };
+      }),
+    });
+
+    const t0 = '2026-08-13T12:00:00.000Z';
+    const t1 = '2026-08-13T12:01:00.000Z'; // 1 minute later -- far short of the 6h poll_interval
+    const t2 = '2026-08-13T12:02:00.000Z'; // 2 minutes later
+
+    const report0 = await runPollCycle(db, [source], adapters, t0);
+    const report1 = await runPollCycle(db, [source], adapters, t1);
+    const report2 = await runPollCycle(db, [source], adapters, t2);
+
+    expect(fetchCount).toBe(1);
+    expect(report0.sources[0]?.kind).toBe('success');
+    expect(report1.sources[0]?.kind).toBe('not-due');
+    expect(report2.sources[0]?.kind).toBe('not-due');
+    expect(report1.sources[0]?.itemCount).toBe(0);
+
+    // One item row for the one article across all three cycles -- not three
+    // duplicate versions of the same article under append-only storage.
+    const key = deriveItemKey(canonicalizeUrl(articleUrl));
+    const row = db.prepare('select count(*) as n from items where item_key = ?').get(key) as { n: number };
+    expect(row.n).toBe(1);
+  });
+
+  it('a source with no recorded success yet is not gated by the not-due check (first attempt always proceeds)', async () => {
+    const db = migratedDb();
+    const baseUrl = await servePermissive();
+    const source = makeSource({ id: 'src-1', type: 'rss', url: `${baseUrl}/feed`, poll_interval: '6h' });
+
+    let fetchCount = 0;
+    const adapters = registry({
+      rss: cannedAdapter('rss', async () => {
+        fetchCount++;
+        return { items: [], etag: null, lastModified: null, notModified: false };
+      }),
+    });
+
+    const report = await runPollCycle(db, [source], adapters, NOW);
+    expect(fetchCount).toBe(1);
+    expect(report.sources[0]?.kind).toBe('success');
+  });
+
+  it('a source that has only ever failed (never succeeded) is not gated by the not-due check', async () => {
+    const db = migratedDb();
+    const baseUrl = await servePermissive();
+    const source = makeSource({ id: 'src-1', type: 'rss', url: `${baseUrl}/feed`, poll_interval: '6h' });
+
+    // Fail once, then let the (short) backoff window fully elapse, so
+    // isEligible is true again but lastSuccessAt is still null.
+    recordFailure(db, 'src-1', 'boom', 6 * 60 * 60 * 1000, '2026-08-13T00:00:00.000Z');
+    const seeded = getFetchState(db, 'src-1');
+    expect(seeded?.lastSuccessAt).toBeNull();
+
+    let fetchCount = 0;
+    const adapters = registry({
+      rss: cannedAdapter('rss', async () => {
+        fetchCount++;
+        return { items: [], etag: null, lastModified: null, notModified: false };
+      }),
+    });
+
+    // Well past the seeded failure's backoff window (12h+ later for a 6h interval).
+    const report = await runPollCycle(db, [source], adapters, '2026-08-13T13:00:00.000Z');
+    expect(fetchCount).toBe(1);
+    expect(report.sources[0]?.kind).toBe('success');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Finding 2 (Important): one malformed item URL must not
+// discard the rest of the batch. canonicalizeUrl throws InvalidUrlError for
+// a relative URL, and src/adapters/rss.ts passes <link> through with no
+// absolute-URL check at all, so this is genuinely reachable, not contrived.
+// ---------------------------------------------------------------------------
+
+describe('runPollCycle -- one malformed item URL does not discard the rest of the batch (fix round 1, Finding 2)', () => {
+  it('normalizes and inserts the surviving items when one item has an unusable URL', async () => {
+    const db = migratedDb();
+    const baseUrl = await servePermissive();
+    const source = makeSource({ id: 'src-1', type: 'rss', url: `${baseUrl}/feed` });
+
+    const urlOne = `${baseUrl}/item-1`;
+    const urlThree = `${baseUrl}/item-3`;
+    const items = [
+      rawItem(urlOne, 'Item one'),
+      rawItem('/relative-link', 'Item two -- unusable relative URL'),
+      rawItem(urlThree, 'Item three'),
+    ];
+
+    const adapters = registry({
+      rss: cannedAdapter('rss', async () => ({
+        items,
+        etag: null,
+        lastModified: null,
+        notModified: false,
+      })),
+    });
+
+    const report = await runPollCycle(db, [source], adapters, NOW);
+    const outcome = report.sources[0];
+
+    expect(outcome?.kind).toBe('success');
+    expect(outcome?.itemCount).toBe(2);
+    expect(outcome?.itemFailures).toBe(1);
+
+    expect(getCurrentItem(db, deriveItemKey(canonicalizeUrl(urlOne)))).not.toBeNull();
+    expect(getCurrentItem(db, deriveItemKey(canonicalizeUrl(urlThree)))).not.toBeNull();
+
+    // recordSuccess DID run despite the one bad item -- this is what stops
+    // the surviving items from being re-inserted as duplicates on every
+    // subsequent retry (etag/lastModified advance normally).
+    const state = getFetchState(db, 'src-1');
+    expect(state?.consecutiveFailures).toBe(0);
+    expect(state?.lastSuccessAt).toBe(NOW);
+  });
+
+  it('reports itemFailures as undefined, not a fabricated 0, when the fetch never got far enough to attempt any items', async () => {
+    const db = migratedDb();
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(503);
+      res.end();
+    });
+    const source = makeSource({ id: 'src-1', type: 'rss', url: `${baseUrl}/feed` });
+
+    const report = await runPollCycle(db, [source], registry(), NOW);
+
+    expect(report.sources[0]?.kind).toBe('robots-unavailable');
+    expect(report.sources[0]?.itemFailures).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 304 short-circuit.
 // ---------------------------------------------------------------------------
 
@@ -322,8 +480,38 @@ describe('runPollCycle -- robots.txt denies', () => {
     const report = await runPollCycle(db, [source], adapters, NOW);
 
     expect(report.sources[0]?.kind).toBe('robots-denied');
+    expect(typeof report.sources[0]?.error).toBe('string');
     expect(adapterCalled).toBe(false);
-    expect(getFetchState(db, 'src-1')).toBeNull();
+  });
+
+  // Fix round 1, Finding 4: the plan's own line ("must be skipped and marked
+  // in fetch state, never fetched anyway") is explicit that a denial has to
+  // be recorded, unlike robots-unavailable (upheld, Finding 5) -- a denial
+  // is a confirmed, stable answer, not transient uncertainty. This test used
+  // to assert the OPPOSITE (getFetchState stays null) before this fix;
+  // flipped, not deleted, so it still fails loudly if the marking ever
+  // regresses rather than silently passing for the old, wrong reason.
+  it('marks the denial in fetch state via recordFailure, applying normal backoff', async () => {
+    const db = migratedDb();
+    const baseUrl = await serve((req, res) => {
+      if (req.url === '/robots.txt') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end(DENY_ALL_ROBOTS_TXT);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const source = makeSource({ id: 'src-1', type: 'rss', url: `${baseUrl}/feed`, poll_interval: '15m' });
+
+    await runPollCycle(db, [source], registry(), NOW);
+
+    const state = getFetchState(db, 'src-1');
+    expect(state).not.toBeNull();
+    expect(state?.consecutiveFailures).toBe(1);
+    expect(state?.lastError).toContain('disallows');
+    expect(state?.nextEligibleAt).not.toBeNull();
+    expect(state!.nextEligibleAt! > NOW).toBe(true);
   });
 });
 
@@ -440,12 +628,13 @@ describe('runPollCycle -- skipped and capped are reported distinctly', () => {
 // ---------------------------------------------------------------------------
 
 describe('runPollCycle -- PollReport distinguishes every outcome kind', () => {
-  it('produces a distinct kind for success, skipped, backoff, robots-denied, robots-unavailable, and failure', async () => {
+  it('produces a distinct kind for success, skipped, backoff, not-due, robots-denied, robots-unavailable, and failure', async () => {
     const db = migratedDb();
 
     const successServer = await servePermissive();
     const skippedServer = await servePermissive(); // never actually hit -- enabled:false short-circuits first
     const backoffServer = await servePermissive(); // never actually hit -- backoff short-circuits first
+    const notDueServer = await servePermissive(); // never actually hit -- not-due short-circuits first
     const deniedServer = await serve((req, res) => {
       if (req.url === '/robots.txt') {
         res.writeHead(200);
@@ -465,12 +654,14 @@ describe('runPollCycle -- PollReport distinguishes every outcome kind', () => {
       makeSource({ id: 'success', type: 'rss', url: `${successServer}/feed` }),
       makeSource({ id: 'skipped', type: 'rss', url: `${skippedServer}/feed`, enabled: false }),
       makeSource({ id: 'backoff', type: 'rss', url: `${backoffServer}/feed` }),
+      makeSource({ id: 'not-due', type: 'rss', url: `${notDueServer}/feed`, poll_interval: '6h' }),
       makeSource({ id: 'denied', type: 'json', url: `${deniedServer}/feed` }),
       makeSource({ id: 'unavailable', type: 'news_sitemap', url: `${unavailableServer}/feed` }),
       makeSource({ id: 'failure', type: 'google_news', url: `${failureServer}/feed` }),
     ];
 
     recordFailure(db, 'backoff', 'seed', 15 * 60 * 1000, '2026-08-13T11:59:00.000Z');
+    recordSuccess(db, 'not-due', { etag: null, lastModified: null, itemCount: 1 }, '2026-08-13T11:59:00.000Z');
 
     const adapters = registry({
       rss: successAdapter('rss', [rawItem(`${successServer}/item-1`)]),
@@ -485,12 +676,13 @@ describe('runPollCycle -- PollReport distinguishes every outcome kind', () => {
     expect(byId.success?.kind).toBe('success');
     expect(byId.skipped?.kind).toBe('skipped');
     expect(byId.backoff?.kind).toBe('backoff');
+    expect(byId['not-due']?.kind).toBe('not-due');
     expect(byId.denied?.kind).toBe('robots-denied');
     expect(byId.unavailable?.kind).toBe('robots-unavailable');
     expect(byId.failure?.kind).toBe('failure');
 
-    // All six kinds are pairwise distinct values, not overlapping labels.
-    expect(new Set(report.sources.map((o) => o.kind)).size).toBe(6);
+    // All seven kinds are pairwise distinct values, not overlapping labels.
+    expect(new Set(report.sources.map((o) => o.kind)).size).toBe(7);
   });
 });
 

@@ -57,6 +57,29 @@ describe('loadEnv', () => {
   });
 });
 
+// M1 task 10 fix round 1, minor: moved out of a hardcoded literal in
+// src/bin/scheduler.ts once this file was free of the concurrent sibling
+// task that previously blocked editing it.
+describe('WF_SCHEDULER_TICK_INTERVAL_MS', () => {
+  it('defaults to 60000ms when unset', () => {
+    expect(loadEnv(valid).WF_SCHEDULER_TICK_INTERVAL_MS).toBe(60_000);
+  });
+
+  it('coerces a provided value to a number', () => {
+    expect(loadEnv({ ...valid, WF_SCHEDULER_TICK_INTERVAL_MS: '30000' }).WF_SCHEDULER_TICK_INTERVAL_MS).toBe(
+      30_000,
+    );
+  });
+
+  it('rejects zero -- would busy-loop the scheduler tick', () => {
+    expect(() => loadEnv({ ...valid, WF_SCHEDULER_TICK_INTERVAL_MS: '0' })).toThrow(EnvError);
+  });
+
+  it('rejects a negative value', () => {
+    expect(() => loadEnv({ ...valid, WF_SCHEDULER_TICK_INTERVAL_MS: '-1000' })).toThrow(EnvError);
+  });
+});
+
 describe('WF_VAULT_ROOT path validation', () => {
   // An Obsidian vault lives outside the repo by definition (CLAUDE.md
   // "Portability debt"), so WF_VAULT_ROOT alone is allowed to be absolute.

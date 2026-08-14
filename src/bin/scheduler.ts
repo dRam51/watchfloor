@@ -30,15 +30,6 @@ const adapters: SchedulerAdapterRegistry = {
   google_news: googleNewsAdapter,
 };
 
-// How often the loop checks which sources are due. Deliberately NOT an env
-// var: every WF_* var lives in src/config/env.ts, which this task does not
-// touch (concurrent sibling work, per this task's brief), and a fixed 60s
-// tick is short enough that the shortest source interval sources.yaml's
-// schema allows (1m, after this same task's zero-rejecting tightening) can
-// still be served within one tick of becoming eligible, without polling
-// isEligible so often it burns CPU for no operational benefit.
-const TICK_INTERVAL_MS = 60_000;
-
 /**
  * All schedule arithmetic in this process derives from `WF_TZ`, never the
  * host's own system timezone (a Linux host defaults to UTC and would
@@ -70,7 +61,7 @@ try {
   const sources = loadSourcesFile(join(repoRoot, 'config', 'sources.yaml'));
   console.log(
     `watchfloor scheduler starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
-      `tick=${TICK_INTERVAL_MS}ms)`,
+      `tick=${env.WF_SCHEDULER_TICK_INTERVAL_MS}ms)`,
   );
 
   let stopped = false;
@@ -98,7 +89,7 @@ try {
       // process alive rather than let one bad tick kill the whole scheduler.
       console.error(`poll cycle threw unexpectedly: ${(err as Error).message}`);
     }
-    if (!stopped) timer = setTimeout(tick, TICK_INTERVAL_MS);
+    if (!stopped) timer = setTimeout(tick, env.WF_SCHEDULER_TICK_INTERVAL_MS);
   }
 
   // Run the first cycle immediately rather than waiting a full tick after
