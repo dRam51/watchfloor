@@ -16,6 +16,12 @@ function isValidTimeZone(tz: string): boolean {
   }
 }
 
+// Node's setTimeout/setInterval `delay` argument is internally a 32-bit
+// signed integer; anything larger silently clamps to 1ms rather than being
+// rejected. See WF_SCHEDULER_TICK_INTERVAL_MS's own comment for why that
+// matters here specifically (M1 task 10 fix round 2).
+const MAX_SETTIMEOUT_DELAY_MS = 2_147_483_647; // 2^31 - 1
+
 // An absolute path in config is the single most common reason a service fails
 // to come up on a new host (§12). Reject it here rather than at 3am on the
 // target machine.
@@ -76,7 +82,21 @@ const EnvSchema = z.object({
   // rejects 0 and negative values at config-load time, closing off the same
   // class of hazard as the poll_interval hardening elsewhere in this task --
   // a 0 tick would busy-loop `setTimeout(tick, 0)` indefinitely.
-  WF_SCHEDULER_TICK_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  //
+  // `.max(MAX_SETTIMEOUT_DELAY_MS)` (M1 task 10 fix round 2, small item):
+  // Node's setTimeout/setInterval delay is a 32-bit signed integer
+  // internally -- a value above 2^31-1 is not rejected, it is silently
+  // clamped to 1ms (confirmed empirically: `setTimeout(fn, 2147483648)`
+  // emits a TimeoutOverflowWarning and fires after ~1ms, not ~24.8 days as
+  // the literal value would suggest). An operator-supplied value THAT large
+  // would therefore reproduce the exact busy-loop hazard `.positive()` above
+  // exists to prevent, just from the opposite end of the range.
+  WF_SCHEDULER_TICK_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(MAX_SETTIMEOUT_DELAY_MS)
+    .default(60_000),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

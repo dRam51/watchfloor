@@ -594,7 +594,22 @@ describe('fetchRobots', () => {
     expect(await fetchRobots(baseUrl)).toBe('');
   });
 
-  it('rejects on 5xx and does NOT cache the failure, so the next call retries', async () => {
+  // Fix round 2 (reopened finding): a failure now DOES cache, for a short,
+  // separate negative-cache window (negativeCacheTtlMs, 15 minutes by
+  // default) -- reversing this test's own original name and assertion. The
+  // original design ("do NOT cache the failure, so the next call retries")
+  // was sound in isolation, but combined with a caller that retries on a
+  // fixed tick with no backoff of its own for this specific outcome
+  // (src/scheduler/run.ts's scheduler, by design -- see that file's module
+  // doc comment), it meant retrying the network on EVERY call for an
+  // entire outage: measured at 360 real requests over a 6h outage for one
+  // source, with zero deduplication across sources sharing an origin. This
+  // test is flipped, not deleted, so a regression back to "never cache a
+  // failure" fails loudly here rather than silently passing for the old,
+  // now-incorrect reason. The window-elapsed case (a LATER call does retry)
+  // is covered separately below, in "negative caching bounds the retry rate
+  // during an outage".
+  it('rejects on 5xx and caches the failure for a bounded window, so an immediate second call does not repeat the request', async () => {
     let hitCount = 0;
     const baseUrl = await serve((req, res) => {
       hitCount++;
@@ -616,7 +631,7 @@ describe('fetchRobots', () => {
     } catch (e) {
       expect(e).toBeInstanceOf(RobotsUnavailableError);
     }
-    expect(hitCount).toBe(2);
+    expect(hitCount).toBe(1);
   });
 
   it('rejects when the origin is unreachable (connection refused)', async () => {
@@ -690,5 +705,206 @@ describe('fetchRobots', () => {
       expect(e).toBeInstanceOf(RobotsUnavailableError);
       expect((e as RobotsUnavailableError).origin).toBe(baseUrl);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Negative caching (M1 task 10 fix round 2). Reopened finding: the
+// scheduler's cadence gate (src/scheduler/run.ts) cannot bound the
+// robots-unavailable retry rate, because that outcome writes neither
+// recordSuccess nor recordFailure, so the gate (keyed on lastSuccessAt)
+// never engages during an outage. fetchRobots retried the network on EVERY
+// call during a failure (measured: 360 requests over a 6h outage at a 60s
+// tick, unchanged from before the scheduler fix). The bound belongs at this
+// layer specifically because the cache is origin-keyed: fixing it here
+// dedupes across every source sharing a down origin, which a scheduler-side
+// fix could never do (the scheduler has no visibility into which OTHER
+// sources share an origin with the one it is currently polling).
+// ---------------------------------------------------------------------------
+
+describe('fetchRobots -- negative caching bounds the retry rate during an outage', () => {
+  it('does not repeat a failed request within the negative-cache window', async () => {
+    let hitCount = 0;
+    const baseUrl = await serve((req, res) => {
+      hitCount++;
+      res.writeHead(503);
+      res.end('unavailable');
+    });
+
+    try {
+      await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000 });
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(RobotsUnavailableError);
+    }
+    expect(hitCount).toBe(1);
+
+    // Second call, well within the 10s window: served from the negative
+    // cache, no new network request.
+    try {
+      await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000 });
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(RobotsUnavailableError);
+    }
+    expect(hitCount).toBe(1);
+  });
+
+  it('retries the network once the negative-cache window has elapsed', async () => {
+    let hitCount = 0;
+    const baseUrl = await serve((req, res) => {
+      hitCount++;
+      res.writeHead(503);
+      res.end('unavailable');
+    });
+
+    await fetchRobots(baseUrl, { negativeCacheTtlMs: 50 }).catch(() => {});
+    expect(hitCount).toBe(1);
+
+    await sleep(80);
+
+    await fetchRobots(baseUrl, { negativeCacheTtlMs: 50 }).catch(() => {});
+    expect(hitCount).toBe(2);
+  });
+
+  it('caches failures per origin independently, same as the positive cache', async () => {
+    let hitsA = 0;
+    let hitsB = 0;
+    const baseUrlA = await serve((req, res) => {
+      hitsA++;
+      res.writeHead(503);
+      res.end();
+    });
+    const baseUrlB = await serve((req, res) => {
+      hitsB++;
+      res.writeHead(503);
+      res.end();
+    });
+
+    await fetchRobots(baseUrlA, { negativeCacheTtlMs: 10_000 }).catch(() => {});
+    await fetchRobots(baseUrlB, { negativeCacheTtlMs: 10_000 }).catch(() => {});
+    await fetchRobots(baseUrlA, { negativeCacheTtlMs: 10_000 }).catch(() => {});
+    await fetchRobots(baseUrlB, { negativeCacheTtlMs: 10_000 }).catch(() => {});
+
+    expect(hitsA).toBe(1);
+    expect(hitsB).toBe(1);
+  });
+
+  it('dedupes across multiple independent callers sharing one origin -- the 3-sources-1-origin scenario measured during review', async () => {
+    let hitCount = 0;
+    const baseUrl = await serve((req, res) => {
+      hitCount++;
+      res.writeHead(503);
+      res.end();
+    });
+
+    // Simulates 3 sources sharing one down origin, each independently
+    // calling fetchRobots across 10 ticks -- 30 calls total. Before this
+    // fix, every one of the 30 calls was a real network request (measured
+    // by the reviewer). All 30 share the same cache key (same origin), so
+    // this collapses to exactly 1 real request within the TTL window.
+    for (let tick = 0; tick < 10; tick++) {
+      for (let source = 0; source < 3; source++) {
+        try {
+          await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000 });
+          expect.unreachable('should have thrown');
+        } catch (e) {
+          expect(e).toBeInstanceOf(RobotsUnavailableError);
+        }
+      }
+    }
+
+    expect(hitCount).toBe(1);
+  });
+
+  it('a cached failure still surfaces as RobotsUnavailableError with the correct origin, never silently "allowed"', async () => {
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(503);
+      res.end();
+    });
+    await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000 }).catch(() => {});
+
+    try {
+      await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000 });
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(RobotsUnavailableError);
+      expect((e as RobotsUnavailableError).origin).toBe(baseUrl);
+    }
+  });
+
+  it('once the negative-cache window has elapsed, a recovered origin is reachable again (the cache does not become a permanent denial)', async () => {
+    // Deliberately NOT a test that a call made WITHIN a fresh negative-cache
+    // window sees a recovered origin -- that is not this cache's contract
+    // and would defeat its entire purpose (it exists precisely so a caller
+    // does NOT re-ask the network within the window, so it cannot possibly
+    // discover a mid-window recovery without asking, which is the one thing
+    // it is designed not to do). The property that matters is that the
+    // suppression is TIME-BOXED, not permanent: once the window elapses, the
+    // very next call reaches the network again and a real recovery is seen.
+    let mode: 'fail' | 'ok' = 'fail';
+    const baseUrl = await serve((req, res) => {
+      if (mode === 'fail') {
+        res.writeHead(503);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('User-agent: *\nDisallow:\n');
+    });
+
+    await fetchRobots(baseUrl, { negativeCacheTtlMs: 50 }).catch(() => {});
+
+    await sleep(80); // past the 50ms negative-cache window
+    mode = 'ok';
+
+    const body = await fetchRobots(baseUrl, { negativeCacheTtlMs: 50 });
+    expect(body).toBe('User-agent: *\nDisallow:\n');
+  });
+
+  it('a 4xx does not populate the negative cache -- it is a definitive answer, not the uncertainty the negative cache exists for', async () => {
+    const baseUrl = await serve((req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+
+    expect(await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000 })).toBe('');
+    // ttlMs: 0 forces the (already-fresh) POSITIVE cache to be treated as
+    // expired, so this call reaches all the way back to the network/status
+    // handling again. If the first call had wrongly also written a negative
+    // cache entry, this would throw instead of returning '' a second time.
+    expect(await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000, ttlMs: 0 })).toBe('');
+  });
+
+  // The literal reproduction the fix round required: 360 is the reviewer's
+  // own measured count for a never-succeeded source across a 6h outage at a
+  // 60s scheduler tick (360 ticks). Pre-fix, fetchRobots retries the network
+  // on EVERY call when there's no positive cache -- unconditionally, with no
+  // dependency on real elapsed time between calls -- so 360 tight-loop calls
+  // against the pre-fix implementation reproduce exactly 360 real requests.
+  // Post-fix, all 360 calls land inside one negative-cache window (they run
+  // in well under a second of real wall-clock time, far short of any
+  // sane TTL), collapsing to exactly 1 real request -- the same 360 logical
+  // attempts, bounded by the cache rather than retried unconditionally. The
+  // window-boundary-crossing arithmetic itself (1 additional real request
+  // per TTL elapsed, hence ~24 over a real 6h outage at the 15-minute
+  // production default) is proven separately, over real elapsed time, by
+  // "retries the network once the negative-cache window has elapsed" above --
+  // this test and that one together are what establish the bound, since
+  // genuinely waiting 6 real hours in a test is not practical.
+  it('360 rapid calls against a never-succeeded, always-failing origin: unbounded before the fix, bounded to one real request after it', async () => {
+    let hitCount = 0;
+    const baseUrl = await serve((req, res) => {
+      hitCount++;
+      res.writeHead(503);
+      res.end();
+    });
+
+    const TICKS = 360;
+    for (let i = 0; i < TICKS; i++) {
+      await fetchRobots(baseUrl, { negativeCacheTtlMs: 10_000 }).catch(() => {});
+    }
+
+    expect(hitCount).toBe(1);
   });
 });

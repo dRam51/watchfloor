@@ -39,19 +39,40 @@
  *    resolves to `''` meaning no restrictions) means the operator's rules are
  *    UNKNOWN, not absent. Caught specifically (inside its own inner
  *    try/catch, before the generic one) and turned into a `'robots-
- *    unavailable'` outcome. Deliberately does NOT call `recordFailure`:
- *    `fetchRobots` itself already never caches a failure (see its own doc
- *    comment -- "the very next call retries the network"), so layering this
- *    system's exponential content-backoff on top would conflate two
- *    different kinds of trouble (the robots.txt endpoint being briefly
- *    unreachable vs. the source's own content feed failing) and would delay
- *    the next legitimate content poll for a problem that wasn't the content
- *    feed's fault. "Recording the skip" (the brief's own words) means
- *    recording it in THIS cycle's `PollReport` -- which every cycle does,
- *    visibly, for as long as the condition persists -- not mutating
- *    `source_fetch_state`. Disclosed explicitly in the task report as the one
- *    area with real interpretive latitude in an otherwise fully-specified
- *    brief.
+ *    unavailable'` outcome. Deliberately does NOT call `recordFailure`: this
+ *    outcome writes neither `recordSuccess` nor `recordFailure`, so
+ *    `source_fetch_state` is left exactly as it was, and the source's own
+ *    content-feed backoff/cadence is never affected by a problem that was
+ *    never the content feed's fault (the robots.txt endpoint being
+ *    unreachable vs. the source's own feed failing are genuinely different
+ *    kinds of trouble, and layering exponential content-backoff on top of
+ *    the latter for a failure of the former would delay the next legitimate
+ *    content poll for the wrong reason). "Recording the skip" (the brief's
+ *    own words) means recording it in THIS cycle's `PollReport` -- which
+ *    every cycle does, visibly, for as long as the condition persists.
+ *
+ *    **What bounds the retry RATE during an outage is NOT this file.** An
+ *    earlier version of this comment claimed the fix-round-1 cadence gate
+ *    (point 3 of "Fix round 1" below) would bound a `robots-unavailable`
+ *    retry to roughly one attempt per `poll_interval` (e.g. ~24 times over a
+ *    6h outage for a 15m-interval source). That reasoning was wrong, and the
+ *    error was caught in fix round 2's re-review, not by this codebase's own
+ *    tests: the cadence gate keys on `FetchState.lastSuccessAt`, which this
+ *    outcome never writes (see above) -- so the gate never engages during a
+ *    `robots-unavailable` outage at all, and a source retries `fetchRobots`
+ *    on literally every scheduler tick for the outage's full duration.
+ *    Measured: 360 real network requests over a 6h outage at a 60s tick for
+ *    one source, no better than before the cadence gate existed. The actual
+ *    fix is a short negative-cache TTL inside `fetchRobots` itself
+ *    (`src/fetch/robots.ts`, fix round 2) -- the right layer for it, since
+ *    that cache is origin-keyed and process-global, so it also dedupes
+ *    retries across every OTHER source sharing the same down origin, which
+ *    no fix in this file could do (a scheduler has no visibility into which
+ *    sources share an origin with the one it is currently polling). The
+ *    judgment that content-feed backoff should not apply to this outcome
+ *    remains correct; it simply needed a rate bound that belongs in the
+ *    caching layer, not an argument that the caller's own retry behavior was
+ *    already safe.
  *
  * 3. `poll_interval: "0m"` is a live landmine: a zero delay makes
  *    `recordFailure` compute `nextEligibleAt = now`, so a FAILING source
@@ -139,15 +160,28 @@
  * mechanism `source_fetch_state` has, so a denial now goes through it (via
  * `safePollIntervalMs`, same as every other failure path), applying normal
  * backoff. Deliberately NOT applied to `robots-unavailable` just above it
- * (upheld, Finding 5): a denial is a confirmed, stable answer (the
- * operator's rules were read successfully and clearly say no); an
- * unreachable robots.txt is transient uncertainty with no analogous upside
- * to backing off, since `fetchRobots` already retries on its own.
+ * (upheld, Finding 5, but see "Fix round 2" below for a correction to WHY):
+ * a denial is a confirmed, stable answer (the operator's rules were read
+ * successfully and clearly say no); an unreachable robots.txt is transient
+ * uncertainty this file cannot usefully back off from.
  *
  * Minor -- `skippedEntries`/`capped` are now tracked in outer-scoped
  * variables (alongside `insertedCount`) so a 'failure' outcome reached after
  * `adapter.fetch` succeeded carries them too, rather than silently dropping
  * a partially-failed batch's adapter-reported counts.
+ *
+ * ---------------------------------------------------------------------------
+ * Fix round 2 -- one reopened finding
+ * ---------------------------------------------------------------------------
+ * Reopened: point 2 above (`robots-unavailable`, upheld in fix round 1 on
+ * the premise that the fix-round-1 cadence gate would bound the retry rate
+ * to roughly one attempt per `poll_interval`) was approved on a false
+ * premise -- see point 2's own updated text above for the full correction.
+ * The underlying judgment (no `recordFailure` for this outcome) remains
+ * correct; the rate bound it was mistakenly credited with now genuinely
+ * exists, but lives in `src/fetch/robots.ts`'s own negative cache, not here.
+ * No code in THIS file changed for this fix -- only this comment, which
+ * previously stated the incorrect reasoning as fact.
  */
 
 import type { Db } from '../db/connection.ts';

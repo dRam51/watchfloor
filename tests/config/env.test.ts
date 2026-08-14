@@ -78,6 +78,21 @@ describe('WF_SCHEDULER_TICK_INTERVAL_MS', () => {
   it('rejects a negative value', () => {
     expect(() => loadEnv({ ...valid, WF_SCHEDULER_TICK_INTERVAL_MS: '-1000' })).toThrow(EnvError);
   });
+
+  // M1 task 10 fix round 2, small item: Node's setTimeout/setInterval delay
+  // is a 32-bit signed integer internally -- a value above 2^31-1 does not
+  // throw, it silently clamps to 1ms (confirmed empirically), reproducing
+  // the exact busy-loop hazard .positive() above exists to prevent, from the
+  // opposite end of the range.
+  it('accepts the maximum value setTimeout can represent (2^31 - 1)', () => {
+    expect(loadEnv({ ...valid, WF_SCHEDULER_TICK_INTERVAL_MS: '2147483647' }).WF_SCHEDULER_TICK_INTERVAL_MS).toBe(
+      2_147_483_647,
+    );
+  });
+
+  it('rejects a value one above the maximum setTimeout can represent -- Node silently clamps this to a 1ms tick otherwise', () => {
+    expect(() => loadEnv({ ...valid, WF_SCHEDULER_TICK_INTERVAL_MS: '2147483648' })).toThrow(EnvError);
+  });
 });
 
 describe('WF_VAULT_ROOT path validation', () => {

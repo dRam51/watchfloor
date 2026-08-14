@@ -413,6 +413,25 @@ export const PRODUCT_TOKEN = USER_AGENT.split('/')[0]!;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24h, per the brief
 const DEFAULT_TIMEOUT_MS = 10_000; // matches src/fetch/http.ts's own default (duplicated, not imported)
 
+/**
+ * M1 task 10, fix round 2 (reopened finding): how long a FAILED fetch
+ * (5xx, timeout, transport failure) is remembered before the next call is
+ * allowed to hit the network again. See `failureCache`'s doc comment for the
+ * full incident this closes -- in short, a caller that retries on a fixed
+ * tick (src/scheduler/run.ts) with no cache here retries the network on
+ * EVERY call for the entire duration of an outage, unconditionally, with no
+ * relationship to how long the outage has actually been going on.
+ *
+ * 15 minutes. Chosen to land in the middle of the reviewer's own defensible
+ * 10-30 minute range: it bounds a 6-hour outage to roughly 24 real requests
+ * total PER ORIGIN (not per source -- see `failureCache`), a two-order-of-
+ * magnitude reduction from the 360 measured pre-fix (60s scheduler tick x
+ * 360 ticks in 6h, every one a real request). Short enough that a host which
+ * recovers mid-outage is noticed within about 15 minutes, not up to a full
+ * day the way the 24h SUCCESS cache would if reused here unmodified.
+ */
+const DEFAULT_NEGATIVE_CACHE_TTL_MS = 15 * 60 * 1000;
+
 export interface FetchRobotsOptions {
   /**
    * Cache lifetime in ms. Defaults to 24h so a long-lived scheduler process
@@ -424,6 +443,14 @@ export interface FetchRobotsOptions {
   ttlMs?: number;
   /** Whole-request deadline in ms. Default 10000. */
   timeoutMs?: number;
+  /**
+   * Negative-cache lifetime in ms for a FAILED fetch. Defaults to 15
+   * minutes -- see `DEFAULT_NEGATIVE_CACHE_TTL_MS`'s own doc comment.
+   * Overridable for the same reason `ttlMs` is: a real test cannot wait 15
+   * minutes to prove expiry. Production callers should never need to pass
+   * this.
+   */
+  negativeCacheTtlMs?: number;
 }
 
 /**
@@ -465,6 +492,53 @@ interface CacheEntry {
 // backfilling with persistence.
 const cache = new Map<string, CacheEntry>();
 
+interface FailureCacheEntry {
+  reason: string;
+  failedAt: number;
+}
+
+/**
+ * M1 task 10, fix round 2 (reopened finding, CRITICAL to Task 11's live
+ * run). A short, SEPARATE negative cache for a failed fetch -- 5xx, timeout,
+ * or a transport-level failure -- keyed the same way as the success `cache`
+ * above (one entry per origin).
+ *
+ * **The incident this closes.** The original version of this function
+ * deliberately never cached a failure at all ("the very next call retries
+ * the network" -- see the module's own now-corrected reasoning below). That
+ * was fine in isolation, but combined with src/scheduler/run.ts's own
+ * (correct) decision not to apply recordFailure/backoff to a
+ * robots-unavailable outcome, there was NO mechanism anywhere in the system
+ * bounding the retry rate during an outage: a source polled on a fixed
+ * scheduler tick (60s) would retry this function on literally EVERY tick,
+ * for the entire outage, with no relationship between elapsed outage time
+ * and request count. Measured during review: 360 real requests over a
+ * 6-hour outage for a single never-succeeded source, and -- because this
+ * cache is origin-keyed, not source-keyed -- 30 requests for just 3 sources
+ * sharing one down origin across 10 ticks, with zero deduplication between
+ * them despite all asking the identical question ("what does this ONE
+ * robots.txt say").
+ *
+ * **Why the fix belongs HERE, not in the scheduler.** A scheduler-side fix
+ * (e.g. applying backoff to a robots-unavailable outcome) could bound the
+ * rate per SOURCE, but has no visibility into which other sources share an
+ * origin with the one currently failing -- it cannot deduplicate the
+ * 3-sources-1-origin case at all. This cache already IS origin-keyed and
+ * process-global (see `cache` above, same design), so fixing it here gets
+ * cross-source deduplication for free, as a consequence of the existing
+ * architecture rather than a new mechanism.
+ *
+ * **What is deliberately unchanged.** This does NOT undermine the
+ * deny-under-uncertainty principle: a cached failure still throws
+ * `RobotsUnavailableError` on every call within the window (see
+ * `fetchRobots` below) -- it is never silently read as "no restrictions" the
+ * way an actual 4xx is. It also does not touch the 4xx case at all: a 4xx is
+ * a DEFINITIVE answer (no robots.txt exists), not the uncertainty this cache
+ * exists to bound, and continues to populate only the success `cache` above,
+ * exactly as before.
+ */
+const failureCache = new Map<string, FailureCacheEntry>();
+
 function describeTransportFailure(err: unknown, timedOut: boolean, timeoutMs: number): string {
   if (timedOut) return `timed out after ${timeoutMs}ms`;
   return err instanceof Error ? err.message : String(err);
@@ -478,31 +552,54 @@ function describeTransportFailure(err: unknown, timedOut: boolean, timeoutMs: nu
  * key, so `https://apnews.com` and `https://apnews.com/` share one entry.
  *
  * **Outcome by status, and why:**
- *  - **2xx** -- the body is returned and cached for `ttlMs`.
+ *  - **2xx** -- the body is returned, cached for `ttlMs`, and any prior
+ *    negative-cache entry for this origin is cleared (see `failureCache`) --
+ *    a fresh success is authoritative over a stale failure memory.
  *  - **4xx** (404, 401, 403, everything in between) -- treated as a
  *    definitive "no robots.txt exists", resolving to `''` (which
  *    `isAllowed` then reads as allow-all -- see its doc comment), and THAT
- *    result is cached too. This mirrors documented real-world crawler
- *    behavior -- Google explicitly treats 401/403 the same as a plain 404
- *    here -- because a 4xx says the resource at this path isn't there for
- *    us to read, which is a clear signal, not an ambiguous one. It is not
- *    the site telling us access is restricted; robots.txt disallow rules
- *    are what tell us that, and there are none to read.
+ *    result is cached too (also clearing any prior negative-cache entry).
+ *    This mirrors documented real-world crawler behavior -- Google
+ *    explicitly treats 401/403 the same as a plain 404 here -- because a
+ *    4xx says the resource at this path isn't there for us to read, which
+ *    is a clear signal, not an ambiguous one. It is not the site telling us
+ *    access is restricted; robots.txt disallow rules are what tell us that,
+ *    and there are none to read.
  *  - **5xx, a redirect that never resolves to a final response, or the
  *    request failing outright** (timeout, DNS, connection refused) -- this
  *    IS genuine uncertainty: the operator may have an opinion we simply
  *    couldn't read. Per the module's deny-under-uncertainty principle, this
  *    throws `RobotsUnavailableError` rather than resolving to either
- *    answer, and is deliberately NOT cached -- an outage should not force a
- *    full day of denial once the host recovers; the very next call retries
- *    the network. Unlike some crawlers' extended stale-cache fallback for a
- *    long-unreachable host, there is no fallback-to-allow here: with no
- *    persistent store, "unreachable" always means "deny, retry later", with
- *    no time-boxed escape hatch. Revisit only if a real source spends an
- *    extended period unreachable in practice.
+ *    answer.
+ *
+ *    **Fix round 2 (reopened finding):** an EARLIER version of this
+ *    function deliberately never cached this outcome at all ("an outage
+ *    should not force a full day of denial... the very next call retries
+ *    the network"). That reasoning covered the success cache's 24h TTL
+ *    correctly, but missed that with NO time-boxing at all, a caller on a
+ *    fixed retry tick (src/scheduler/run.ts's scheduler, which deliberately
+ *    does not apply its own backoff to this outcome -- see that file's
+ *    module doc comment) retries the network on every single call for the
+ *    ENTIRE outage: measured at 360 real requests over a 6h outage for one
+ *    source, with zero deduplication across sources sharing an origin. This
+ *    now DOES cache for a short, separate `negativeCacheTtlMs` (15 minutes
+ *    by default -- see `failureCache`'s doc comment for the full incident
+ *    and reasoning) -- bounding the retry rate without reintroducing the
+ *    thing the original reasoning correctly wanted to avoid (a full DAY of
+ *    denial after a brief blip): a cached failure still throws
+ *    `RobotsUnavailableError` on every call within the window, never
+ *    silently reads as "allowed", and self-clears within 15 minutes of the
+ *    last real attempt, not up to 24 hours. Unlike some crawlers' extended
+ *    stale-cache fallback for a long-unreachable host, there is still no
+ *    fallback-to-allow: with no persistent store, "unreachable" always
+ *    means "deny, retry later" -- only how SOON "later" is has changed.
  */
 export async function fetchRobots(origin: string, opts: FetchRobotsOptions = {}): Promise<string> {
-  const { ttlMs = DEFAULT_TTL_MS, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const {
+    ttlMs = DEFAULT_TTL_MS,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    negativeCacheTtlMs = DEFAULT_NEGATIVE_CACHE_TTL_MS,
+  } = opts;
 
   const target = new URL('/robots.txt', origin);
   const cacheKey = target.origin;
@@ -510,6 +607,18 @@ export async function fetchRobots(origin: string, opts: FetchRobotsOptions = {})
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < ttlMs) {
     return cached.body;
+  }
+
+  // Fix round 2: consulted only once the (long-lived, 24h) success cache
+  // above has nothing fresh to offer -- a fresh positive entry always wins,
+  // so a negative entry can only ever be fresh here when the positive entry
+  // is ALREADY stale or absent (see failureCache's doc comment for why the
+  // two can never both be fresh at once). Rejecting here, before any network
+  // call, is what actually bounds the retry rate and dedupes across every
+  // caller sharing this origin.
+  const recentFailure = failureCache.get(cacheKey);
+  if (recentFailure && Date.now() - recentFailure.failedAt < negativeCacheTtlMs) {
+    throw new RobotsUnavailableError(cacheKey, `${recentFailure.reason} (cached failure, not re-fetched yet)`);
   }
 
   // Covers the whole operation, connect through final byte: if this fires
@@ -526,11 +635,9 @@ export async function fetchRobots(origin: string, opts: FetchRobotsOptions = {})
       redirect: 'follow',
     });
   } catch (err) {
-    throw new RobotsUnavailableError(
-      cacheKey,
-      describeTransportFailure(err, timeoutSignal.aborted, timeoutMs),
-      { cause: err },
-    );
+    const reason = describeTransportFailure(err, timeoutSignal.aborted, timeoutMs);
+    failureCache.set(cacheKey, { reason, failedAt: Date.now() });
+    throw new RobotsUnavailableError(cacheKey, reason, { cause: err });
   }
 
   if (response.ok) {
@@ -549,13 +656,12 @@ export async function fetchRobots(origin: string, opts: FetchRobotsOptions = {})
     try {
       body = await response.text();
     } catch (err) {
-      throw new RobotsUnavailableError(
-        cacheKey,
-        describeTransportFailure(err, timeoutSignal.aborted, timeoutMs),
-        { cause: err },
-      );
+      const reason = describeTransportFailure(err, timeoutSignal.aborted, timeoutMs);
+      failureCache.set(cacheKey, { reason, failedAt: Date.now() });
+      throw new RobotsUnavailableError(cacheKey, reason, { cause: err });
     }
     cache.set(cacheKey, { body, fetchedAt: Date.now() });
+    failureCache.delete(cacheKey); // fix round 2: a fresh success is authoritative over any stale failure memory
     return body;
   }
 
@@ -563,8 +669,11 @@ export async function fetchRobots(origin: string, opts: FetchRobotsOptions = {})
 
   if (response.status >= 400 && response.status < 500) {
     cache.set(cacheKey, { body: '', fetchedAt: Date.now() });
+    failureCache.delete(cacheKey); // fix round 2: same as the 2xx case -- a definitive 4xx supersedes any prior failure memory
     return '';
   }
 
-  throw new RobotsUnavailableError(cacheKey, `responded ${response.status} ${response.statusText}`);
+  const reason = `responded ${response.status} ${response.statusText}`;
+  failureCache.set(cacheKey, { reason, failedAt: Date.now() });
+  throw new RobotsUnavailableError(cacheKey, reason);
 }
