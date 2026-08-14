@@ -1,0 +1,115 @@
+{
+  "_README": [
+    "Response HEADER sets captured live from api.github.com on 2026-08-14, all",
+    "UNAUTHENTICATED (no PAT existed on this machine and none was requested).",
+    "Header names are lowercased as `fetch` normalizes them; values are verbatim",
+    "except where a `_redacted` note says otherwise.",
+    "",
+    "These exist so tests/fetch/github.test.ts can serve REAL GitHub header shapes",
+    "from a real local http server, per the project's no-mocks rule. Inventing",
+    "these by hand is exactly what would have hidden the two findings below.",
+    "",
+    "TWO FINDINGS THESE FIXTURES PIN, both contradicting the M4a plan's assumptions:",
+    "",
+    "1. `search_repositories_200` carries NO etag and NO last-modified, and says",
+    "   `cache-control: no-cache`. The Search API does not support conditional",
+    "   requests at all. `repo_200` (Core API) does carry both. So the plan's",
+    "   'wire ETag through' applies to Core only -- there is nothing to wire on",
+    "   the endpoint the repos lane's search actually calls.",
+    "",
+    "2. `repo_304` was produced by replaying `repo_200`'s etag as If-None-Match.",
+    "   x-ratelimit-used went 1 -> 2 -> 3 -> 4 across four such replays, i.e. a 304",
+    "   DID consume budget. GitHub documents 304s as exempt; that exemption was NOT",
+    "   observed on the unauthenticated path, which is the path that has the 60/hour",
+    "   ceiling. Whether it holds WITH a PAT is unverified here -- no PAT exists.",
+    "",
+    "3. `graphql_403` is a real primary-rate-limit-exceeded response, captured on the",
+    "   first and only unauthenticated GraphQL request ever made from this machine.",
+    "   `x-ratelimit-limit: 0` is not exhaustion -- the GraphQL budget is ZERO",
+    "   unauthenticated. This is why src/fetch/github.ts is REST-only. Note it",
+    "   carries NO retry-after: primary limits signal via remaining/reset, and",
+    "   retry-after is the SECONDARY-limit signal. The client must read both."
+  ],
+
+  "repo_200": {
+    "_request": "GET https://api.github.com/repos/modelcontextprotocol/servers",
+    "_status": 200,
+    "cache-control": "public, max-age=60, s-maxage=60",
+    "content-type": "application/json; charset=utf-8",
+    "etag": "W/\"39861b3271d5fb8b053832df20f2aeb9f2ac99b88f6a51ccdf24197f663b5013\"",
+    "last-modified": "Fri, 14 Aug 2026 21:02:14 GMT",
+    "x-ratelimit-limit": "60",
+    "x-ratelimit-remaining": "59",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "1786747836",
+    "x-github-media-type": "github.v3; format=json"
+  },
+
+  "repo_304": {
+    "_request": "GET https://api.github.com/repos/modelcontextprotocol/servers with If-None-Match: <repo_200's etag>",
+    "_status": 304,
+    "_note": "Body is empty by definition. `used` incremented -- see finding 2 above.",
+    "etag": "W/\"39861b3271d5fb8b053832df20f2aeb9f2ac99b88f6a51ccdf24197f663b5013\"",
+    "x-ratelimit-limit": "60",
+    "x-ratelimit-remaining": "58",
+    "x-ratelimit-used": "2",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "1786747836"
+  },
+
+  "search_repositories_200": {
+    "_request": "GET https://api.github.com/search/repositories?q=topic:mcp+pushed:>2026-07-31&sort=updated&order=desc&per_page=3",
+    "_status": 200,
+    "_note": "No etag. No last-modified. Deliberately recorded as absent, not omitted for brevity.",
+    "cache-control": "no-cache",
+    "content-type": "application/json; charset=utf-8",
+    "link": "<https://api.github.com/search/repositories?q=topic%3Amcp+pushed%3A%3E2026-07-31&sort=updated&order=desc&per_page=3&page=2>; rel=\"next\", <https://api.github.com/search/repositories?q=topic%3Amcp+pushed%3A%3E2026-07-31&sort=updated&order=desc&per_page=3&page=334>; rel=\"last\"",
+    "x-ratelimit-limit": "10",
+    "x-ratelimit-remaining": "9",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "search",
+    "x-ratelimit-reset": "1786744290",
+    "x-github-api-version-selected": "2022-11-28"
+  },
+
+  "graphql_403": {
+    "_request": "POST https://api.github.com/graphql (unauthenticated)",
+    "_status": 403,
+    "_redacted": "The real body named this machine's public IPv4 address. Replaced with 192.0.2.1 (RFC 5737 TEST-NET-1) because this repository is PUBLIC. Nothing else in the body was altered.",
+    "content-type": "application/json; charset=utf-8",
+    "x-ratelimit-limit": "0",
+    "x-ratelimit-remaining": "0",
+    "x-ratelimit-used": "0",
+    "x-ratelimit-resource": "graphql",
+    "x-ratelimit-reset": "1786747911",
+    "_body": {
+      "message": "API rate limit exceeded for 192.0.2.1. (But here's the good news: Authenticated requests get a higher rate limit. Check out the documentation for more details.)",
+      "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"
+    }
+  },
+
+  "secondary_limit_429": {
+    "_status": 429,
+    "_note": [
+      "NOT captured live. Deliberately so: producing one means abusing the API to",
+      "trip a secondary limit, which this project's politeness rule forbids and",
+      "which the M4a plan explicitly rules out ('respect rate-limit headers rather",
+      "than discovering limits by hitting them'). Header names and the retry-after",
+      "semantics are taken from GitHub's published documentation, and the client",
+      "must handle them because the real API will send them. Flagged here so no",
+      "future reader mistakes this one entry for observed evidence."
+    ],
+    "content-type": "application/json; charset=utf-8",
+    "retry-after": "60",
+    "x-ratelimit-limit": "60",
+    "x-ratelimit-remaining": "23",
+    "x-ratelimit-used": "37",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "1786747836",
+    "_body": {
+      "message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+      "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api"
+    }
+  }
+}

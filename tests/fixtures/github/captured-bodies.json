@@ -1,0 +1,128 @@
+{
+  "_README": "Real responses captured live from api.github.com on 2026-08-14 (unauthenticated). Bodies are TRIMMED to the fields Watchfloor reads; headers are verbatim except where noted. No credential was used or is present: every request was unauthenticated.",
+  "rate_limit_body": {
+    "code_search": {
+      "limit": 60,
+      "remaining": 56,
+      "reset": 1786747836,
+      "used": 4
+    },
+    "core": {
+      "limit": 60,
+      "remaining": 56,
+      "reset": 1786747836,
+      "used": 4
+    },
+    "graphql": {
+      "limit": 0,
+      "remaining": 0,
+      "reset": 1786747880,
+      "used": 0
+    },
+    "integration_manifest": {
+      "limit": 5000,
+      "remaining": 5000,
+      "reset": 1786747880,
+      "used": 0
+    },
+    "search": {
+      "limit": 10,
+      "remaining": 10,
+      "reset": 1786744340,
+      "used": 0
+    }
+  },
+  "repo_body": {
+    "id": 890668799,
+    "node_id": "R_kgDONRaG_w",
+    "name": "servers",
+    "full_name": "modelcontextprotocol/servers",
+    "html_url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Model Context Protocol Servers",
+    "fork": false,
+    "created_at": "2024-11-19T01:10:17Z",
+    "updated_at": "2026-08-14T21:02:14Z",
+    "pushed_at": "2026-08-10T02:41:59Z",
+    "stargazers_count": 89562,
+    "language": "TypeScript",
+    "archived": false,
+    "disabled": false,
+    "open_issues_count": 510,
+    "license": {
+      "key": "other",
+      "spdx_id": "NOASSERTION",
+      "name": "Other"
+    },
+    "topics": [],
+    "default_branch": "main"
+  },
+  "search_body": {
+    "total_count": 20920,
+    "incomplete_results": false,
+    "items": [
+      {
+        "id": 1215081938,
+        "node_id": "R_kgDOSGyt0g",
+        "name": "hlido-public",
+        "full_name": "ankitkapur1992-hlido/hlido-public",
+        "html_url": "https://github.com/ankitkapur1992-hlido/hlido-public",
+        "description": "Independent, evidence-backed reviews of AI agents — machine-readable scorecards, claim audits, C2PA-signed proof. Public data mirror of hlido.eu",
+        "fork": false,
+        "created_at": "2026-04-19T13:06:47Z",
+        "updated_at": "2026-08-14T21:50:29Z",
+        "pushed_at": "2026-08-14T21:50:30Z",
+        "stargazers_count": 0,
+        "language": "HTML",
+        "archived": false,
+        "disabled": false,
+        "open_issues_count": 0,
+        "license": {
+          "key": "mit",
+          "spdx_id": "MIT",
+          "name": "MIT License"
+        },
+        "topics": [
+          "agent-evaluation",
+          "ai-agents",
+          "benchmark",
+          "dataset",
+          "mcp",
+          "reviews",
+          "trust"
+        ],
+        "default_branch": "main"
+      },
+      {
+        "id": 1333173519,
+        "node_id": "R_kgDOT3adDw",
+        "name": "notebooklm-curator",
+        "full_name": "furkancakmakcreative/notebooklm-curator",
+        "html_url": "https://github.com/furkancakmakcreative/notebooklm-curator",
+        "description": "MCP server for auditing and pruning NotebookLM source libraries by freshness.",
+        "fork": false,
+        "created_at": "2026-08-13T13:53:55Z",
+        "updated_at": "2026-08-14T21:50:28Z",
+        "pushed_at": "2026-08-14T21:50:13Z",
+        "stargazers_count": 0,
+        "language": "JavaScript",
+        "archived": false,
+        "disabled": false,
+        "open_issues_count": 0,
+        "license": {
+          "key": "mit",
+          "spdx_id": "MIT",
+          "name": "MIT License"
+        },
+        "topics": [
+          "ai-tools",
+          "browser-automation",
+          "javascript",
+          "mcp",
+          "model-context-protocol",
+          "notebooklm"
+        ],
+        "default_branch": "master"
+      }
+    ]
+  }
+}
