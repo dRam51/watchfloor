@@ -3,6 +3,7 @@ import { createServer, type RequestListener, type Server } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { jsonAdapter, JsonParseError, UnknownJsonSourceError } from '../../src/adapters/json.ts';
+import { canonicalizeUrl } from '../../src/normalize/url.ts';
 import type { Source } from '../../src/sources/load.ts';
 import type { FetchState } from '../../src/db/fetchState.ts';
 
@@ -106,7 +107,7 @@ describe('jsonAdapter', () => {
   // the real shape its API returns, not just a hand-imagined one.
   // -------------------------------------------------------------------------
   describe('real fixtures (captured live), one per registered source', () => {
-    it('parses cisa-kev: { vulnerabilities: [...] }, url constructed from cveID via NVD', async () => {
+    it('parses cisa-kev: { vulnerabilities: [...] }, url constructed from cveID on CISA\'s own catalog page', async () => {
       const baseUrl = await serve((_req, res) => {
         res.writeHead(200, {
           'Content-Type': 'application/json',
@@ -127,9 +128,14 @@ describe('jsonAdapter', () => {
 
       const first = result.items[0]!;
       // No first-party link field exists on a KEV entry -- url is
-      // constructed from cveID via NVD's own per-CVE page. See json.ts's
-      // module doc comment for why.
-      expect(first.url).toBe('https://nvd.nist.gov/vuln/detail/CVE-2026-20349');
+      // constructed from cveID on CISA's own catalog page, filtered via its
+      // real `field_cve` form field (verified live -- see json.ts's
+      // cisaKevUrl doc comment). Deliberately NOT nvd.nist.gov (fix round 1,
+      // Finding 1) -- nvd-cve below uses that host, and the two must never
+      // collide on the same CVE.
+      expect(first.url).toBe(
+        'https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-20349',
+      );
       expect(first.title).toBe(
         'Cisco Secure Firewall Adaptive Security Appliance (ASA) and Secure Firewall Threat Defense (FTD) Heap Inspection Vulnerability',
       );
@@ -277,7 +283,7 @@ describe('jsonAdapter', () => {
       expect(result.skipped).toBe(4);
       expect(result.items.map((i) => i.title).sort()).toEqual(['Good One', 'Good Two']);
       expect(result.items.find((i) => i.title === 'Good Two')!.url).toBe(
-        'https://nvd.nist.gov/vuln/detail/CVE-2026-0005',
+        'https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-0005',
       );
     });
 
@@ -692,6 +698,99 @@ describe('jsonAdapter', () => {
       const result = await jsonAdapter.fetch(makeSource({ id: 'cisa-kev', url: `${baseUrl}/feed` }), priorState);
 
       expect(result.etag).toBe('"fresher-etag"');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Fix round 1 regressions.
+  // -------------------------------------------------------------------------
+  describe('fix round 1 regressions', () => {
+    describe('Finding 1 (CRITICAL): cisa-kev/nvd-cve must never construct the same URL for the same CVE', () => {
+      it('canonicalizeUrl(cisa-kev url) !== canonicalizeUrl(nvd-cve url) for the identical CVE id', async () => {
+        const cveId = 'CVE-2026-30000';
+
+        const kevBody = JSON.stringify({
+          vulnerabilities: [
+            {
+              cveID: cveId,
+              vulnerabilityName: 'Shared CVE, CISA Side',
+              dateAdded: '2026-01-01',
+              shortDescription: 'kev desc',
+            },
+          ],
+        });
+        const kevBaseUrl = await serveBody(kevBody);
+        const kevResult = await jsonAdapter.fetch(makeSource({ id: 'cisa-kev', url: `${kevBaseUrl}/feed` }), null);
+
+        const nvdBody = JSON.stringify({
+          vulnerabilities: [
+            {
+              cve: {
+                id: cveId,
+                published: '2026-01-01T00:00:00.000',
+                descriptions: [{ lang: 'en', value: 'nvd desc' }],
+              },
+            },
+          ],
+        });
+        const nvdBaseUrl = await serveBody(nvdBody);
+        const nvdResult = await jsonAdapter.fetch(makeSource({ id: 'nvd-cve', url: `${nvdBaseUrl}/feed` }), null);
+
+        expect(kevResult.items).toHaveLength(1);
+        expect(nvdResult.items).toHaveLength(1);
+
+        const kevRawUrl = kevResult.items[0]!.url;
+        const nvdRawUrl = nvdResult.items[0]!.url;
+
+        // The requirement that actually matters is downstream of
+        // canonicalizeUrl, since THAT is what deriveItemKey
+        // (src/domain/item.ts) hashes -- asserting on the raw urls alone
+        // would not prove the fix, since canonicalizeUrl could in principle
+        // normalize two different-looking urls back together (it doesn't
+        // here, but the point of this test is not to assume that).
+        expect(canonicalizeUrl(kevRawUrl)).not.toBe(canonicalizeUrl(nvdRawUrl));
+
+        // Concretely: different hosts entirely, not merely a query-string
+        // detail that happens to differ.
+        expect(new URL(canonicalizeUrl(kevRawUrl)).hostname).toBe('cisa.gov');
+        expect(new URL(canonicalizeUrl(nvdRawUrl)).hostname).toBe('nvd.nist.gov');
+      });
+    });
+
+    describe('Finding 2 (Important): nws-fl-alerts must fall back on a present-but-BLANK field, not just a missing one', () => {
+      it('a blank headline (not merely a missing one) falls back to event, and a blank sent falls back to effective', async () => {
+        const body = JSON.stringify({
+          type: 'FeatureCollection',
+          features: [
+            {
+              id: 'https://api.weather.gov/alerts/urn:oid:blank-headline-not-missing',
+              properties: {
+                headline: '',
+                event: 'Heat Advisory',
+                sent: '',
+                effective: '2026-01-03T00:00:00-04:00',
+              },
+            },
+          ],
+        });
+        const baseUrl = await serveBody(body);
+
+        const result = await jsonAdapter.fetch(makeSource({ id: 'nws-fl-alerts', url: `${baseUrl}/feed` }), null);
+
+        // Before the fix, `asString('') ?? asString(event)` never falls
+        // through -- `??` only triggers on null/undefined, and '' is
+        // neither -- so this entry was wrongly dropped as blank-titled even
+        // though `event` held a perfectly good value.
+        expect(result.items).toHaveLength(1);
+        expect(result.skipped).toBe(0);
+
+        const item = result.items[0]!;
+        expect(item.title).toBe('Heat Advisory');
+        // Same fix, applied to publishedAt for consistency -- harmless
+        // today (a blank becomes null at normalization either way) but must
+        // not silently diverge from the title fix.
+        expect(item.publishedAt).toBe('2026-01-03T00:00:00-04:00');
+      });
     });
   });
 });

@@ -49,27 +49,35 @@
  * ---------------------------------------------------------------------------
  * Two of the five sources -- cisa-kev and nvd-cve -- have no first-party
  * link field on their entries at all (verified against live captures: see
- * each mapper's own doc comment below). Both construct a URL from the CVE
- * id via NVD's own per-CVE page (`https://nvd.nist.gov/vuln/detail/<id>`)
- * rather than leaving `url` unset -- `RawItem.url` is required and
- * non-nullable, unlike `publishedAt`/`summary`/`author`, so there is no
- * "pass through as absent" option the way there is for those fields -- or
- * guessing at one of several unstructured URLs sometimes embedded in a KEV
- * entry's free-text `notes` field. This is a genuine adapter-level judgment
- * call, not a pass-through extraction, and is flagged as such in the task
- * report for review. The alternative -- deriving no url at all -- would
- * drop every single entry from both sources (RawItem.url has no null
- * option), making two of five sources permanently silent forever, which is
- * exactly the failure mode ("a silent empty result is indistinguishable
- * from a quiet day") this milestone exists to catch. One side effect worth
- * flagging explicitly: because both mappers construct the SAME url pattern
- * from a CVE id, the same CVE appearing in both cisa-kev and nvd-cve
- * produces the same canonical_url and therefore the same item_key --
- * unlike every other pair of sources in this milestone, which never collide
- * by construction. Whether that is desirable (cheap cross-source dedupe for
- * free) or surprising (two different sources' fetches versioning the same
- * item_key) is a call for whoever designs dedupe in a later milestone, not
- * this adapter -- noted here so it isn't discovered by surprise.
+ * each mapper's own doc comment below). Both construct a URL rather than
+ * leaving it unset -- `RawItem.url` is required and non-nullable, unlike
+ * `publishedAt`/`summary`/`author`, so there is no "pass through as absent"
+ * option the way there is for those fields -- or guessing at one of several
+ * unstructured URLs sometimes embedded in a KEV entry's free-text `notes`
+ * field. This is a genuine adapter-level judgment call, not a pass-through
+ * extraction, and is flagged as such in the task report for review.
+ *
+ * Fix round 1, Finding 1 (CRITICAL): an earlier version of this file had
+ * BOTH mappers construct the identical NVD per-CVE URL
+ * (`https://nvd.nist.gov/vuln/detail/<id>`), reasoning that sharing one
+ * stable, first-party authority was safer than guessing. That reasoning was
+ * wrong, and the consequence is not hypothetical: `deriveItemKey`
+ * (src/domain/item.ts) is `sha256(canonicalUrl)`, and `getCurrentItem`
+ * resolves ties with `order by fetched_at desc, rowid desc limit 1` -- so
+ * the same CVE fetched from both sources would make whichever fetched LAST
+ * the only version any reader ever sees, silently discarding the other
+ * source's entirely different fields (CISA's own `dueDate`/
+ * `knownRansomwareCampaignUse`/`requiredAction`/`notes` vs. NVD's
+ * `cvssMetricV2`/`weaknesses`/`configurations`/`references` -- neither
+ * schema contains the other's data). Under append-only storage this is also
+ * a one-way door: catching it after real data has landed fragments each
+ * affected CVE's history into two unrelated `item_key` chains with no way
+ * to merge them back. `nvd-cve` keeps the NVD url below (genuinely
+ * first-party, and confirmed against the live fixture that no `references`
+ * entry already points there -- not assumed); `cisa-kev` now builds its own
+ * url on CISA's own domain instead -- see `cisaKevUrl`'s doc comment for
+ * exactly which one, including why the first shape considered for it
+ * doesn't actually work.
  */
 
 import { politeFetch, type FetchResult } from '../fetch/http.ts';
@@ -143,6 +151,24 @@ function isBlank(value: string | null): boolean {
   return value === null || value.trim() === '';
 }
 
+/**
+ * The first of the two that is non-blank, or `null` if both are blank or
+ * absent. Unlike `a ?? b`, a present-but-EMPTY string on the left does NOT
+ * suppress the fallback -- `??` only triggers on `null`/`undefined`, and an
+ * empty string is neither. Needed anywhere a JSON field can legitimately be
+ * present-but-empty rather than strictly absent.
+ *
+ * Fix round 1, Finding 2: `parseNwsFlAlertEntry` below originally used
+ * `asString(properties.headline) ?? asString(properties.event)` directly,
+ * which meant a real alert with `headline: ''` and a perfectly good `event`
+ * was wrongly dropped as blank-titled instead of falling back -- the same
+ * mistake `parseHnAlgoliaEntry`'s url fallback above never made, since it
+ * was already written with an explicit `isBlank` check rather than `??`.
+ */
+function firstNonBlank(a: string | null, b: string | null): string | null {
+  return !isBlank(a) ? a : b;
+}
+
 // ---------------------------------------------------------------------------
 // The per-source-id registry.
 // ---------------------------------------------------------------------------
@@ -195,6 +221,37 @@ function extractArrayField(field: string): JsonSourceMapper['extractEntries'] {
 // ---------------------------------------------------------------------------
 
 /**
+ * CISA's own KEV catalog page, filtered to one CVE via the page's own
+ * `field_cve` exposed-filter field. Built with `URL`/`searchParams` rather
+ * than template-literal interpolation so the value is correctly
+ * percent-encoded regardless of content -- not because a well-formed CVE id
+ * (`CVE-\d{4}-\d{4,}`) ever actually needs it, but because there is no
+ * reason to hand-roll encoding when the platform does it correctly for
+ * free.
+ *
+ * Verified live, twice, against real CVE ids from the fixture:
+ * `?field_cve=<id>` returns 200 and genuinely filters server-side (the
+ * filtered page contains exactly the one requested CVE id; the unfiltered
+ * base page contains 21 distinct ones). `field_cve` is not a guess -- it is
+ * the literal `name` attribute on this page's own catalog-search form
+ * (`<input ... id="edit-field-cve" name="field_cve" ...>`).
+ *
+ * This specific shape replaced a first attempt, `?cve=<id>`, which is
+ * plausible-looking but wrong: verified live, it returns 403, not a
+ * harmless no-op. Isolated the cause before concluding this: a second,
+ * semantically unrelated, harmless probe (`?test=1`, an unrecognized name
+ * with an inert value) 403s identically, which rules out "cve" the
+ * parameter NAME or the CVE-shaped VALUE as the trigger -- this route's WAF
+ * appears to allow only the query parameters the page's own form actually
+ * defines, and rejects any other name outright.
+ */
+function cisaKevUrl(cveId: string): string {
+  const url = new URL('https://www.cisa.gov/known-exploited-vulnerabilities-catalog');
+  url.searchParams.set('field_cve', cveId);
+  return url.href;
+}
+
+/**
  * CISA's KEV catalog entries carry no link of their own -- verified against
  * a live capture (tests/fixtures/adapters/cisa-kev.json, trimmed from the
  * live 1665-entry catalog to 30 -- see the task report): the closest thing,
@@ -202,12 +259,13 @@ function extractArrayField(field: string): JsonSourceMapper['extractEntries'] {
  * advisory link, a BOD-guidance link, occasionally an NVD link) with no
  * reliable, parseable position or count -- extracting "the" URL from it
  * would be guessing, the same failure mode this codebase's date-parsing
- * goes out of its way to avoid (src/normalize/item.ts). `cveID` is
- * guaranteed present (every one of the 1665 live entries had one) and NVD's
- * own per-CVE page is first-party, guaranteed-stable, and requires no
- * interpretation of prose to construct. nvd-cve below uses the identical
- * convention for the identical reason -- see that mapper's doc comment, and
- * the module doc comment above for the cross-source consequence of sharing it.
+ * goes out of its way to avoid (src/normalize/item.ts). `url` is instead
+ * constructed on CISA's OWN domain via `cisaKevUrl` -- see that function's
+ * doc comment for exactly which page and why. An earlier version of this
+ * mapper pointed here at NVD's per-CVE page instead, the same one nvd-cve
+ * below uses -- fix round 1, Finding 1 (see the module doc comment)
+ * establishes why that was a bug, not a simplification: the two sources
+ * must never resolve to the same host for the same CVE.
  */
 function parseCisaKevEntry(rawEntry: unknown): RawItem | null {
   if (!isRecord(rawEntry)) return null;
@@ -217,7 +275,7 @@ function parseCisaKevEntry(rawEntry: unknown): RawItem | null {
   if (isBlank(cveId) || isBlank(title)) return null;
 
   return {
-    url: `https://nvd.nist.gov/vuln/detail/${cveId}`,
+    url: cisaKevUrl(cveId as string),
     title: title as string,
     // "YYYY-MM-DD", no time component -- passed through exactly as written.
     // normalizeItem's ISO-8601 parser requires an explicit time and offset,
@@ -239,10 +297,18 @@ function parseCisaKevEntry(rawEntry: unknown): RawItem | null {
  * of the 5 live entries in the fixture carry one, and the schema doesn't
  * define one) -- the CVE id itself is the only thing every entry is
  * guaranteed to have that identifies it at a glance, so it doubles as
- * `title`. `url` uses the same NVD-detail-page construction as cisa-kev
- * above, for the same reason (no first-party link field exists on the entry
- * itself) -- and here it is doubly apt, since the id used to build the url
- * and the page it points to share the same authority.
+ * `title`. `url` is NVD's own per-CVE detail page
+ * (`https://nvd.nist.gov/vuln/detail/<id>`) -- genuinely first-party here
+ * (the id used to build it and the page it points to share the same
+ * authority), and confirmed against the live fixture that no entry in
+ * `references` already points there, so constructing it duplicates nothing
+ * NVD itself would rather have linked instead.
+ *
+ * Deliberately NOT the same construction cisa-kev uses below, despite both
+ * needing to construct a url for the same underlying reason -- fix round 1,
+ * Finding 1 (see the module doc comment) found that sharing this convention
+ * was a real bug, not a harmless simplification: `cisaKevUrl`'s doc comment
+ * has the detail.
  */
 function parseNvdCveEntry(rawEntry: unknown): RawItem | null {
   if (!isRecord(rawEntry)) return null;
@@ -369,9 +435,15 @@ function parseFederalRegisterEntry(rawEntry: unknown): RawItem | null {
  * Weather Statement issued August 13 at 5:04PM EDT by NWS Jacksonville FL")
  * and is what every one of the 15 live features carries; `event` (the alert
  * type alone, e.g. "Heat Advisory") is the fallback for the rarer alert
- * that omits it -- both fields are part of the CAP spec this API
- * implements. An alert with genuinely neither is skipped rather than
- * titled with nothing.
+ * that OMITS OR BLANKS it -- both fields are part of the CAP spec this API
+ * implements. An alert with genuinely neither is skipped rather than titled
+ * with nothing. Same fallback shape, same reason, for `sent`/`effective`.
+ *
+ * Fix round 1, Finding 2: both fallbacks originally used `??` directly
+ * (`asString(properties.headline) ?? asString(properties.event)`), which
+ * only falls through on `null`/`undefined` -- a present-but-EMPTY string
+ * survives `??` unchanged and never reaches the fallback. `firstNonBlank`
+ * (above) closes that gap for both fields.
  */
 function parseNwsFlAlertEntry(rawEntry: unknown): RawItem | null {
   if (!isRecord(rawEntry)) return null;
@@ -380,17 +452,15 @@ function parseNwsFlAlertEntry(rawEntry: unknown): RawItem | null {
   if (isBlank(url)) return null;
 
   const properties = isRecord(rawEntry.properties) ? rawEntry.properties : {};
-  const title = asString(properties.headline) ?? asString(properties.event);
+  const title = firstNonBlank(asString(properties.headline), asString(properties.event));
   if (isBlank(title)) return null;
 
   return {
     url: url as string,
     title: title as string,
     // ISO-8601 with an explicit numeric offset (e.g. "-04:00") --
-    // normalizeItem parses this natively. `effective` is the fallback for
-    // the (unobserved in the live fixture, but CAP-legal) case where `sent`
-    // is itself absent.
-    publishedAt: asString(properties.sent) ?? asString(properties.effective),
+    // normalizeItem parses this natively.
+    publishedAt: firstNonBlank(asString(properties.sent), asString(properties.effective)),
     summary: asString(properties.description),
     // The issuing forecast office, e.g. "NWS Jacksonville FL" -- the
     // closest CAP concept to a byline this feed has.
