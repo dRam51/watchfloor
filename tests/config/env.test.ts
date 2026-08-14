@@ -56,3 +56,41 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...valid, WF_API_PORT: '9000' }).WF_API_PORT).toBe(9000);
   });
 });
+
+describe('WF_VAULT_ROOT path validation', () => {
+  // An Obsidian vault lives outside the repo by definition (CLAUDE.md
+  // "Portability debt"), so WF_VAULT_ROOT alone is allowed to be absolute.
+  // '/srv/vault/watchfloor' is a placeholder — not a real machine path — so
+  // it doesn't trip check:portability's absolute-path scan.
+  it('accepts an absolute WF_VAULT_ROOT', () => {
+    const env = loadEnv({ ...valid, WF_VAULT_ROOT: '/srv/vault/watchfloor' });
+    expect(env.WF_VAULT_ROOT).toBe('/srv/vault/watchfloor');
+  });
+
+  it('still accepts a relative WF_VAULT_ROOT', () => {
+    const env = loadEnv({ ...valid, WF_VAULT_ROOT: './vault/watchfloor' });
+    expect(env.WF_VAULT_ROOT).toBe('./vault/watchfloor');
+  });
+
+  it('rejects an empty WF_VAULT_ROOT', () => {
+    expect(() => loadEnv({ ...valid, WF_VAULT_ROOT: '' })).toThrow(EnvError);
+  });
+
+  it('rejects a Windows-drive WF_VAULT_ROOT, same as the other path vars', () => {
+    // Forward slash, not backslash: same drive-letter-prefix form the app
+    // schema rejects either way, but backslash-form Windows paths are what
+    // check:portability's scanner flags even inside a comment or string
+    // literal, so a backslash here would fail that check for the wrong
+    // reason (the literal, not the behavior under test).
+    expect(() => loadEnv({ ...valid, WF_VAULT_ROOT: 'C:/vault/watchfloor' })).toThrow(EnvError);
+  });
+
+  // The fix for WF_VAULT_ROOT must not loosen the three path vars that are
+  // still meant to live inside the repo.
+  it.each(['WF_DB_PATH', 'WF_DATA_DIR', 'WF_LOG_DIR'] as const)(
+    'still rejects an absolute %s',
+    (key) => {
+      expect(() => loadEnv({ ...valid, [key]: '/srv/absolute/path' })).toThrow(EnvError);
+    },
+  );
+});
