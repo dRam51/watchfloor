@@ -112,13 +112,22 @@ is the specific mistake that cost this one.
   per-machine installs — they do **not** travel with the repo. Reinstall on any new
   development machine (§12 runbook step 8).
 - `.claude/settings.json` is read-only infrastructure. Do not modify it without being asked.
-- **`AGENTS.md` is a generated mirror of this file and is currently wrong.** Something ports
-  `CLAUDE.md` → `AGENTS.md` by string-replacing "claude" with "Codex", which corrupts the
-  three places the word appears inside a real path or package name: it tells the reader the
-  deny list lives at `.Codex/settings.json` and the skills come from
-  `superpowers@Codex-plugins-official`. Neither exists. **This file is the authority**; treat
-  `AGENTS.md` as untrusted until whatever generates it is fixed or removed. It is untracked
-  and must not be committed in that state.
+- **`AGENTS.md` — resolved 2026-08-14, and nothing regenerates it.** A stale mid-M1 copy of
+  this file, with "claude" string-replaced by "Codex", which corrupted the three places that
+  word appears inside a real path or package name: it claimed the deny list lives at
+  `.Codex/settings.json` and the skills come from `superpowers@Codex-plugins-official`.
+  Neither exists. It sat at the repo root — where `AGENTS.md` is a convention some agent
+  tooling reads as authoritative — and was **not** gitignored, so it was simultaneously
+  readable as instructions and one `git add -A` from being committed as guidance.
+
+  Investigated: **no hook, script, or plugin generates it.** `.claude/settings.json` has no
+  `hooks` key, user-scope settings have none, and this file is the only one in the tree that
+  mentions it. It was a one-off artifact, not a build product, so it will not come back.
+
+  Moved to `attic/AGENTS.md.corrupt-2026-08-14` and gitignored — preserved on this machine,
+  absent from a clone, exactly how the archived first-run database is handled. The repo-root
+  path is deliberately left free: a *correct* `AGENTS.md` could be written there later.
+  **This file remains the authority** regardless.
 
 ## How to run
 

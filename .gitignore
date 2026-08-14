@@ -14,3 +14,24 @@ dist/
 # file at build or test time, so their absence breaks nothing for a clone.
 docs/brief.md
 config/portfolio.yaml
+
+# A corrupted AGENTS.md mirror, moved out of the repo root on 2026-08-14.
+# Kept rather than deleted (standing rule: nothing is deleted, obsolete files go
+# to attic/), but kept OUT of git, the same way the archived first-run database
+# in attic/ is -- present on this machine, absent from a clone.
+#
+# It was a stale copy of CLAUDE.md from mid-M1 with "claude" string-replaced by
+# "Codex", which corrupted the three places that word appears inside a real path
+# or package name: it told the reader the deny list lives at .Codex/settings.json
+# and the skills come from superpowers@Codex-plugins-official. Neither exists.
+#
+# AGENTS.md is a real convention that some agent tooling reads as authoritative,
+# and this file was NOT gitignored while it sat at the repo root -- so it was
+# both readable as instructions and one `git add -A` away from being committed
+# as if it were guidance. Investigated 2026-08-14: no hook, script, or plugin in
+# this repo or in user-scope settings generates it, and CLAUDE.md is the only
+# file that references it, so it will not reappear on its own.
+#
+# The repo-root path is left free deliberately: a correct AGENTS.md could be
+# written there later. CLAUDE.md remains the authority either way.
+attic/AGENTS.md.corrupt-2026-08-14
