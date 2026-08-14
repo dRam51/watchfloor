@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openDb, closeDb, type Db } from '../../src/db/connection.ts';
+import { runMigrations } from '../../src/db/migrate.ts';
 import { deriveItemKey } from '../../src/domain/item.ts';
+import { dismissItem, markItemRead, saveItem } from '../../src/domain/itemState.ts';
 import {
   InvalidRepoError,
   MAX_EXCERPT_LENGTH,
@@ -8,7 +14,10 @@ import {
   intrinsicSuppressionReasons,
   isArchived,
   isFork,
+  isRepoDismissed,
+  isSuppressed,
   repoItemKey,
+  suppressionReasons,
   toExcerpt,
   type RepoInput,
 } from '../../src/domain/repo.ts';
@@ -267,5 +276,150 @@ describe('intrinsicSuppressionReasons', () => {
     // rules with no db handle at all.
     const repo = makeRepo(dmcaInput({ isFork: true, isArchived: true, readmeFirstParagraph: null }));
     expect(intrinsicSuppressionReasons(repo)).not.toContain('dismissed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fourth rule: "anything I've already dismissed".
+//
+// This is a READ against the existing item_state mechanism (src/domain/
+// itemState.ts, db/migrations/0001_init.sql), never a second one -- so these
+// tests dismiss through the real `dismissItem` and read back through the repo
+// predicate, on a real temp-file SQLite database. No mocks, no in-memory
+// shortcut, no fixture table.
+// ---------------------------------------------------------------------------
+
+const open: Db[] = [];
+
+function migratedDb(): Db {
+  const db = openDb(join(mkdtempSync(join(tmpdir(), 'wf-test-')), 'wf.db'));
+  open.push(db);
+  runMigrations(db, join(process.cwd(), 'db', 'migrations'));
+  return db;
+}
+
+afterEach(() => {
+  while (open.length) closeDb(open.pop()!);
+});
+
+const NOW = '2026-08-14T12:00:00.000Z';
+
+describe('isRepoDismissed', () => {
+  it('is false for a repo with no item_state row at all', () => {
+    expect(isRepoDismissed(migratedDb(), makeRepo(dmcaInput()))).toBe(false);
+  });
+
+  it('is true once the repo has been dismissed through the existing mechanism', () => {
+    const db = migratedDb();
+    const repo = makeRepo(dmcaInput());
+    dismissItem(db, repoItemKey(repo), NOW);
+    expect(isRepoDismissed(db, repo)).toBe(true);
+  });
+
+  it('answers before the repo has ever been ingested -- item_state needs no items row', () => {
+    // The whole point of the pre-ingest check: Task 4 can ask "already
+    // dismissed?" before spending a rate-limited enrichment request. That only
+    // works because item_state is keyed on item_key with no foreign key to
+    // items (0001_init.sql), so a dismissal can exist with no item behind it.
+    const db = migratedDb();
+    const repo = makeRepo(dmcaInput());
+    dismissItem(db, repoItemKey(repo), NOW);
+
+    expect(db.prepare('select count(*) as n from items').get()).toEqual({ n: 0 });
+    expect(isRepoDismissed(db, repo)).toBe(true);
+  });
+
+  it('is false for a repo that was read or saved but never dismissed', () => {
+    const db = migratedDb();
+    const repo = makeRepo(dmcaInput());
+    markItemRead(db, repoItemKey(repo), NOW);
+    saveItem(db, repoItemKey(repo), NOW);
+    expect(isRepoDismissed(db, repo)).toBe(false);
+  });
+
+  it('does not leak a dismissal from one repo to another', () => {
+    const db = migratedDb();
+    const dismissed = makeRepo(dmcaInput());
+    const other = makeRepo(dmcaInput({ owner: 'openai', name: 'whisper', githubId: 2 }));
+    dismissItem(db, repoItemKey(dismissed), NOW);
+
+    expect(isRepoDismissed(db, dismissed)).toBe(true);
+    expect(isRepoDismissed(db, other)).toBe(false);
+  });
+
+  it('is NOT triggered by dismissing an HN story that links INTO the repo', () => {
+    // The one real github.com row in the archived first-run corpus is a link
+    // to a file inside github/dmca, ingested by hn-algolia. It has its own
+    // canonical_url and therefore its own item_key, so dismissing the story
+    // says nothing about the repo. This is a real limitation to carry forward,
+    // not a bug: Task 7's "things I haven't already seen on HN" signal has to
+    // match on something other than item_key equality.
+    const db = migratedDb();
+    const repo = makeRepo(dmcaInput());
+    dismissItem(db, DMCA_DEEP_LINK_ITEM_KEY, NOW);
+    expect(isRepoDismissed(db, repo)).toBe(false);
+  });
+});
+
+describe('suppressionReasons', () => {
+  it('is empty for a clean, undismissed repo', () => {
+    expect(suppressionReasons(migratedDb(), makeRepo(dmcaInput()))).toEqual([]);
+  });
+
+  it('appends dismissal to the intrinsic reasons, in a deterministic order', () => {
+    const db = migratedDb();
+    const repo = makeRepo(dmcaInput({ isFork: true, readmeFirstParagraph: null }));
+    dismissItem(db, repoItemKey(repo), NOW);
+    expect(suppressionReasons(db, repo)).toEqual(['fork', 'no_readme', 'dismissed']);
+  });
+
+  it('reports dismissal alone for an otherwise perfectly good repo', () => {
+    const db = migratedDb();
+    const repo = makeRepo(dmcaInput());
+    dismissItem(db, repoItemKey(repo), NOW);
+    expect(suppressionReasons(db, repo)).toEqual(['dismissed']);
+  });
+});
+
+describe('isSuppressed', () => {
+  it('is false for a repo that breaks no rule', () => {
+    expect(isSuppressed(migratedDb(), makeRepo(dmcaInput()))).toBe(false);
+  });
+
+  it('is true if any single rule is broken', () => {
+    const db = migratedDb();
+    expect(isSuppressed(db, makeRepo(dmcaInput({ isFork: true })))).toBe(true);
+    expect(isSuppressed(db, makeRepo(dmcaInput({ isArchived: true })))).toBe(true);
+    expect(isSuppressed(db, makeRepo(dmcaInput({ readmeFirstParagraph: null })))).toBe(true);
+  });
+});
+
+describe('this module never writes', () => {
+  it('leaves item_state and the dismissal signal log untouched when every predicate runs', () => {
+    // "Suppression is a read-time predicate, never a stored verdict" is the
+    // argument for suppressing rather than de-ranking README-less repos. It
+    // only holds if this module genuinely writes nothing, so assert it against
+    // the database rather than trusting the doc comment.
+    const db = migratedDb();
+    const repo = makeRepo(dmcaInput({ isFork: true, isArchived: true, readmeFirstParagraph: null }));
+
+    const before = db.prepare('select count(*) as n from item_state').get();
+    const signalsBefore = db.prepare('select count(*) as n from interest_dismissal_signals').get();
+
+    isRepoDismissed(db, repo);
+    suppressionReasons(db, repo);
+    isSuppressed(db, repo);
+    intrinsicSuppressionReasons(repo);
+
+    expect(db.prepare('select count(*) as n from item_state').get()).toEqual(before);
+    expect(db.prepare('select count(*) as n from interest_dismissal_signals').get()).toEqual(
+      signalsBefore,
+    );
+    expect(before).toEqual({ n: 0 });
+  });
+
+  it('contains no SQL write statement anywhere in its source', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'domain', 'repo.ts'), 'utf8');
+    expect(source).not.toMatch(/insert\s+into|update\s+\w+\s+set|delete\s+from/i);
   });
 });

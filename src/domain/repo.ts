@@ -446,3 +446,69 @@ const INTRINSIC_RULES: ReadonlyArray<{
 export function intrinsicSuppressionReasons(repo: Repo): SuppressionReason[] {
   return INTRINSIC_RULES.filter((rule) => rule.test(repo)).map((rule) => rule.reason);
 }
+
+/**
+ * §4's fourth rule: has the owner already dismissed this repo?
+ *
+ * ## A read, not a second mechanism
+ * This is `getItemState` (`src/domain/itemState.ts`) against the repo's own
+ * `item_key` — the exact same table, the exact same key, and the exact same
+ * "is it dismissed" test (`dismissedAt !== null`) that
+ * `src/api/routes/feed.ts` already applies to every item in every view. There
+ * is no repo-specific dismissal state, no second table, and nothing here that
+ * would need keeping in sync. Dismissing a repo from the lane goes through
+ * `dismissItem` like anything else, which is also what logs the negative
+ * interest signal (`interest_dismissal_signals`) — behavior this function
+ * would silently lose if it had its own store.
+ *
+ * ## It works before the repo has ever been ingested
+ * `item_state` is keyed on `item_key` with no foreign key to `items`, so a
+ * dismissal can exist with no item row behind it and {@link repoItemKey} is
+ * computable from `owner`/`name` alone. That is deliberate and load-bearing:
+ * Task 4 can ask this question *before* Task 6 spends a rate-limited
+ * enrichment request (and a README fetch) on a repo the owner already threw
+ * away.
+ *
+ * ## This is not the enforcement point
+ * `feed.ts` excludes dismissed items from every view before ranking, so the
+ * repos lane inherits "dismissed items never come back" whether or not this is
+ * ever called. Do not remove the filter in `feed.ts` on the strength of this
+ * function existing; do not remove this function on the strength of that
+ * filter. They answer the same question at two different costs.
+ *
+ * ## What it deliberately does NOT catch
+ * Dismissing a Hacker News story that links *into* a repo does not dismiss the
+ * repo: the story canonicalizes to a different URL and therefore a different
+ * `item_key`. Verified against the one real github.com row in the archived
+ * first-run corpus (see the test file). Task 7's "already seen on HN" signal
+ * needs a match rule of its own; it cannot ride on this one.
+ */
+export function isRepoDismissed(db: Db, repo: Repo): boolean {
+  const state = getItemState(db, repoItemKey(repo));
+  return state !== null && state.dismissedAt !== null;
+}
+
+/**
+ * Every §4 suppression rule this repo breaks, intrinsic rules first and
+ * dismissal last — the cheap, offline checks before the one that needs a
+ * database, in a deterministic order a caller can assert on.
+ *
+ * Prefer {@link intrinsicSuppressionReasons} where no `Db` is at hand or where
+ * the point is to avoid work before enrichment; prefer this at the point a
+ * repo would actually be shown.
+ */
+export function suppressionReasons(db: Db, repo: Repo): SuppressionReason[] {
+  const reasons = intrinsicSuppressionReasons(repo);
+  if (isRepoDismissed(db, repo)) reasons.push('dismissed');
+  return reasons;
+}
+
+/**
+ * Whether §4 suppresses this repo at all. `suppressionReasons(...).length > 0`
+ * — kept as its own export because "should this be shown" is the question most
+ * callers actually have, and a caller that only needs the boolean should not
+ * have to know the reason list is ordered.
+ */
+export function isSuppressed(db: Db, repo: Repo): boolean {
+  return suppressionReasons(db, repo).length > 0;
+}
