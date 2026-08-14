@@ -459,3 +459,18 @@ describe('velocity is pure and decay-invariant', () => {
     ).toEqual(before);
   });
 });
+
+describe('computeStarVelocityForItem validates the same way as computeStarVelocity', () => {
+  it('refuses an impossible window even when the key resolves to no repo', () => {
+    // Otherwise the identical misconfiguration throws for a repo we have seen
+    // and returns quietly for one we have not -- so whether a config error is
+    // reported would depend on which item happened to be scored first.
+    const db = migratedDb();
+    expect(() =>
+      computeStarVelocityForItem(db, 'f'.repeat(64), { now: NOW, tz: NY, windowDays: 1 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      computeStarVelocityForItem(db, 'f'.repeat(64), { now: NOW, tz: NY, minSpanDays: 7 }),
+    ).toThrow(RangeError);
+  });
+});

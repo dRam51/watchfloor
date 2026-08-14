@@ -285,6 +285,22 @@ export function computeStarVelocity(
   opts: VelocityOptions,
 ): VelocityResult {
   assertCanonicalTimestamp('now', opts.now);
+  const { days, minSpanDays } = validateOptions(opts);
+
+  const window = getSnapshotWindow(db, repoId, {
+    throughDay: localDay(opts.now, opts.tz),
+    days,
+  });
+  return starVelocityFromWindow(window, minSpanDays);
+}
+
+/**
+ * Shared by both entry points so an impossible configuration is reported
+ * identically whether or not the repo happens to be one we have seen --
+ * otherwise whether a config error surfaces at all would depend on which item
+ * a scoring pass reached first.
+ */
+function validateOptions(opts: VelocityOptions): { days: number; minSpanDays: number } {
   const days = opts.windowDays ?? DEFAULT_WINDOW_DAYS;
   const minSpanDays = opts.minSpanDays ?? DEFAULT_MIN_SPAN_DAYS;
 
@@ -301,12 +317,7 @@ export function computeStarVelocity(
       `minSpanDays ${minSpanDays} exceeds the ${days - 1} days a ${days}-day window can span`,
     );
   }
-
-  const window = getSnapshotWindow(db, repoId, {
-    throughDay: localDay(opts.now, opts.tz),
-    days,
-  });
-  return starVelocityFromWindow(window, minSpanDays);
+  return { days, minSpanDays };
 }
 
 /**
@@ -343,11 +354,12 @@ export function computeStarVelocityForItem(
   itemKey: string,
   opts: VelocityOptions,
 ): VelocityResult {
+  assertCanonicalTimestamp('now', opts.now);
+  const { days, minSpanDays } = validateOptions(opts);
+
   const repoId = resolveRepoId(db, itemKey);
   if (repoId !== null) return computeStarVelocity(db, repoId, opts);
 
-  assertCanonicalTimestamp('now', opts.now);
-  const days = opts.windowDays ?? DEFAULT_WINDOW_DAYS;
   const throughDay = localDay(opts.now, opts.tz);
   return {
     status: 'insufficient_history',
@@ -364,6 +376,6 @@ export function computeStarVelocityForItem(
     // observed" for an item that is not a repo at all.
     missingDays: [],
     spanDays: 0,
-    minSpanDays: opts.minSpanDays ?? DEFAULT_MIN_SPAN_DAYS,
+    minSpanDays,
   };
 }
