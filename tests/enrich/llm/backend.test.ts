@@ -8,6 +8,10 @@ import {
   createLlmBackend,
 } from '../../../src/enrich/llm/backend.ts';
 import { OLLAMA_SERVICE_ID } from '../../../src/enrich/llm/ollama.ts';
+import {
+  ANTHROPIC_SERVICE_ID,
+  AnthropicCredentialError,
+} from '../../../src/enrich/llm/anthropic.ts';
 import { DEFAULT_LLM_CONFIG_PATH, loadLlmConfig } from '../../../src/enrich/llm/config.ts';
 import type { LlmConfig } from '../../../src/enrich/llm/config.ts';
 
@@ -24,6 +28,18 @@ function config(backend: LlmConfig['backend']): LlmConfig {
   };
 }
 
+/** A config selecting anthropic, with the block that backend requires. */
+function anthropicConfig(): LlmConfig {
+  return {
+    ...config('anthropic'),
+    anthropic: {
+      base_url: 'http://127.0.0.1:1',
+      model: 'a-paid-model',
+      pricing: { usd_per_million_input_tokens: 5, usd_per_million_output_tokens: 25 },
+    },
+  };
+}
+
 describe('createLlmBackend', () => {
   it('builds the backend the config selects, so swapping one is a config edit', () => {
     const backend = createLlmBackend(config('ollama'));
@@ -37,16 +53,42 @@ describe('createLlmBackend', () => {
     expect(backend.serviceId).toBe(OLLAMA_SERVICE_ID);
   });
 
-  it('refuses anthropic loudly, because task 2 owns it and it is not wired here', () => {
-    // RULING 2: Anthropic ships built and hard-disabled in task 2. Until then
-    // selecting it must fail at construction rather than silently falling back
-    // to Ollama -- a silent fallback would make an operator believe they had
-    // enabled something they had not.
-    expect(() => createLlmBackend(config('anthropic'))).toThrow(BackendNotWiredError);
+  it('builds the anthropic backend, hard-disabled, when no paid flag is set', () => {
+    // M5 task 2 landed the backend RULING 2 asked for: built, and shipped OFF.
+    // Until it did, this threw BackendNotWiredError (below, which now guards a
+    // different hole). The one thing that must never happen here is a quiet
+    // return of Ollama -- see the next test.
+    const backend = createLlmBackend(anthropicConfig(), {});
+    expect(backend.name).toBe('anthropic');
+    expect(backend.serviceId).toBe(ANTHROPIC_SERVICE_ID);
   });
 
-  it('names the task that owns the missing backend, so the error is actionable', () => {
-    expect(() => createLlmBackend(config('anthropic'))).toThrow(/anthropic/i);
+  it('does NOT fall back to ollama when the paid flag is unset', () => {
+    // §15's "never a silent fallback". An operator who selected anthropic and
+    // forgot the flag must not get local inference reported as anthropic, nor
+    // anthropic's identity on an ollama call. The honest answer is an anthropic
+    // backend that refuses.
+    const backend = createLlmBackend(anthropicConfig(), {});
+    expect(backend.name).not.toBe('ollama');
+    expect(backend.serviceId).not.toBe(OLLAMA_SERVICE_ID);
+  });
+
+  it('refuses to build anthropic when the flag is set but no credential is configured', () => {
+    // The flag is the owner saying "spend money"; a backend that cannot
+    // authenticate is a misconfiguration to fix now, not a status to report
+    // once per scheduled pass.
+    expect(() => createLlmBackend(anthropicConfig(), { WF_ALLOW_PAID_ANTHROPIC: '1' })).toThrow(
+      AnthropicCredentialError,
+    );
+  });
+
+  it('throws rather than returning undefined for a backend name no case covers', () => {
+    // The switch is exhaustive over LlmBackendName today. This is the guard for
+    // the day someone widens that union (or config.ts's enum) and forgets this
+    // file: without the default branch the factory returns `undefined` and the
+    // failure surfaces somewhere else entirely, as a missing method.
+    const config = { ...anthropicConfig(), backend: 'gpt4all' as LlmConfig['backend'] };
+    expect(() => createLlmBackend(config, {})).toThrow(BackendNotWiredError);
   });
 });
 

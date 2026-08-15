@@ -1,0 +1,9 @@
+{
+  "id": "msg_synthetic_0000000000000004",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5",
+  "content": [{ "type": "text", "text": "An answer with no token counts attached." }],
+  "stop_reason": "end_turn",
+  "stop_sequence": null
+}

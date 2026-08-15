@@ -1,0 +1,10 @@
+{
+  "id": "msg_synthetic_0000000000000003",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5",
+  "content": [],
+  "stop_reason": "refusal",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 42, "output_tokens": 0 }
+}

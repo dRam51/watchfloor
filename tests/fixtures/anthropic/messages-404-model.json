@@ -1,0 +1,8 @@
+{
+  "type": "error",
+  "error": {
+    "type": "not_found_error",
+    "message": "model: claude-not-a-model"
+  },
+  "request_id": "req_synthetic_000000000001"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "msg_synthetic_0000000000000001",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "A CVE is a public identifier for one specific, disclosed software vulnerability."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 42,
+    "output_tokens": 27
+  }
+}
