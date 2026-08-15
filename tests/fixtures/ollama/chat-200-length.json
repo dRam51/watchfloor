@@ -1,0 +1,1 @@
+{"model":"llama3.2:latest","created_at":"2026-08-15T06:39:57.147333Z","message":{"role":"assistant","content":"The OWASP (Open Web Application Security"},"done":true,"done_reason":"length","total_duration":369475959,"load_duration":151331959,"prompt_eval_count":38,"prompt_eval_duration":80596000,"eval_count":8,"eval_duration":133943000}
