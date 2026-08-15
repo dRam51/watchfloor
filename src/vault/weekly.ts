@@ -18,9 +18,17 @@ import { assertCalendarDay, localDay } from '../db/repoSnapshots.ts';
 import { assertCanonicalTimestamp, getCurrentItem, BEATS, type Beat } from '../domain/item.ts';
 import { getItemFirstFetchedAt } from '../domain/itemFirstFetchedAt.ts';
 import { getItemState } from '../domain/itemState.ts';
+import { completeEnrichment, type EnrichmentDeps } from '../enrich/cached.ts';
+import type { LlmUnavailableReason } from '../enrich/llm/types.ts';
 import { rankBeat, type RankDeps } from '../score/rank.ts';
 import type { Kind } from '../sources/load.ts';
-import { WATCHFLOOR_BEGIN_MARKER, WATCHFLOOR_END_MARKER } from './frontmatter.ts';
+import {
+  renderManagedNote,
+  WATCHFLOOR_BEGIN_MARKER,
+  WATCHFLOOR_END_MARKER,
+  type ManagedContent,
+} from './frontmatter.ts';
+import type { VaultSession, VaultWriteResult } from './session.ts';
 
 // ---------------------------------------------------------------------------
 // The week
@@ -854,5 +862,349 @@ export function selectWeeklyReading(
     headlineOnly,
     consideredCount,
     excluded: { wrongKind, alreadyRead, dismissed, outsideWeek },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+/** What came back for one of the two questions, and where it came from. */
+export type BlurbOutcome =
+  | { readonly status: 'ok'; readonly text: string; readonly fromCache: boolean }
+  /** A model answered and the answer may not be rendered. See {@link BlurbRejection}. */
+  | { readonly status: 'rejected'; readonly reason: BlurbRejection }
+  /** No model answered. `reason` is the backend's own, and is a stable enum. */
+  | { readonly status: 'unavailable'; readonly reason: LlmUnavailableReason }
+  /** §5's daily token ceiling was shut. Nothing was sent and nothing deferred. */
+  | { readonly status: 'refused' };
+
+export interface WeeklyEntry {
+  readonly candidate: WeeklyCandidate;
+  readonly argues: BlurbOutcome;
+  readonly worth: BlurbOutcome;
+}
+
+export interface WeeklyNoteInput {
+  readonly week: IsoWeek;
+  /** {@link weeklyNoteInstant}. The ONLY instant that may appear in the note. */
+  readonly asOf: string;
+  readonly tz: string;
+  readonly entries: readonly WeeklyEntry[];
+  readonly headlineOnly: readonly WeeklyCandidate[];
+  readonly consideredCount: number;
+  readonly excluded: WeeklyExclusions;
+  /** Which model wrote the blurbs. Provenance a reader is owed. */
+  readonly model: string;
+}
+
+/** Markdown link text, with the characters that would break the link escaped. */
+function escapeLinkText(text: string): string {
+  return text.replace(/([[\]])/g, '\\$1');
+}
+
+/** `Fri 14 Aug`, in `tz`. A label, never re-parsed. */
+function shortDate(instant: string, tz: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz,
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  }).format(new Date(instant));
+}
+
+function longDate(day: string, tz: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz,
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  }).format(new Date(`${day}T12:00:00.000Z`));
+}
+
+/**
+ * One blurb line, or an honest statement of why there is none.
+ *
+ * **No status renders as silence.** A missing blurb that simply is not printed
+ * is indistinguishable from an item with nothing interesting to say about it,
+ * and §15's whole stance on the ceiling is that a refusal must be nameable.
+ *
+ * Deliberately renders no NUMBERS for `refused` and no `detail` for
+ * `unavailable`: the ceiling's charged-token count and a socket error's port
+ * both change between runs, and this note has to be a function of (corpus,
+ * week, zone). The numbers are in the `llm_call_log` ledger and on
+ * {@link WeeklySyncResult}, where they belong.
+ */
+function renderBlurb(label: string, outcome: BlurbOutcome): string {
+  switch (outcome.status) {
+    case 'ok':
+      return `**${label}.** ${outcome.text}`;
+    case 'rejected':
+      return outcome.reason === 'restated_headline'
+        ? `**${label}.** *No blurb: the model gave back the headline.*`
+        : `**${label}.** *No blurb: the model's answer was rejected (${outcome.reason}).*`;
+    case 'unavailable':
+      return `**${label}.** *No blurb: the local model was unavailable (${outcome.reason}).*`;
+    case 'refused':
+      return `**${label}.** *No blurb: the daily token ceiling was already spent, so nothing was sent. Raise \`ceiling.daily_tokens\` in \`config/enrichment.yaml\`, or wait for the next local day.*`;
+  }
+}
+
+function renderReadTime(candidate: WeeklyCandidate): string {
+  const { minutes } = candidate.readTime;
+  return minutes === null ? 'read time unknown' : `~${minutes} min`;
+}
+
+/**
+ * Where the blurb and the minute count each came from, in one line.
+ *
+ * §8.1's third part is a number, and the task brief is explicit: *"say plainly
+ * what you estimate from and what that estimate is worth."* So the provenance
+ * travels with the estimate rather than living in a footnote at the top, and
+ * an unknown says the word "unknown" rather than being left blank.
+ */
+function renderProvenance(candidate: WeeklyCandidate): string {
+  if (candidate.evidence.level === 'body') {
+    return (
+      `<sub>Blurb and read time both from the ${candidate.evidence.bodyWords} words of article ` +
+      `text this feed carries, at ${WORDS_PER_MINUTE} wpm.</sub>`
+    );
+  }
+  return (
+    `<sub>Blurb from the stored ${candidate.evidence.material.length}-character excerpt. ` +
+    `Read time unknown — this feed carries no article text to count.</sub>`
+  );
+}
+
+/**
+ * The note.
+ *
+ * Pure: same inputs, same bytes. That is what `weekly/`'s fully-managed tier
+ * requires and what M5's destructive acceptance test measures.
+ */
+export function renderWeeklyNote(input: WeeklyNoteInput): ManagedContent {
+  const lines: string[] = [];
+
+  lines.push(`# Reading list — ${input.week.label}`);
+  lines.push('');
+  lines.push(
+    `Monday ${longDate(input.week.startDay, input.tz)} to Sunday ` +
+      `${longDate(input.week.endDay, input.tz)}, in ${input.tz}. The unread items with the ` +
+      `highest \`read_score\` — the profile that asks whether reading something repays the time, ` +
+      `not whether it is urgent.`,
+  );
+  lines.push('');
+  lines.push(
+    `Blurbs are written by \`${input.model}\`, locally, from the text this system holds — never ` +
+      `from the headline alone. Read times are counted from the article text a feed itself ` +
+      `carries, at ${WORDS_PER_MINUTE} words a minute; most feeds carry none, and those entries ` +
+      `say so rather than guess.`,
+  );
+
+  if (input.entries.length === 0) {
+    lines.push('');
+    lines.push('Nothing this week had enough text behind it to be worth recommending.');
+  }
+
+  input.entries.forEach((entry, index) => {
+    const { candidate } = entry;
+    lines.push('');
+    lines.push(`## ${index + 1}. [${escapeLinkText(candidate.title)}](${candidate.url})`);
+    lines.push('');
+    lines.push(
+      `\`${candidate.beat}\` · ${candidate.sourceId} · ${shortDate(candidate.effectiveAt, input.tz)} · ` +
+        `**${renderReadTime(candidate)}** · read_score ${candidate.readScore.toFixed(2)}`,
+    );
+    lines.push('');
+    lines.push(renderBlurb('Argues', entry.argues));
+    lines.push('');
+    lines.push(renderBlurb('Worth it', entry.worth));
+    lines.push('');
+    lines.push(renderProvenance(candidate));
+  });
+
+  if (input.headlineOnly.length > 0) {
+    lines.push('');
+    lines.push('## Ranked, not blurbed');
+    lines.push('');
+    lines.push(
+      `These ranked into the week and carry **only a headline** — their feed sends no excerpt, ` +
+        `or one that only repeats the title. A blurb written from a headline is a guess, so ` +
+        `there is none.`,
+    );
+    lines.push('');
+    for (const candidate of input.headlineOnly) {
+      lines.push(
+        `- [${escapeLinkText(candidate.title)}](${candidate.url}) — \`${candidate.beat}\` · ` +
+          `${candidate.sourceId} · ${shortDate(candidate.effectiveAt, input.tz)}`,
+      );
+    }
+  }
+
+  lines.push('');
+  lines.push('## What this list left out');
+  lines.push('');
+  lines.push(
+    `Unread items from this week considered: ${input.consideredCount}. Also ranked, and set ` +
+      `aside: ${input.excluded.alreadyRead} already opened, ${input.excluded.dismissed} ` +
+      `dismissed, ${input.excluded.wrongKind} advisories, CVE records or repository rows rather ` +
+      `than pieces of writing, ${input.excluded.outsideWeek} from another week.`,
+  );
+
+  return renderManagedNote({
+    tier: 'fully-managed',
+    generatedAt: input.asOf,
+    body: lines.join('\n'),
+    fields: {
+      week: input.week.label,
+      week_start: input.week.startDay,
+      week_end: input.week.endDay,
+      timezone: input.tz,
+      ranked_by: 'read_score',
+      blurb_model: input.model,
+      items: input.entries.length,
+      headline_only: input.headlineOnly.length,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The pass
+// ---------------------------------------------------------------------------
+
+export interface WeeklySyncDeps extends WeeklySelectionDeps {
+  /**
+   * Task 3's cache + ceiling + ledger composition. Its `db` is the corpus this
+   * reads from and its `tz` is WF_TZ, so there is one source of truth for both
+   * rather than a second copy that can drift.
+   */
+  readonly enrichment: EnrichmentDeps;
+}
+
+export interface WeeklySyncOptions {
+  /**
+   * The run's real instant. Decides WHICH week, and stamps the `llm_call_log`
+   * ledger — a call happened when it happened. It is deliberately NOT the
+   * note's `generatedAt`; see {@link weeklyNoteInstant}.
+   */
+  readonly now: string;
+  readonly limit?: number;
+}
+
+/** What one pass did. The numbers the note deliberately does not carry. */
+export interface WeeklyBlurbCounts {
+  readonly generated: number;
+  readonly fromCache: number;
+  readonly rejected: number;
+  readonly unavailable: number;
+  readonly refused: number;
+}
+
+export interface WeeklySyncResult {
+  readonly relPath: string;
+  readonly week: IsoWeek;
+  /** The note's frontmatter stamp: {@link weeklyNoteInstant}. */
+  readonly generatedAt: string;
+  readonly write: VaultWriteResult;
+  readonly entries: readonly WeeklyEntry[];
+  readonly headlineOnly: readonly WeeklyCandidate[];
+  readonly blurbs: WeeklyBlurbCounts;
+}
+
+async function askOne(
+  deps: WeeklySyncDeps,
+  candidate: WeeklyCandidate,
+  question: BlurbQuestion,
+  prompt: string,
+  now: string,
+): Promise<BlurbOutcome> {
+  const result = await completeEnrichment(
+    deps.enrichment,
+    {
+      task: BLURB_TASK_ID[question],
+      system: BLURB_SYSTEM[question],
+      prompt,
+      itemKey: candidate.itemKey,
+    },
+    { now },
+  );
+
+  if (result.status === 'refused') return { status: 'refused' };
+  if (result.status === 'unavailable') {
+    return { status: 'unavailable', reason: result.reason };
+  }
+
+  const validation = validateBlurbText(candidate.title, result.text);
+  if (!validation.ok) return { status: 'rejected', reason: validation.reason };
+  return { status: 'ok', text: validation.text, fromCache: result.status === 'cached' };
+}
+
+function tally(outcomes: readonly BlurbOutcome[]): WeeklyBlurbCounts {
+  let generated = 0;
+  let fromCache = 0;
+  let rejected = 0;
+  let unavailable = 0;
+  let refused = 0;
+  for (const outcome of outcomes) {
+    if (outcome.status === 'ok') outcome.fromCache ? (fromCache += 1) : (generated += 1);
+    else if (outcome.status === 'rejected') rejected += 1;
+    else if (outcome.status === 'unavailable') unavailable += 1;
+    else refused += 1;
+  }
+  return { generated, fromCache, rejected, unavailable, refused };
+}
+
+/**
+ * Builds and writes the week's reading note.
+ *
+ * The pass keeps going through every failure a model can produce. A blurb that
+ * could not be written leaves the item in the note with its rank, its read
+ * time and a line saying why there is no blurb — because §8.1's artifact is
+ * the week's reading, and a week where Ollama was down is still a week with
+ * reading in it. The only thing that ends the pass early is the vault's own
+ * refusal to write.
+ */
+export async function syncWeeklyNote(
+  session: VaultSession,
+  deps: WeeklySyncDeps,
+  opts: WeeklySyncOptions,
+): Promise<WeeklySyncResult> {
+  const tz = deps.enrichment.tz;
+  const selection = selectWeeklyReading(deps.enrichment.db, deps, {
+    now: opts.now,
+    tz,
+    ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+  });
+
+  const entries: WeeklyEntry[] = [];
+  const outcomes: BlurbOutcome[] = [];
+  for (const candidate of selection.candidates) {
+    const prompt = buildBlurbPrompt(candidate, candidate.evidence);
+    const argues = await askOne(deps, candidate, 'argues', prompt, opts.now);
+    const worth = await askOne(deps, candidate, 'worth', prompt, opts.now);
+    outcomes.push(argues, worth);
+    entries.push({ candidate, argues, worth });
+  }
+
+  const content = renderWeeklyNote({
+    week: selection.week,
+    asOf: selection.asOf,
+    tz,
+    entries,
+    headlineOnly: selection.headlineOnly,
+    consideredCount: selection.consideredCount,
+    excluded: selection.excluded,
+    model: deps.enrichment.backend.model,
+  });
+
+  const relPath = weeklyNoteRelPath(selection.week);
+  return {
+    relPath,
+    week: selection.week,
+    generatedAt: selection.asOf,
+    write: session.writeManagedNote(relPath, content),
+    entries,
+    headlineOnly: selection.headlineOnly,
+    blurbs: tally(outcomes),
   };
 }
