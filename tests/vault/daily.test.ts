@@ -360,6 +360,31 @@ describe('the candidate set is bounded by the note`s instant', () => {
     expect(note.content).not.toContain('Ingested the next morning');
     expect(note.sections.find((s) => s.beat === 'cyber')!.ranked).toBe(1);
   });
+
+  it('shows the version that existed that day, not the one that replaced it', () => {
+    // `items` is append-only and a title really does change under a URL that
+    // does not -- task 3 found ten such keys in the live corpus, one of which
+    // REVERSED its claim ("Wall Street holds near its record" -> "slips back
+    // from its record"). Reading the current version would put tomorrow's
+    // headline in yesterday's note.
+    const db = migratedDb();
+    const url = 'https://example.test/kev/revised';
+    const v1 = insertItem(db, baseItem({ url, canonicalUrl: url, title: 'First wording' }));
+    insertItem(
+      db,
+      baseItem({
+        url,
+        canonicalUrl: url,
+        title: 'Revised the next morning',
+        fetchedAt: '2026-08-16T12:00:00.000Z',
+      }),
+    );
+    scoreItem(db, v1.item_key, ONE_HALF_LIFE_BEFORE, scoreDeps());
+
+    const note = buildDailyNote(db, DATE, deps());
+    expect(note.content).toContain('First wording');
+    expect(note.content).not.toContain('Revised the next morning');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -640,8 +665,13 @@ describe('two items with the same decayed score', () => {
     // single-source AP item at exactly 3.13. `localeCompare` would order these
     // two by whatever ICU the host ships, so the same corpus could produce a
     // different note on the deployment target than on this laptop.
+    // The two slugs are chosen so the orders genuinely DISAGREE: `alpha`
+    // digests to d415…, `omega` to e810…, so item_key descending is
+    // [omega, alpha] while any alphabetical title collation is [alpha, omega].
+    // A pair whose orders happened to coincide would pass either way, which is
+    // how the first version of this test failed to catch the injected defect.
     const db = migratedDb();
-    const keys = ['zebra', 'apple'].map((slug) => {
+    const keys = ['alpha', 'omega'].map((slug) => {
       const item = insertItem(
         db,
         baseItem({

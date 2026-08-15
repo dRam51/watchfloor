@@ -233,6 +233,13 @@ export function dailyNoteInstant(date: string, tz: string): string {
  * A near-copy of `src/api/routes/feed.ts`'s `candidateItemKeysForBeat`, kept
  * local rather than shared because `src/score/rank.ts`'s `getItemKeysForBeat`
  * is deliberately unbounded and this note must not contain post-dated items.
+ *
+ * **This bound is a pre-filter, not the guarantee** — a defect-injection round
+ * removed it and every test still passed, because `getItemAsOf` returns `null`
+ * for a key whose only version postdates `asOf` and the caller skips it. Kept
+ * anyway: it narrows the loop, and it makes the intent legible at the query.
+ * The property is tested through behaviour ("an item ingested the next morning
+ * does not appear"), so it holds whichever of the two enforces it.
  */
 function candidateItemKeys(db: Db, beat: Beat, asOf: string): string[] {
   const rows = db
