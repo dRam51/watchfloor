@@ -86,7 +86,8 @@
 
 import { localDay } from '../db/repoSnapshots.ts';
 import { assertCanonicalTimestamp, type Beat } from '../domain/item.ts';
-import { VaultContentError } from './frontmatter.ts';
+import { toExcerpt } from '../domain/repo.ts';
+import { renderManagedNote, VaultContentError, type ManagedContent } from './frontmatter.ts';
 
 /**
  * How much of the slug survives. The longest real title is 288 characters;
@@ -190,4 +191,86 @@ export function savedNotePath(item: SavedItem, tz: string): string {
   const day = localDay(item.savedAt, tz);
   const suffix = item.itemKey.slice(0, SAVED_KEY_SUFFIX_LENGTH);
   return `saved/${day}-${savedTitleSlug(item.title)}-${suffix}.md`;
+}
+
+/**
+ * A CommonMark autolink (`<https://...>`) has no escape mechanism: a space or
+ * an angle bracket inside it silently stops being a link. A saved note whose
+ * whole purpose is to be a working pointer must not contain a broken one, so
+ * this refuses rather than emitting `[title](url)` — link-text escaping is a
+ * second set of rules to get wrong, and every canonical URL in the corpus is
+ * already percent-encoded.
+ */
+function assertAutolinkable(url: string): void {
+  if (/[\s<>]/.test(url) || url === '') {
+    throw new VaultContentError(
+      `saved note url ${JSON.stringify(url)} cannot be written as a markdown autolink`,
+    );
+  }
+}
+
+/**
+ * The complete text of one saved note.
+ *
+ * Pure, and a pure function of its inputs byte for byte — which is what makes
+ * the write-once guarantee checkable: re-running promotion for an item that is
+ * already promoted produces the same bytes, so "we did not rewrite it" and
+ * "rewriting it would have changed nothing" are both true, and the test can
+ * assert the stronger one (the inode is unchanged).
+ *
+ * `generatedAt` is injected, never read from the wall clock — the contract
+ * every domain module in this project keeps.
+ *
+ * A title or excerpt containing a watchfloor block marker is refused by
+ * {@link renderManagedNote}. That is not decoration: content that decides
+ * where a managed block ends is the injection that turns a saved excerpt into
+ * a rewrite of the owner's own prose in an `entities/` note.
+ */
+export function renderSavedNote(item: SavedItem, generatedAt: string): ManagedContent {
+  assertCanonicalTimestamp('savedAt', item.savedAt);
+  assertCanonicalTimestamp('firstSeenAt', item.firstSeenAt);
+  if (item.publishedAt !== null) assertCanonicalTimestamp('publishedAt', item.publishedAt);
+  assertAutolinkable(item.canonicalUrl);
+
+  // The project-wide cap, imported rather than re-implemented: links and
+  // ~300-character excerpts, never full text.
+  const excerpt = toExcerpt(item.summaryRaw);
+
+  const lines = [`# ${item.title}`, '', `<${item.canonicalUrl}>`, ''];
+  if (excerpt !== null) lines.push(`> ${excerpt}`, '');
+
+  lines.push(`- Source: ${item.sourceId}`);
+  lines.push(`- Beats: ${item.beats.join(', ')}`);
+  if (item.entities.length > 0) lines.push(`- Entities: ${item.entities.join(', ')}`);
+  lines.push(
+    item.publishedAt === null
+      ? // 1,715 items in the first-run corpus have a null published_at. An
+        // absent date rendered as a present one is the failure the rest of
+        // this codebase avoids by distinguishing never-polled from
+        // polled-and-empty; the note says which fact it is showing.
+        `- Published: not stated by the source; first seen ${item.firstSeenAt}`
+      : `- Published: ${item.publishedAt}`,
+  );
+  lines.push(`- Saved: ${item.savedAt}`);
+  // Nothing will ever rewrite this file, which makes the space below the only
+  // place in the vault where hand-written prose is safe BY CONSTRUCTION rather
+  // than by a marker protocol.
+  lines.push('', '## Notes', '');
+
+  return renderManagedNote({
+    tier: 'write-once',
+    generatedAt,
+    body: lines.join('\n'),
+    fields: {
+      item_key: item.itemKey,
+      title: item.title,
+      url: item.canonicalUrl,
+      source: item.sourceId,
+      beats: [...item.beats],
+      entities: [...item.entities],
+      published_at: item.publishedAt,
+      first_seen_at: item.firstSeenAt,
+      saved_at: item.savedAt,
+    },
+  });
 }

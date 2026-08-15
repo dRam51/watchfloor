@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest';
 import {
   SAVED_KEY_SUFFIX_LENGTH,
   SAVED_SLUG_MAX_LENGTH,
+  renderSavedNote,
   savedNotePath,
   savedTitleSlug,
 } from '../../src/vault/saved.ts';
 import { resolveVaultPath } from '../../src/vault/paths.ts';
-import { VaultContentError } from '../../src/vault/frontmatter.ts';
+import {
+  isWatchfloorManaged,
+  VaultContentError,
+  WATCHFLOOR_BEGIN_MARKER,
+} from '../../src/vault/frontmatter.ts';
+import { MAX_EXCERPT_LENGTH } from '../../src/domain/repo.ts';
 import { createFixtureVault } from './fixture.ts';
 import { REAL_ITEMS, WIN32K_GROUP, type CorpusRow } from './corpus.ts';
 
@@ -136,5 +142,97 @@ describe('savedNotePath — §8.1 shape, plus the disambiguator the corpus force
     expect(() => savedNotePath({ ...item(row), itemKey: 'not-a-digest' }, TZ)).toThrow(
       VaultContentError,
     );
+  });
+});
+
+describe('renderSavedNote — a durable pointer, never a copy of the article', () => {
+  const paperCut = REAL_ITEMS.find((r) => r.title.startsWith('PaperCut'))!;
+  const GENERATED_AT = '2026-08-15T09:30:05.000Z';
+
+  it('carries frontmatter the write-once tier recognises as ours', () => {
+    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    expect(isWatchfloorManaged(note)).toBe(true);
+    expect(note).toContain('watchfloor_tier: write-once');
+  });
+
+  it('records the FULL item key, not the filename prefix', () => {
+    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    expect(note).toContain(`item_key: ${paperCut.itemKey}`);
+  });
+
+  it('renders the title, the link and the excerpt', () => {
+    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    expect(note).toContain(`# ${paperCut.title}`);
+    expect(note).toContain(`<${paperCut.canonicalUrl}>`);
+    expect(note).toContain('bypass authentication on affected installations');
+  });
+
+  /**
+   * The standing policy: this project stores links and ~300-character
+   * excerpts, **never full article text** (`src/domain/repo.ts`). A saved note
+   * is the one place where mirroring the article would be tempting, so the cap
+   * is asserted against text far longer than anything `summary_raw` can hold.
+   */
+  it('caps the excerpt at the project-wide 300 characters', () => {
+    const long = `${paperCut.summaryRaw} `.repeat(40);
+    const note = renderSavedNote({ ...item(paperCut), summaryRaw: long }, GENERATED_AT);
+    expect(long.length).toBeGreaterThan(5000);
+    expect(note).not.toContain(long.slice(0, 400));
+    const quoted = note.split('\n').find((line) => line.startsWith('> '))!;
+    expect(quoted.length - 2).toBeLessThanOrEqual(MAX_EXCERPT_LENGTH);
+  });
+
+  it('says so when the source stated no publication date', () => {
+    const note = renderSavedNote({ ...item(paperCut), publishedAt: null }, GENERATED_AT);
+    // 1,715 of the first-run corpus items have a null published_at. An absent
+    // date rendered as a present one is the failure `/api/sources` avoids by
+    // distinguishing never-polled from polled-and-empty.
+    expect(note).toContain('published_at: null');
+    expect(note).toContain('not stated by the source');
+  });
+
+  it('names both beats of a cross-listed item', () => {
+    const crossListed = REAL_ITEMS.find((r) => r.beats.length > 1)!;
+    const note = renderSavedNote(item(crossListed), GENERATED_AT);
+    expect(note).toContain('beats: ["aisec","cyber"]');
+  });
+
+  // `item_entities` holds ZERO rows in both the live corpus and the archived
+  // first run, so "no entities" is the only state that exists today.
+  it('omits the entities line rather than rendering an empty one', () => {
+    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    expect(note).not.toContain('Entities');
+  });
+
+  it('is a pure function of its inputs, byte for byte', () => {
+    expect(renderSavedNote(item(paperCut), GENERATED_AT)).toBe(
+      renderSavedNote(item(paperCut), GENERATED_AT),
+    );
+  });
+
+  // Content that decides where a managed block ends is the injection that
+  // turns a saved excerpt into a rewrite of the owner's own prose elsewhere.
+  it('refuses a title or excerpt carrying a watchfloor marker', () => {
+    expect(() =>
+      renderSavedNote({ ...item(paperCut), title: `Hi ${WATCHFLOOR_BEGIN_MARKER}` }, GENERATED_AT),
+    ).toThrow(VaultContentError);
+    expect(() =>
+      renderSavedNote(
+        { ...item(paperCut), summaryRaw: `Hi ${WATCHFLOOR_BEGIN_MARKER}` },
+        GENERATED_AT,
+      ),
+    ).toThrow(VaultContentError);
+  });
+
+  // The URL is emitted as a CommonMark autolink, which has no escape
+  // mechanism: a space or an angle bracket inside it silently stops being a
+  // link, and the note's whole purpose is to be a working pointer.
+  it('refuses a URL that cannot be an autolink', () => {
+    expect(() =>
+      renderSavedNote({ ...item(paperCut), canonicalUrl: 'https://x.test/a b' }, GENERATED_AT),
+    ).toThrow(VaultContentError);
+    expect(() =>
+      renderSavedNote({ ...item(paperCut), canonicalUrl: 'https://x.test/<a>' }, GENERATED_AT),
+    ).toThrow(VaultContentError);
   });
 });
