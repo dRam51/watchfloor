@@ -82,6 +82,22 @@
  * empty `## Notes` heading at the end is the one place in the vault where
  * hand-written prose is safe by construction: nothing will ever rewrite this
  * file.
+ *
+ * ## One timestamp, and it is the owner's
+ *
+ * There is no rendering clock anywhere in this module and no parameter through
+ * which one could be supplied — asserted against the module's own source.
+ * `watchfloor_generated_at` carries `saved_at`.
+ *
+ * The M5 controller's ruling requires `generatedAt` to be a pure function of
+ * corpus state rather than `new Date()`, because a wall clock breaks the
+ * fully-managed tiers' byte-identical regeneration. This tier is never
+ * regenerated, so that reasoning does not reach it — but a stronger one does.
+ * Promotion happens at save time, so "when this note was rendered" and "when
+ * the owner saved it" are the same instant to within the milliseconds it takes
+ * to render, and only one of them is a fact the system can still defend a year
+ * later. Naming the instant the owner caused is the honest choice, and making
+ * it structural keeps every test deterministic for free.
  */
 
 import type { Db } from '../db/connection.ts';
@@ -224,15 +240,24 @@ function assertAutolinkable(url: string): void {
  * "rewriting it would have changed nothing" are both true, and the test can
  * assert the stronger one (the inode is unchanged).
  *
- * `generatedAt` is injected, never read from the wall clock — the contract
- * every domain module in this project keeps.
+ * **There is no rendering clock, and no parameter to supply one.**
+ * `watchfloor_generated_at` carries `saved_at`, so the note names exactly one
+ * moment: the one the owner caused. The M5 controller's ruling requires
+ * `generatedAt` to be a pure function of corpus state rather than
+ * `new Date()`, because a wall clock breaks byte-identical regeneration for
+ * the fully-managed tiers. This tier is never regenerated, so that argument
+ * does not reach it — but the honest-timestamp one does, and it is stronger:
+ * promotion happens at save time, so "when this note was generated" and "when
+ * the owner saved it" are the same instant to within the milliseconds it takes
+ * to render, and only one of them is a fact the system can defend a year
+ * later. Making it structural also keeps every test deterministic for free.
  *
  * A title or excerpt containing a watchfloor block marker is refused by
  * {@link renderManagedNote}. That is not decoration: content that decides
  * where a managed block ends is the injection that turns a saved excerpt into
  * a rewrite of the owner's own prose in an `entities/` note.
  */
-export function renderSavedNote(item: SavedItem, generatedAt: string): ManagedContent {
+export function renderSavedNote(item: SavedItem): ManagedContent {
   assertCanonicalTimestamp('savedAt', item.savedAt);
   assertCanonicalTimestamp('firstSeenAt', item.firstSeenAt);
   if (item.publishedAt !== null) assertCanonicalTimestamp('publishedAt', item.publishedAt);
@@ -271,7 +296,9 @@ export function renderSavedNote(item: SavedItem, generatedAt: string): ManagedCo
 
   return renderManagedNote({
     tier: 'write-once',
-    generatedAt,
+    // The one moment this note can honestly claim. See the doc comment: there
+    // is no parameter here through which a wall clock could arrive.
+    generatedAt: item.savedAt,
     body: lines.join('\n'),
     fields: {
       item_key: item.itemKey,
@@ -324,10 +351,10 @@ export type SavedPromotion =
 export function promoteSavedItem(
   session: VaultSession,
   item: SavedItem,
-  options: { readonly tz: string; readonly generatedAt: string },
+  options: { readonly tz: string },
 ): SavedPromotion {
   const relPath = savedNotePath(item, options.tz);
-  const content = renderSavedNote(item, options.generatedAt);
+  const content = renderSavedNote(item);
   try {
     const written: VaultWriteResult = session.writeSavedNote(relPath, content);
     return { status: 'written', relPath: written.relPath, bytes: written.bytes };

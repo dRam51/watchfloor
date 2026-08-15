@@ -169,21 +169,20 @@ describe('savedNotePath — §8.1 shape, plus the disambiguator the corpus force
 
 describe('renderSavedNote — a durable pointer, never a copy of the article', () => {
   const paperCut = REAL_ITEMS.find((r) => r.title.startsWith('PaperCut'))!;
-  const GENERATED_AT = '2026-08-15T09:30:05.000Z';
 
   it('carries frontmatter the write-once tier recognises as ours', () => {
-    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    const note = renderSavedNote(item(paperCut));
     expect(isWatchfloorManaged(note)).toBe(true);
     expect(note).toContain('watchfloor_tier: write-once');
   });
 
   it('records the FULL item key, not the filename prefix', () => {
-    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    const note = renderSavedNote(item(paperCut));
     expect(note).toContain(`item_key: ${paperCut.itemKey}`);
   });
 
   it('renders the title, the link and the excerpt', () => {
-    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    const note = renderSavedNote(item(paperCut));
     expect(note).toContain(`# ${paperCut.title}`);
     expect(note).toContain(`<${paperCut.canonicalUrl}>`);
     expect(note).toContain('bypass authentication on affected installations');
@@ -197,7 +196,7 @@ describe('renderSavedNote — a durable pointer, never a copy of the article', (
    */
   it('caps the excerpt at the project-wide 300 characters', () => {
     const long = `${paperCut.summaryRaw} `.repeat(40);
-    const note = renderSavedNote({ ...item(paperCut), summaryRaw: long }, GENERATED_AT);
+    const note = renderSavedNote({ ...item(paperCut), summaryRaw: long });
     expect(long.length).toBeGreaterThan(5000);
     expect(note).not.toContain(long.slice(0, 400));
     const quoted = note.split('\n').find((line) => line.startsWith('> '))!;
@@ -205,7 +204,7 @@ describe('renderSavedNote — a durable pointer, never a copy of the article', (
   });
 
   it('says so when the source stated no publication date', () => {
-    const note = renderSavedNote({ ...item(paperCut), publishedAt: null }, GENERATED_AT);
+    const note = renderSavedNote({ ...item(paperCut), publishedAt: null });
     // 1,715 of the first-run corpus items have a null published_at. An absent
     // date rendered as a present one is the failure `/api/sources` avoids by
     // distinguishing never-polled from polled-and-empty.
@@ -215,20 +214,20 @@ describe('renderSavedNote — a durable pointer, never a copy of the article', (
 
   it('names both beats of a cross-listed item', () => {
     const crossListed = REAL_ITEMS.find((r) => r.beats.length > 1)!;
-    const note = renderSavedNote(item(crossListed), GENERATED_AT);
+    const note = renderSavedNote(item(crossListed));
     expect(note).toContain('beats: ["aisec","cyber"]');
   });
 
   // `item_entities` holds ZERO rows in both the live corpus and the archived
   // first run, so "no entities" is the only state that exists today.
   it('omits the entities line rather than rendering an empty one', () => {
-    const note = renderSavedNote(item(paperCut), GENERATED_AT);
+    const note = renderSavedNote(item(paperCut));
     expect(note).not.toContain('Entities');
   });
 
   it('is a pure function of its inputs, byte for byte', () => {
-    expect(renderSavedNote(item(paperCut), GENERATED_AT)).toBe(
-      renderSavedNote(item(paperCut), GENERATED_AT),
+    expect(renderSavedNote(item(paperCut))).toBe(
+      renderSavedNote(item(paperCut)),
     );
   });
 
@@ -236,12 +235,11 @@ describe('renderSavedNote — a durable pointer, never a copy of the article', (
   // turns a saved excerpt into a rewrite of the owner's own prose elsewhere.
   it('refuses a title or excerpt carrying a watchfloor marker', () => {
     expect(() =>
-      renderSavedNote({ ...item(paperCut), title: `Hi ${WATCHFLOOR_BEGIN_MARKER}` }, GENERATED_AT),
+      renderSavedNote({ ...item(paperCut), title: `Hi ${WATCHFLOOR_BEGIN_MARKER}` }),
     ).toThrow(VaultContentError);
     expect(() =>
       renderSavedNote(
         { ...item(paperCut), summaryRaw: `Hi ${WATCHFLOOR_BEGIN_MARKER}` },
-        GENERATED_AT,
       ),
     ).toThrow(VaultContentError);
   });
@@ -251,17 +249,17 @@ describe('renderSavedNote — a durable pointer, never a copy of the article', (
   // link, and the note's whole purpose is to be a working pointer.
   it('refuses a URL that cannot be an autolink', () => {
     expect(() =>
-      renderSavedNote({ ...item(paperCut), canonicalUrl: 'https://x.test/a b' }, GENERATED_AT),
+      renderSavedNote({ ...item(paperCut), canonicalUrl: 'https://x.test/a b' }),
     ).toThrow(VaultContentError);
     expect(() =>
-      renderSavedNote({ ...item(paperCut), canonicalUrl: 'https://x.test/<a>' }, GENERATED_AT),
+      renderSavedNote({ ...item(paperCut), canonicalUrl: 'https://x.test/<a>' }),
     ).toThrow(VaultContentError);
   });
 });
 
 describe('promoteSavedItem — write-once, and nothing else touched', () => {
   const paperCut = REAL_ITEMS.find((r) => r.title.startsWith('PaperCut'))!;
-  const options = { tz: TZ, generatedAt: '2026-08-15T09:30:05.000Z' };
+  const options = { tz: TZ };
 
   it('writes the note at the §8.1 path', () => {
     const { root } = createFixtureVault();
@@ -285,10 +283,7 @@ describe('promoteSavedItem — write-once, and nothing else touched', () => {
     const first = promoteSavedItem(session, item(paperCut), options);
     const before = statSync(join(root, first.relPath));
 
-    const second = promoteSavedItem(session, item(paperCut), {
-      ...options,
-      generatedAt: '2026-09-01T00:00:00.000Z',
-    });
+    const second = promoteSavedItem(session, item(paperCut), options);
 
     expect(second).toEqual({ status: 'exists', relPath: first.relPath });
     const after = statSync(join(root, first.relPath));
@@ -368,7 +363,8 @@ describe('promoteSavedItem — write-once, and nothing else touched', () => {
  * made at all.
  */
 describe('a re-sync after the tree is gone does NOT bring saved/ back', () => {
-  const options = { tz: TZ, generatedAt: '2026-08-15T09:30:05.000Z' };
+  const options = { tz: TZ };
+  const SYNC_AT = '2026-08-15T09:30:05.000Z';
 
   it('rebuilds daily/ and entities/ and leaves saved/ absent', () => {
     const { root } = createFixtureVault();
@@ -387,10 +383,10 @@ describe('a re-sync after the tree is gone does NOT bring saved/ back', () => {
     const resync = openVaultSession(root);
     resync.writeManagedNote(
       'daily/2026-08-15.md',
-      renderManagedNote({ tier: 'fully-managed', generatedAt: options.generatedAt, body: '# Daily' }),
+      renderManagedNote({ tier: 'fully-managed', generatedAt: SYNC_AT, body: '# Daily' }),
     );
     resync.writeEntityNote('entities/Microsoft.md', 'Three CVEs today.', {
-      generatedAt: options.generatedAt,
+      generatedAt: SYNC_AT,
       title: 'Microsoft',
     });
 
@@ -502,10 +498,7 @@ describe('readSavedItem — the three-function read path, not the current versio
 
     const { root } = createFixtureVault();
     const session = openVaultSession(root);
-    const result = promoteSavedItem(session, readSavedItem(db, inserted.item_key)!, {
-      tz: TZ,
-      generatedAt: '2026-08-15T09:30:05.000Z',
-    });
+    const result = promoteSavedItem(session, readSavedItem(db, inserted.item_key)!, { tz: TZ });
 
     expect(result.status).toBe('written');
     expect(readFileSync(join(root, result.relPath), 'utf8')).toContain(
@@ -516,7 +509,7 @@ describe('readSavedItem — the three-function read path, not the current versio
 
 describe('known costs, pinned so they are decisions rather than surprises', () => {
   const paperCut = REAL_ITEMS.find((r) => r.title.startsWith('PaperCut'))!;
-  const options = { tz: TZ, generatedAt: '2026-08-15T09:30:05.000Z' };
+  const options = { tz: TZ };
 
   /**
    * `saveItem` is fully reversible, and a save after an un-save produces a
@@ -582,7 +575,6 @@ describe('known costs, pinned so they are decisions rather than surprises', () =
   it('cannot be broken out of its blockquote by newlines in the excerpt', () => {
     const note = renderSavedNote(
       { ...item(paperCut), summaryRaw: 'First line.\n\n# Injected heading\n\n- and a list' },
-      options.generatedAt,
     );
     const quoted = note.split('\n').filter((line) => line.startsWith('> '));
     expect(quoted.length).toBe(1);
@@ -592,9 +584,43 @@ describe('known costs, pinned so they are decisions rather than surprises', () =
   it('collapses a multi-line title into one heading, keeping the raw title in frontmatter', () => {
     const note = renderSavedNote(
       { ...item(paperCut), title: 'A title\nwith a newline' },
-      options.generatedAt,
     );
     expect(note).toContain('# A title with a newline');
     expect(note).toContain('title: "A title\\nwith a newline"');
+  });
+});
+
+/**
+ * CONTROLLER RULING, M5: `generatedAt` must be a pure function of corpus
+ * state, never `new Date()`. Task 5 found that a wall clock silently breaks
+ * idempotent regeneration for the fully-managed tiers.
+ *
+ * `saved/` is the tier where that argument does NOT apply — the note is
+ * written once and never regenerated, so byte-identical regeneration is not a
+ * property it needs. The clock is removed anyway, for a different and simpler
+ * reason: the only moment this note can honestly claim is the one the owner
+ * caused. `watchfloor_generated_at` therefore carries `saved_at`, and there is
+ * no parameter through which a wall clock could be supplied.
+ */
+describe('the note names one moment, and it is the owner’s', () => {
+  const paperCut = REAL_ITEMS.find((r) => r.title.startsWith('PaperCut'))!;
+
+  it('stamps the save instant as the generated-at, not a rendering clock', () => {
+    const note = renderSavedNote(item(paperCut, '2026-08-15T09:30:00.000Z'));
+    expect(note).toContain('watchfloor_generated_at: 2026-08-15T09:30:00.000Z');
+    expect(note).toContain('saved_at: 2026-08-15T09:30:00.000Z');
+  });
+
+  // Structural, not a convention: there is no argument to pass a clock to, so
+  // the same item promoted a year apart produces the same bytes.
+  it('reads no clock — asserted against the module source', () => {
+    const source = readFileSync(join('src', 'vault', 'saved.ts'), 'utf8');
+    const code = source
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('//'))
+      .join('\n');
+    expect(code).not.toContain('Date.now(');
+    expect(code).not.toContain('new Date(');
+    expect(code).not.toContain('toISOString(');
   });
 });
