@@ -513,3 +513,88 @@ describe('readSavedItem — the three-function read path, not the current versio
     );
   });
 });
+
+describe('known costs, pinned so they are decisions rather than surprises', () => {
+  const paperCut = REAL_ITEMS.find((r) => r.title.startsWith('PaperCut'))!;
+  const options = { tz: TZ, generatedAt: '2026-08-15T09:30:05.000Z' };
+
+  /**
+   * `saveItem` is fully reversible, and a save after an un-save produces a
+   * FRESH `saved_at` (`src/domain/itemState.ts`). The day label comes from
+   * that instant, so un-saving in August and re-saving in September writes a
+   * SECOND note.
+   *
+   * Accepted rather than fixed. The first note is a true record of the August
+   * save and write-once forbids amending it, so the choice is between a second
+   * record and no record of the second act. Closing it would need the vault
+   * package to offer a sanctioned way to LIST an area — `resolveVaultPath`
+   * refuses anything that is not a `.md` file, deliberately — and that is a
+   * change to task 4's files, which this task does not own.
+   */
+  it('writes a second note when an item is un-saved and saved again on another day', () => {
+    const { root } = createFixtureVault();
+    const session = openVaultSession(root);
+    const august = promoteSavedItem(session, item(paperCut, '2026-08-15T09:30:00.000Z'), options);
+    const september = promoteSavedItem(
+      session,
+      item(paperCut, '2026-09-02T09:30:00.000Z'),
+      options,
+    );
+
+    expect(august.status).toBe('written');
+    expect(september.status).toBe('written');
+    expect(september.relPath).not.toBe(august.relPath);
+    // The August note is untouched, which is the rule that matters.
+    expect(readFileSync(join(root, august.relPath), 'utf8')).toContain(
+      'saved_at: 2026-08-15T09:30:00.000Z',
+    );
+  });
+
+  /**
+   * THE WIRING PIN. M4a's post-mortem: a `github_search` adapter that compiled
+   * fine and was unreachable, found only by a live run. Nothing in `src/`
+   * calls {@link promoteSavedItem} yet — the composition roots and
+   * `src/api/routes/items.ts` were outside this task's ownership.
+   *
+   * This test asserts the gap so it cannot be forgotten. When the save route
+   * is wired, this turns red and whoever wired it must say so here.
+   */
+  it('IS NOT WIRED YET — promoteSavedItem has no caller in src/', () => {
+    const callers: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (
+          entry.name.endsWith('.ts') &&
+          full !== join('src', 'vault', 'saved.ts') &&
+          readFileSync(full, 'utf8').includes('promoteSavedItem')
+        )
+          callers.push(full);
+      }
+    };
+    walk('src');
+    expect(callers).toEqual([]);
+  });
+
+  // A summary arriving with newlines must not be able to close the blockquote
+  // and inject headings into a note nothing will ever be allowed to correct.
+  it('cannot be broken out of its blockquote by newlines in the excerpt', () => {
+    const note = renderSavedNote(
+      { ...item(paperCut), summaryRaw: 'First line.\n\n# Injected heading\n\n- and a list' },
+      options.generatedAt,
+    );
+    const quoted = note.split('\n').filter((line) => line.startsWith('> '));
+    expect(quoted.length).toBe(1);
+    expect(note).not.toContain('\n# Injected heading');
+  });
+
+  it('collapses a multi-line title into one heading, keeping the raw title in frontmatter', () => {
+    const note = renderSavedNote(
+      { ...item(paperCut), title: 'A title\nwith a newline' },
+      options.generatedAt,
+    );
+    expect(note).toContain('# A title with a newline');
+    expect(note).toContain('title: "A title\\nwith a newline"');
+  });
+});

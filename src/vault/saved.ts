@@ -242,7 +242,13 @@ export function renderSavedNote(item: SavedItem, generatedAt: string): ManagedCo
   // ~300-character excerpts, never full text.
   const excerpt = toExcerpt(item.summaryRaw);
 
-  const lines = [`# ${item.title}`, '', `<${item.canonicalUrl}>`, ''];
+  // Collapsed for the heading only: a newline inside a title would end the H1
+  // and turn the rest of it into arbitrary markdown in a note nothing is ever
+  // allowed to correct. The frontmatter keeps the title verbatim (escaped by
+  // `renderManagedNote`), so the raw value is still recoverable.
+  const heading = item.title.replace(/\s+/g, ' ').trim();
+
+  const lines = [`# ${heading}`, '', `<${item.canonicalUrl}>`, ''];
   if (excerpt !== null) lines.push(`> ${excerpt}`, '');
 
   lines.push(`- Source: ${item.sourceId}`);
