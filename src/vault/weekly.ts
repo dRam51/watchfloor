@@ -675,6 +675,23 @@ export interface WeeklyExclusions {
 
 export interface WeeklySelection {
   readonly week: IsoWeek;
+  /**
+   * The instant the ranking was computed at: {@link weeklyNoteInstant}, not
+   * the run's `now`.
+   *
+   * Decay is applied at read time, so a decayed `read_score` computed from the
+   * job's own clock differs between Friday evening and Saturday morning — and
+   * `weekly/` is rewritten every run. Ranking as of the week's own last
+   * instant is the same reasoning the controller applied to `generatedAt`,
+   * carried through to the numbers: the whole note becomes a function of
+   * (corpus, week, zone).
+   *
+   * Ordering barely moves. Exponential decay with a common offset multiplies
+   * every item in a beat by the same factor, so within a beat the order is
+   * untouched; only the cross-beat interleaving shifts, and only by the
+   * difference between two half-lives over at most seven days.
+   */
+  readonly asOf: string;
   /** Blurbable items, highest decayed `read_score` first. */
   readonly candidates: readonly WeeklyCandidate[];
   /**
@@ -744,6 +761,9 @@ export function selectWeeklyReading(
 ): WeeklySelection {
   assertCanonicalTimestamp('now', opts.now);
   const week = isoWeekOf(localDay(opts.now, opts.tz));
+  // `now` decides WHICH week. `asOf` is what everything inside it is computed
+  // at. Two instants with two different jobs -- do not collapse them.
+  const asOf = weeklyNoteInstant(week, opts.tz);
   const readingKinds = deps.readingKinds ?? WEEKLY_READING_KINDS;
   const limit = opts.limit ?? DEFAULT_WEEKLY_LIMIT;
 
@@ -755,7 +775,7 @@ export function selectWeeklyReading(
   let outsideWeek = 0;
   let consideredCount = 0;
 
-  for (const ranked of rankedAcrossBeats(db, deps, opts.now)) {
+  for (const ranked of rankedAcrossBeats(db, deps, asOf)) {
     if (candidates.length >= limit && headlineOnly.length >= HEADLINE_ONLY_LIMIT) break;
 
     const kind = deps.sourceKinds.get(ranked.sourceId) ?? null;
@@ -769,7 +789,7 @@ export function selectWeeklyReading(
     // whole catalogue and would otherwise look new on every poll
     // (src/domain/itemFirstFetchedAt.ts). Queried only when it is needed.
     const effectiveAt =
-      ranked.publishedAt ?? getItemFirstFetchedAt(db, ranked.itemKey) ?? opts.now;
+      ranked.publishedAt ?? getItemFirstFetchedAt(db, ranked.itemKey) ?? asOf;
     const effectiveDay = localDay(effectiveAt, opts.tz);
     if (effectiveDay < week.startDay || effectiveDay > week.endDay) {
       outsideWeek += 1;
@@ -829,6 +849,7 @@ export function selectWeeklyReading(
 
   return {
     week,
+    asOf,
     candidates,
     headlineOnly,
     consideredCount,

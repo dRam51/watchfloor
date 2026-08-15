@@ -13,6 +13,7 @@ import {
   DEFAULT_WEEKLY_LIMIT,
   WEEKLY_READING_KINDS,
   selectWeeklyReading,
+  weeklyNoteInstant,
   type WeeklySelectionDeps,
 } from '../../src/vault/weekly.ts';
 
@@ -155,6 +156,19 @@ describe('selectWeeklyReading — the week', () => {
     const db = migratedDb();
     const selection = selectWeeklyReading(db, deps(), { now: NOW, tz: 'America/New_York' });
     expect(selection.week.label).toBe('2026-W33');
+  });
+
+  it('ranks as of the week itself, not as of the moment the job ran', () => {
+    // The same reasoning the controller applied to `generatedAt`: `weekly/` is
+    // rewritten every run, so everything in it must be a function of (corpus,
+    // week, zone). A decayed `read_score` computed from the run's own clock
+    // changes between Friday evening and Saturday morning, which would make
+    // two renderings of one week's claim differ in their bytes.
+    const db = migratedDb();
+    const early = selectWeeklyReading(db, deps(), { now: '2026-08-14T13:00:00.000Z', tz: 'UTC' });
+    const late = selectWeeklyReading(db, deps(), { now: NOW, tz: 'UTC' });
+    expect(early.asOf).toBe(weeklyNoteInstant(early.week, 'UTC'));
+    expect(late.asOf).toBe(early.asOf);
   });
 
   it('uses WF_TZ, not UTC, to decide which week `now` is in', () => {
