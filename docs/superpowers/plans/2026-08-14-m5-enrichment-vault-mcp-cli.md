@@ -1,0 +1,133 @@
+# Watchfloor M5 — Enrichment, Vault, MCP, CLI
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
+
+**Goal (§ brief, M5):** *"full loop, cost visible and capped, a point-in-time query returns provably no post-dated items, I can delete the entire `watchfloor/` tree and have sync rebuild it identically while a hand-edited entity note survives untouched, and the §7.4 entity graph view renders the `related_entities`."*
+
+**Scope:** pluggable LLM backend (Ollama + Anthropic), cost ceiling, caching. Full §8.1 Obsidian integration: daily and weekly notes, entity notes with managed blocks, saved-item promotion, `vault verify` and `vault prune`, atomic writes, write caps, unmounted-vault guard. Read-only MCP server including the §8.2 trading-bot tools with `as_of` support and query logging. CLI.
+
+**This is four subsystems in one milestone** — the largest yet, and larger than M3 (12 tasks + 9 unplanned). Planned as 13 tasks across four waves.
+
+## Two collisions the owner must resolve
+
+These are recorded here rather than resolved silently, per CLAUDE.md's "stop and ask when the brief conflicts with itself or with something known to be true."
+
+### 1. §8.2's default bot filter selects almost nothing
+
+> §8.2: *"Filter bot-facing queries to `item_type` in (`event`) by default, with `analysis` available only on explicit request."*
+
+M2 established, against 3,325 real items, that **`item_type` is effectively binary**: the classifier returns `event` for exactly the four government-primary sources and `analysis` for everything else, and `press` matches **0 items**. So the §8.2 default does not mean "hard news rather than essays" — it means *"CISA, NVD, Federal Register, and the White House, and nothing else."* Every Reuters-class wire story, every vendor advisory, every Krebs piece is `analysis` and therefore hidden from the bot by default.
+
+That is a defensible filter and it is almost certainly not what §8.2 intends. `CLAUDE.md` already records this as "accepted deliberately on 2026-08-14 — revisit at M4b", and M5 is where it starts having consequences beyond the markets beat.
+
+**Do not silently reinterpret the filter.** Either it stands as written (and the bot's default view is four government sources), or `item_type` gets the rework M2 deferred, or the bot-facing filter keys on something else (`kind`, added post-M2, is the obvious candidate — it is a *content* axis with five real values and was built for exactly this kind of "news, not papers" question).
+
+### 2. Three of the five §8.2 bot tools have no data, because M4b is deferred
+
+| tool | data source | status |
+| --- | --- | --- |
+| `get_items_for_entity` | items + entities | **available** |
+| `get_source_health` | fetch state | **available** |
+| `get_market_snapshot` | the §7 market ribbon | **M4b — does not exist** |
+| `get_catalysts` | earnings, FOMC, CPI/PPI, filing deadlines | **M4b — does not exist** |
+| `get_filings` | EDGAR adapter | **M4b — does not exist** |
+
+M4b is blocked on `config/portfolio.yaml`, which only the owner can write (it carries real positions and is gitignored). So M5 can ship two working bot tools and three that must either be absent or return an honest "not yet configured" — **never an empty array, which a bot would read as "no catalysts" rather than "no data source."** That distinction is the same `everPolled`/`null` discipline `/api/sources` already follows, and it matters more here: a backtest fed silent emptiness produces confident, wrong numbers.
+
+## The rule that outranks everything else in this milestone
+
+§8.1: **"Watchfloor owns exactly one subtree and never writes outside it."**
+
+The vault is the owner's primary knowledge base and contains years of hand-written notes. A bug here does not produce a wrong number on a dashboard; it destroys work that has no backup in this system. Three prohibitions, verbatim:
+
+- **Never write to `notes/` or any hand-authored directory.**
+- **Never delete a file outside `watchfloor/`.**
+- **Never modify a file lacking Watchfloor frontmatter.**
+
+And the three-tier model, where "getting this wrong is the failure that makes me stop trusting the integration":
+
+| tier | paths | rule |
+| --- | --- | --- |
+| fully managed | `daily/`, `weekly/` | rewritten every run; idempotent overwrite, never append |
+| managed block | `entities/` | replace **only** between `<!-- watchfloor:begin -->` / `<!-- watchfloor:end -->`; everything above and below is untouched. **If the markers are missing from an existing file, append them — never clobber a file you did not create.** |
+| mine | `saved/` | written once at creation, **then never touched again by any job. Not even to fix a typo.** |
+
+**The acceptance test is destructive and must be run:** delete the whole `watchfloor/` tree, re-run sync, and `daily/`, `weekly/`, and `entities/` must reproduce **exactly** — while a hand-edited entity note's own prose survives. `saved/` is never regenerated.
+
+## Zero-dollar: M5 is where the rule stops being inert
+
+Every prior milestone had no paid client at all. M5 adds the Anthropic backend, and `docs/costs.md` carries a standing, explicit requirement that must ship **with** it, not after:
+
+> the zero-flag test proves only that `isPaidAllowed()` returns **false when it is called**. It does **not** prove that no code path can reach a paid service — a client that simply never consults the gate would sail past it.
+
+So M5 must ship **one** of:
+- **(a)** a check that every module importing a paid-classified client also calls the gate before any request; or
+- **(b)** an integration test that stubs the network layer and asserts **zero requests fire** with the flag unset.
+
+§15 also requires, for Anthropic specifically: the flag `WF_ALLOW_PAID_ANTHROPIC`, **in addition to** the §5 daily token ceiling and cost logging. Flag absent = hard-disabled: scheduler skips the job, API reports "disabled by cost policy", dashboard shows it off. **Never a silent fallback that retries later.** Ollama is local and needs no flag.
+
+## What M0–M4a hand forward
+
+- **`enrichmentSpend` on `/api/dashboard/header` is already a *measured* zero**, not a placeholder — `{ amountUsd, measured, asOf, note }`. It starts reporting real numbers at M5 **without a code change**. Do not replace it; feed it.
+- **`enrichment: boolean` already exists per source** in `config/sources.yaml` (defaults true).
+- **`WF_VAULT_ROOT` accepts an absolute path** while `WF_DB_PATH`/`WF_DATA_DIR`/`WF_LOG_DIR` stay relative-only (`74ae45d`). The real vault path is verified accepted.
+- **Items are immutable, and `fetched_at` ≠ `published_at`.** §8.2's point-in-time integrity is not new machinery — it is the property M0 built and M2 preserved. `as_of` is a filter on `fetched_at`, and the archived corpus proves 1,715 items have a null `published_at`, so keying on the wrong one silently drops half the data.
+- **Read the three-function read path** (`getItemBeats`, `getItemEntities`, first-seen `fetched_at`). Entity notes need `getItemEntities`, not the current version's entities — this has bitten four times.
+
+## Global Constraints
+
+- **Node 26.** No new runtime dependency without justification. An MCP server may need one — justify it in the task report.
+- **Never delete anything** — no `rm`, no `fs.rm`/`unlink`, no history rewrites. Obsolete files to `attic/` via `git mv`. **This applies with special force to vault code:** `vault prune` is the one job allowed to remove anything, it is confined to `watchfloor/`, and it must be tested against a fixture vault containing hand-authored files that must survive.
+- **Atomic writes.** A half-written daily note in a synced vault propagates to every device. Write to a temp file in the same directory, then rename.
+- **Unmounted-vault guard.** iCloud Drive can be absent or still materialising. Writing into an unmounted mount point silently creates a local shadow directory that never syncs and diverges forever. Detect and refuse.
+- **Write caps.** A runaway sync must not write ten thousand files into a knowledge base.
+- No mocks; real temp directories and real temp-file SQLite. Zero absolute paths in the tree. Explicit `.ts` extensions.
+- `data/wf.db` is the live corpus: never write to it, never migrate it. `-readonly` fails while its WAL is hot — `VACUUM INTO` a copy and open that normally.
+- Commit after every passing test run. Branchless on `main`.
+
+---
+
+## Tasks
+
+### Wave 1 — the LLM backend and its cost cage (parallel)
+
+**Task 1 — Backend interface + Ollama.** The pluggable seam, and the local backend behind it. Ollama needs no cost flag. Note `CLAUDE.md`'s portability debt: Ollama on Apple Silicon uses Metal, and the eventual host may not run the same model — the interface, not the model choice, is the deliverable.
+
+**Task 2 — Anthropic backend behind the gate, plus the zero-dollar proof.** Ships `(a)` or `(b)` from `docs/costs.md` above. This is the task that makes the standing requirement real; it is not optional and it does not ship "next milestone."
+
+**Task 3 — Cache, daily token ceiling, cost logging.** Feeds the existing `enrichmentSpend` shape. Enrichment is re-run constantly over an append-only corpus, so the cache is what keeps cost near zero even with the flag on.
+
+### Wave 2 — the vault (needs Wave 1 for note content)
+
+**Task 4 — Vault safety layer.** The unmounted guard, atomic writes, write caps, and the "one subtree" invariant, as enforced primitives every later task is built on. **Test against a fixture vault containing hand-authored files.** Nothing in Wave 2 writes to the vault except through this.
+
+**Task 5 — Daily note.** Frontmatter (date, per-beat counts, market ribbon snapshot — the last is M4b-empty and must say so). Per-beat sections, top N each as a link plus a one-line why. Hard-override items pinned in a **Flagged** section at the top. Idempotent overwrite.
+
+**Task 6 — Weekly reading note.** Friday evening: the week's top `read_score` items **not yet opened**, with real blurbs — what the piece argues, why it is worth the time, estimated read time. §8.1 calls this *"the artifact I care most about"*, so it is the one place a generic LLM summary is a failure rather than a shortcut.
+
+**Task 7 — Entity notes with managed blocks.** The marker protocol, including the append-don't-clobber rule for a pre-existing file. Uses `getItemEntities`.
+
+**Task 8 — `saved/` promotion.** Write-once, then never touched by any job.
+
+**Task 9 — `vault verify` + `vault prune`.** Verify checks §8.1's invariants and reports violations. Prune is the only job allowed to delete, only inside `watchfloor/`.
+
+### Wave 3 — MCP and CLI
+
+**Task 10 — MCP server skeleton.** Read-only, separate process, separate credential, query logging.
+
+**Task 11 — §8.2 bot tools with `as_of`.** `signal_score` only, **never `read_score`**. No sentiment, directional label, price target, conviction rating, trade signal, or position size — and no field whose *name* implies a recommendation. The three M4b-dependent tools report "not configured", never an empty array. Resolve collision 1 above before building the default filter.
+
+**Task 12 — CLI.**
+
+### Wave 4
+
+**Task 13 — Acceptance.** The destructive vault test, the point-in-time proof, and the cost report.
+
+## M5 Acceptance
+
+- Full loop runs; **cost is visible and capped**, and with `WF_ALLOW_PAID_ANTHROPIC` unset, provably zero requests fire.
+- A point-in-time query returns **provably no post-dated items** — tested against real rows, including undated ones.
+- **Delete the entire `watchfloor/` tree, re-run sync: `daily/`, `weekly/`, `entities/` reproduce identically, and a hand-edited entity note's own prose survives untouched.**
+- §7.4's entity graph view renders `related_entities`.
+
+**Not in M5:** markets data (M4b), retention/PWA/backup (M6), map (M7), native shells (M8).
