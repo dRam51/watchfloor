@@ -47,6 +47,24 @@ introductory price, and is disqualified from the default path.
 | `ollama-local` | Ollama local inference | free-forever | — | local hardware | queues locally; no charge possible |
 | `anthropic-api` | Anthropic API (enrichment) | paid | `WF_ALLOW_PAID_ANTHROPIC` | per account | hard-disabled without the flag |
 
+> [!note] `ollama-local` stopped being speculative at M5 task 1 — there is now a client
+> The row above predates any code that used it. `src/enrich/llm/ollama.ts` is that code, and
+> it is deliberately the one outbound client in the tree that **does not call
+> `src/cost/gate.ts`** — §15: *"Ollama, being local, needs no flag."* A gate call there would
+> imply a `WF_ALLOW_PAID_OLLAMA` spend category, and adding one to `SPEND_CATEGORIES` for a
+> service that cannot bill would weaken the meaning of every other flag. A test greps that
+> module for `isPaidAllowed` / `assertPaidAllowed` / `WF_ALLOW_PAID` and fails if any appears.
+>
+> It still reports a cost on every call: `computeCost` (`src/enrich/llm/types.ts`) runs one
+> arithmetic path for every backend, and Ollama simply has zero rates. The consequence is
+> worth stating because it is not obvious — **a free-forever backend's spend stays `measured:
+> true` even when its token counts are unknown**, since zero times unknown is zero, whereas a
+> billable backend with uncounted tokens must report `amountUsd: null` / unmeasured. That is
+> the same distinction `enrichmentSpend` already publishes on `/api/dashboard/header`.
+>
+> The daemon's address is `config/llm.yaml`'s `base_url`, defaulting to loopback. Pointing it
+> at a host you do not own would change this row's classification; nothing in the code does.
+
 > [!note] `github-api` is the first and only `free-tier-no-card` entry, and the class is exact
 > Every other row is `free-forever`. GitHub differs because holding a personal access token
 > requires a GitHub **account** — so it is not "an account that cannot be billed" — while
