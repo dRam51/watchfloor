@@ -11,6 +11,7 @@ import { newsSitemapAdapter } from '../adapters/newsSitemap.ts';
 import { googleNewsAdapter } from '../adapters/googleNews.ts';
 import { githubSearchAdapter } from '../adapters/github.ts';
 import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
+import { enrichRepoReadmes } from '../ingest/repoEnrichment.ts';
 
 // Resolved relative to this module, not the process cwd: a process
 // supervisor (§12) may launch us from any working directory -- same pattern
@@ -95,6 +96,15 @@ try {
       // hand-run `npm run ingest` looked fine. See src/ingest/starSnapshots.ts.
       const stars = recordStarSnapshots(db, sources, report.finishedAt, env.WF_TZ);
 
+      // M4a task 11. Mirrors src/bin/ingest.ts's own call at the same point in
+      // the cycle -- and the daemon is the path that matters most here, because
+      // README coverage COMPOUNDS across polls: 359 repos against 8 requests a
+      // sweep reach full coverage in roughly 45 cycles, which only ever happens
+      // if the long-running process does it. A hand-run `npm run ingest` would
+      // look identical while covering 8 repos and stopping.
+      // See src/ingest/repoEnrichment.ts.
+      const readmes = await enrichRepoReadmes(db, sources, { now: report.finishedAt });
+
       const counts = new Map<string, number>();
       for (const outcome of report.sources) {
         counts.set(outcome.kind, (counts.get(outcome.kind) ?? 0) + 1);
@@ -105,9 +115,17 @@ try {
           ? ` -- stars: ${stars.inserted} new, ${stars.updated} updated` +
             (stars.unusable > 0 ? `, ${stars.unusable} unusable` : '')
           : '';
+      // `answered` and `failed` are reported separately on purpose: a failure
+      // answers nothing and the repo is retried, so folding the two into one
+      // "processed" count would hide the difference §4 suppresses on.
+      const readmeSummary =
+        readmes.examined > 0
+          ? ` -- readmes: ${readmes.answered} answered, ${readmes.report?.cached ?? 0} cached` +
+            (readmes.failed > 0 ? `, ${readmes.failed} failed` : '')
+          : '';
       console.log(
         `poll cycle finished at ${formatLocal(report.finishedAt, env.WF_TZ)} ` +
-          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}`,
+          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}${readmeSummary}`,
       );
     } catch (err) {
       // runPollCycle itself only ever rejects on a contract violation (e.g.

@@ -27,6 +27,7 @@ import { newsSitemapAdapter } from '../adapters/newsSitemap.ts';
 import { googleNewsAdapter } from '../adapters/googleNews.ts';
 import { githubSearchAdapter } from '../adapters/github.ts';
 import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
+import { enrichRepoReadmes } from '../ingest/repoEnrichment.ts';
 
 // Resolved relative to this module, not the process cwd -- matches
 // src/bin/api.ts / src/bin/scheduler.ts exactly.
@@ -83,6 +84,24 @@ try {
       console.log(
         `  star snapshots (${env.WF_TZ}): examined=${stars.examined} inserted=${stars.inserted} ` +
           `updated=${stars.updated} ignored=${stars.ignored} unusable=${stars.unusable}`,
+      );
+    }
+
+    // M4a task 11, beside the star snapshots and for the same reason: task 6's
+    // README enricher shipped complete and was called by nothing, so
+    // readmeExcerpt was null on every row and §4's "suppress repos with no
+    // README" rule never ran. Bounded by task 6's own budget policy (8 requests
+    // per sweep unauthenticated) and by a stored answer, so successive polls
+    // COMPOUND coverage rather than re-reading the same repos.
+    // See src/ingest/repoEnrichment.ts.
+    const readmes = await enrichRepoReadmes(db, sources, { now: report.finishedAt });
+    if (readmes.examined > 0) {
+      const r = readmes.report;
+      console.log(
+        `  repo readmes (${r?.mode ?? 'not run'}): examined=${readmes.examined} ` +
+          `answered=${readmes.answered} failed=${readmes.failed} cached=${r?.cached ?? 0} ` +
+          `requested=${r?.requested ?? 0} unusable=${readmes.unusable} ` +
+          `core-remaining=${r?.coreRemaining ?? 'unknown'}`,
       );
     }
 
