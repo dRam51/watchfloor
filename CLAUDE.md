@@ -7,9 +7,24 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **M0, M1, M2 complete. M3 API + dashboard — all 12 tasks landed; acceptance is the
-owner's judgement call and has not been made yet.** **1,507 tests.** 27 sources, all
-robots-verified. Pushed to GitHub through `6bf482c`.
+Status: **M0–M3 complete. M4a repos lane complete — 11 tasks (9 planned + 2 found by the live
+run).** **2,086 tests.** 28 sources, all robots-verified. **M4b (markets) is deferred, not
+skipped**: its entire input is `config/portfolio.yaml`, which only the owner can write. **M5
+(enrichment, vault, MCP, CLI) is in progress**, plan at
+`docs/superpowers/plans/2026-08-14-m5-enrichment-vault-mcp-cli.md`.
+
+> [!important] M4a's live run found three gaps that every unit test missed
+> All three were *between* correctly-built, fully-tested parts, and no task owned the seam.
+> **The `github_search` adapter was unreachable** — the registry lives in `src/scheduler/run.ts`
+> plus two composition roots, so it compiled fine and failed at *poll* time, once per cycle.
+> **Nothing wrote star snapshots**, so velocity would have returned `no_snapshots` forever
+> rather than for seven days — silent by construction, because that is a state the UI is
+> *designed* to render honestly. **Nothing called the README enricher**, so §4's fourth
+> suppression rule was inert. A test literally named *"only uses source types that have a
+> registered M1 adapter"* passed throughout, because no source used the type.
+>
+> The lesson is not "write more unit tests." It is that **a milestone is not done until it has
+> been run against reality**, and that every wave needs an explicit owner for the wiring.
 
 **There is a working dashboard.** `npm run migrate` → `npm run ingest` → `npm run score`, then
 `npm run dev` (API) and `npm run dev:web` (Vite, `http://localhost:5173`). It prompts once for
