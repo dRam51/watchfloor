@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, basename } from 'node:path';
 import {
   findForbiddenCalls,
   findVaultCallersTouchingFs,
@@ -114,6 +114,78 @@ describe('nothing outside src/vault/ may write to the vault directly', () => {
 
   it('finds no violation in the tree as it stands', () => {
     expect(findVaultCallersTouchingFs(ALL_SOURCES, [VAULT_DIR]).map((f) => f.path)).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------------
+  // The exemption above is the WHOLE `src/vault` directory, which means
+  // every note-writing module inside it -- daily, weekly, entities, saved --
+  // is exempt from the one rule that constrains them. That is backwards:
+  // the point of the rule is that Task 4's safety layer is the ONLY code
+  // allowed to touch the filesystem, and the note writers are precisely the
+  // callers it exists to constrain. Task 6 spotted this and closed it for
+  // `weekly.ts`; this closes it for the other three and states the
+  // membership as a list, so a fifth note writer added later is covered by
+  // default rather than by remembering.
+  //
+  // This is the same shape as M4a's "only uses source types that have a
+  // registered M1 adapter" -- an assertion whose name described the exact
+  // defect while its scope excluded the only files that could exhibit it.
+  // See this file's own header, which cites that case.
+  // ---------------------------------------------------------------------
+  // `findVaultCallersTouchingFs` cannot express this rule, and finding out
+  // why is the point. It requires importsVaultPackage(text) && importsNodeFs(text),
+  // where importsVaultPackage looks for `vault/` in a specifier. A note writer
+  // inside the package imports its siblings as './session.ts' -- no `vault/`
+  // segment -- so it fails the first condition and is never flagged NO MATTER
+  // WHAT IT IMPORTS. Narrowing the exemption from the directory to a file list
+  // therefore changes nothing: the first version of this block did exactly
+  // that, passed, and proved nothing.
+  //
+  // Inside the package the rule is simply "does it import fs", because these
+  // files ARE the package -- there is no second condition to gate on.
+  const SAFETY_LAYER = new Set(['mount.ts', 'paths.ts', 'session.ts']);
+
+  function vaultModulesTouchingFs(files: readonly SourceFile[]): string[] {
+    return files
+      .filter((f) => f.path === VAULT_DIR || f.path.startsWith(`${VAULT_DIR}/`))
+      .filter((f) => !SAFETY_LAYER.has(basename(f.path)))
+      .filter((f) => importsNodeFs(f.text))
+      .map((f) => f.path);
+  }
+
+  it('sees every note writer -- the non-vacuity proof for the rule below', () => {
+    const scanned = ALL_SOURCES.filter((f) => f.path.startsWith(`${VAULT_DIR}/`))
+      .filter((f) => !SAFETY_LAYER.has(basename(f.path)))
+      .map((f) => f.path);
+    for (const writer of ['daily.ts', 'weekly.ts', 'entities.ts', 'saved.ts']) {
+      expect(scanned).toContain(join(VAULT_DIR, writer));
+    }
+  });
+
+  it('detects fs in a note writer, so the rule below is not vacuous', () => {
+    expect(
+      vaultModulesTouchingFs([
+        {
+          path: join(VAULT_DIR, 'monthly.ts'),
+          text: "import { writeFileSync } from 'node:fs';\nimport { openVaultSession } from './session.ts';\n",
+        },
+      ]),
+    ).toEqual([join(VAULT_DIR, 'monthly.ts')]);
+  });
+
+  it('no note writer touches fs -- only the safety layer does', () => {
+    expect(vaultModulesTouchingFs(ALL_SOURCES)).toEqual([]);
+  });
+
+  it('the safety layer really is the thing being exempted', () => {
+    // If these three ever stop importing fs, the exemption list is stale and
+    // this whole block is guarding nothing.
+    const layer = ALL_SOURCES.filter((f) => SAFETY_LAYER.has(basename(f.path)))
+      .filter((f) => f.path.startsWith(`${VAULT_DIR}/`))
+      .filter((f) => importsNodeFs(f.text))
+      .map((f) => basename(f.path))
+      .sort();
+    expect(layer).toEqual(['mount.ts', 'paths.ts', 'session.ts']);
   });
 });
 
