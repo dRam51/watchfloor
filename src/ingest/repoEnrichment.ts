@@ -135,6 +135,51 @@ export const NO_README_FRESH_FOR_MS = 24 * HOUR_MS;
  */
 export const CORE_RESERVE = 10;
 
+/**
+ * Kinds of `SourceOutcome` (src/scheduler/run.ts) that mean the source was not
+ * looked at this cycle at all. Everything else -- including `failure` --
+ * means it was due and something was attempted.
+ */
+const NOT_LOOKED_AT = new Set(['not-due', 'backoff', 'skipped']);
+
+/**
+ * Whether a finished poll cycle actually polled a repo source -- the gate both
+ * entrypoints put in front of {@link enrichRepoReadmes}.
+ *
+ * ## Without it the sweep runs sixty times an hour
+ *
+ * `WF_SCHEDULER_TICK_INTERVAL_MS` defaults to 60,000, and a poll cycle runs on
+ * every tick. Task 6 sized its 8-requests-per-sweep cap against a very
+ * different number: "an hourly poll then spends 13% of the budget and leaves
+ * 52 requests for everything else." Run it per tick instead and the entire
+ * 60/hour Core budget is gone in about six minutes, after which every
+ * subsequent tick loops the whole candidate list and refuses on budget -- with
+ * Core pinned at the reserve floor for the remaining fifty-four minutes. That
+ * is exactly the outcome `src/enrich/repo.ts` forbids: "Enrichment is the
+ * LEAST urgent Core consumer; it must never be the reason something else
+ * cannot run."
+ *
+ * Tying the cadence to the repo source's own `poll_interval` gives the
+ * operator ONE knob for how much GitHub traffic this system generates, in
+ * `config/sources.yaml` rather than in code. At the configured 13m that is
+ * roughly 37 Core requests an hour at full tilt, and it falls away to nothing
+ * as coverage compounds.
+ *
+ * **A `failure` outcome still counts as due.** Core and search have separate
+ * ceilings and separate reset windows (`src/fetch/github.ts`), so a search
+ * outage is no reason to stop reading READMEs for repos already stored.
+ */
+export function repoSourceWasDue(
+  sources: readonly Source[],
+  outcomes: ReadonlyArray<{ sourceId: string; kind: string }>,
+): boolean {
+  const repoSourceIds = new Set(
+    sources.filter((s) => s.type === 'github_search').map((s) => s.id),
+  );
+  if (repoSourceIds.size === 0) return false;
+  return outcomes.some((o) => repoSourceIds.has(o.sourceId) && !NOT_LOOKED_AT.has(o.kind));
+}
+
 /** What one enrichment sweep did. */
 export interface RepoEnrichmentSweep {
   /** Distinct repos considered, after collapsing a rename's two item_keys. */

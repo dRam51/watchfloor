@@ -46,6 +46,15 @@ describe('every post-cycle pass is wired into BOTH composition roots', () => {
     }
   }
 
+  it('gates README enrichment on the repo source being DUE, in both', () => {
+    // The scheduler ticks every 60s by default; task 6 sized its per-sweep cap
+    // against an hourly poll. Without this gate the sweep runs 60x an hour and
+    // holds Core at the reserve floor -- see repoSourceWasDue.
+    for (const bin of BINS) {
+      expect(binSource(bin)).toMatch(/\brepoSourceWasDue\s*\(/);
+    }
+  });
+
   it('registers the github_search adapter in both, since a pass over zero repos does nothing', () => {
     // The first of the three gaps. Kept here rather than in its own file
     // because all three are one failure mode and one list is harder to let rot.

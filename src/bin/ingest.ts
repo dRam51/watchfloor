@@ -27,7 +27,7 @@ import { newsSitemapAdapter } from '../adapters/newsSitemap.ts';
 import { googleNewsAdapter } from '../adapters/googleNews.ts';
 import { githubSearchAdapter } from '../adapters/github.ts';
 import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
-import { enrichRepoReadmes } from '../ingest/repoEnrichment.ts';
+import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
 
 // Resolved relative to this module, not the process cwd -- matches
 // src/bin/api.ts / src/bin/scheduler.ts exactly.
@@ -93,9 +93,13 @@ try {
     // README" rule never ran. Bounded by task 6's own budget policy (8 requests
     // per sweep unauthenticated) and by a stored answer, so successive polls
     // COMPOUND coverage rather than re-reading the same repos.
+    // Gated on the repo source actually having been due -- see
+    // repoSourceWasDue for why the sweep must not run on every tick.
     // See src/ingest/repoEnrichment.ts.
-    const readmes = await enrichRepoReadmes(db, sources, { now: report.finishedAt });
-    if (readmes.examined > 0) {
+    const readmes = repoSourceWasDue(sources, report.sources)
+      ? await enrichRepoReadmes(db, sources, { now: report.finishedAt })
+      : null;
+    if (readmes !== null && readmes.examined > 0) {
       const r = readmes.report;
       console.log(
         `  repo readmes (${r?.mode ?? 'not run'}): examined=${readmes.examined} ` +

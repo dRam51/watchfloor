@@ -11,7 +11,7 @@ import { newsSitemapAdapter } from '../adapters/newsSitemap.ts';
 import { googleNewsAdapter } from '../adapters/googleNews.ts';
 import { githubSearchAdapter } from '../adapters/github.ts';
 import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
-import { enrichRepoReadmes } from '../ingest/repoEnrichment.ts';
+import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
 
 // Resolved relative to this module, not the process cwd: a process
 // supervisor (§12) may launch us from any working directory -- same pattern
@@ -102,8 +102,16 @@ try {
       // sweep reach full coverage in roughly 45 cycles, which only ever happens
       // if the long-running process does it. A hand-run `npm run ingest` would
       // look identical while covering 8 repos and stopping.
+      //
+      // GATED on the repo source having been due this cycle. This tick fires
+      // every WF_SCHEDULER_TICK_INTERVAL_MS (default 60s) while task 6 sized
+      // its per-sweep cap against an HOURLY poll -- ungated, the sweep would
+      // drain the whole 60/hour Core budget in six minutes and hold it at the
+      // reserve floor thereafter. See repoSourceWasDue.
       // See src/ingest/repoEnrichment.ts.
-      const readmes = await enrichRepoReadmes(db, sources, { now: report.finishedAt });
+      const readmes = repoSourceWasDue(sources, report.sources)
+        ? await enrichRepoReadmes(db, sources, { now: report.finishedAt })
+        : null;
 
       const counts = new Map<string, number>();
       for (const outcome of report.sources) {
@@ -119,7 +127,7 @@ try {
       // answers nothing and the repo is retried, so folding the two into one
       // "processed" count would hide the difference §4 suppresses on.
       const readmeSummary =
-        readmes.examined > 0
+        readmes !== null && readmes.examined > 0
           ? ` -- readmes: ${readmes.answered} answered, ${readmes.report?.cached ?? 0} cached` +
             (readmes.failed > 0 ? `, ${readmes.failed} failed` : '')
           : '';

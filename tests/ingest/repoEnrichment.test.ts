@@ -15,6 +15,7 @@ import {
   NO_README_FRESH_FOR_MS,
   enrichRepoReadmes,
   readmeObservationFor,
+  repoSourceWasDue,
 } from '../../src/ingest/repoEnrichment.ts';
 import {
   getRepoReadme,
@@ -505,6 +506,47 @@ describe('enrichRepoReadmes — scope and shape', () => {
       else process.env.TZ = original;
     }
     expect(results).toEqual([NOW, NOW, NOW]);
+  });
+});
+
+// ===========================================================================
+// Cadence. The scheduler ticks every 60s by DEFAULT, but task 6 sized its
+// 8-requests-per-sweep cap against "an hourly poll ... 13% of the budget".
+// Running the sweep on every tick spends the whole 60/hour Core budget in
+// about six minutes and then holds it at the reserve floor for the rest of the
+// hour -- which is precisely what task 6 says enrichment must never do:
+// "it must never be the reason something else cannot run."
+// ===========================================================================
+
+describe('repoSourceWasDue — ties the enrichment cadence to the repo source poll_interval', () => {
+  const outcome = (kind: string, sourceId = 'github-topics') => ({ sourceId, kind });
+
+  it('is true when a github_search source was actually polled', () => {
+    expect(repoSourceWasDue([searchSource()], [outcome('success')])).toBe(true);
+  });
+
+  it('is true when the SEARCH failed -- a README is a different endpoint and a different budget', () => {
+    // Core and search have separate ceilings and separate reset windows
+    // (src/fetch/github.ts). A search outage is no reason to stop reading
+    // READMEs for repos already stored.
+    expect(repoSourceWasDue([searchSource()], [outcome('failure')])).toBe(true);
+  });
+
+  it('is false when the source was not due this tick', () => {
+    expect(repoSourceWasDue([searchSource()], [outcome('not-due')])).toBe(false);
+  });
+
+  it('is false when the source is in backoff or disabled', () => {
+    expect(repoSourceWasDue([searchSource()], [outcome('backoff')])).toBe(false);
+    expect(repoSourceWasDue([searchSource()], [outcome('skipped')])).toBe(false);
+  });
+
+  it('ignores a non-github_search source that WAS polled', () => {
+    expect(repoSourceWasDue([searchSource(), rssSource()], [outcome('not-due'), outcome('success', 'krebs')])).toBe(false);
+  });
+
+  it('is false when no github_search source is configured at all', () => {
+    expect(repoSourceWasDue([rssSource()], [outcome('success', 'krebs')])).toBe(false);
   });
 });
 
