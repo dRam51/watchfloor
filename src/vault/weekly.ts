@@ -13,7 +13,13 @@
  * relying on a rule that does not cover it.
  */
 
-import { assertCalendarDay } from '../db/repoSnapshots.ts';
+import type { Db } from '../db/connection.ts';
+import { assertCalendarDay, localDay } from '../db/repoSnapshots.ts';
+import { assertCanonicalTimestamp, getCurrentItem, BEATS, type Beat } from '../domain/item.ts';
+import { getItemFirstFetchedAt } from '../domain/itemFirstFetchedAt.ts';
+import { getItemState } from '../domain/itemState.ts';
+import { rankBeat, type RankDeps } from '../score/rank.ts';
+import type { Kind } from '../sources/load.ts';
 import { WATCHFLOOR_BEGIN_MARKER, WATCHFLOOR_END_MARKER } from './frontmatter.ts';
 
 // ---------------------------------------------------------------------------
@@ -529,4 +535,258 @@ export function validateBlurbText(title: string, text: string): BlurbValidation 
     return { ok: false, reason: 'restated_headline' };
   }
   return { ok: true, text: oneLine };
+}
+
+// ---------------------------------------------------------------------------
+// Selecting the week's reading
+// ---------------------------------------------------------------------------
+
+/**
+ * The content kinds that count as "a piece to read".
+ *
+ * **A departure from a literal reading of §8.1, and it needs the owner's
+ * ratification exactly as RULING 1 did.** The finding that forced it: ranked
+ * by decayed `read_score` over the live corpus (5,937 items, `now` =
+ * 2026-08-15T22:00Z), *eighteen of the top twenty items are bare CVE records*
+ * -- `CVE-2026-21832`, `CVE-2026-73487`, ... -- followed by four GitHub
+ * repository rows. "What the piece argues" has no answer for `CVE-2026-21832`.
+ *
+ * That is not a scoring defect. `nvd-cve` is a weight-1.6 primary source and
+ * cyber's read half-life is 336h, so a recent CVE genuinely scores well on a
+ * profile that rewards primary sources. It is a population mismatch, and
+ * §8.1's own wording is the evidence for which population it meant: it says
+ * "the piece".
+ *
+ * `kind` is the axis the owner already chose for this class of question
+ * (RULING 1). The bot's default is `news + advisory` -- act on it; a reading
+ * list's is `news + paper + blog` -- read it. Advisories and aggregator rows
+ * are what `signal_score` and the daily note's Flagged section exist for.
+ * Source-level, stable, and overridable through {@link WeeklySelectionDeps},
+ * so widening it is one argument rather than an edit here.
+ */
+export const WEEKLY_READING_KINDS: ReadonlySet<Kind> = new Set<Kind>(['news', 'paper', 'blog']);
+
+/**
+ * How many blurbed entries a note carries.
+ *
+ * Counts BLURBABLE items only. Items we hold only a headline for still rank
+ * and are still listed, in their own section -- they simply do not consume the
+ * limit, because a week whose top twelve are all AP wire headlines would
+ * otherwise produce a reading note with nothing to read.
+ */
+export const DEFAULT_WEEKLY_LIMIT = 12;
+
+/** How many passed-over headline-only items the note names before it stops. */
+export const HEADLINE_ONLY_LIMIT = 10;
+
+export interface WeeklySelectionDeps {
+  /** Decay and overrides config, as `src/score/rank.ts` consumes them. */
+  readonly rank: RankDeps;
+  /**
+   * `sourceId -> kind`, built from `config/sources.yaml` the same way
+   * `src/api/routes/feed.ts` builds it. A source missing from the map, or with
+   * no `kind`, is treated as not-a-reading-kind: a source we cannot classify
+   * is one we cannot promise is a piece of writing.
+   */
+  readonly sourceKinds: ReadonlyMap<string, Kind | null>;
+  readonly readingKinds?: ReadonlySet<Kind>;
+}
+
+export interface WeeklySelectionOptions {
+  /** Canonical UTC instant. Injected -- nothing here reads a clock. */
+  readonly now: string;
+  /** WF_TZ. Decides which ISO week `now` falls in, never the host's zone. */
+  readonly tz: string;
+  readonly limit?: number;
+}
+
+/** One item that made the week's list. */
+export interface WeeklyCandidate {
+  readonly itemKey: string;
+  readonly title: string;
+  readonly url: string;
+  readonly sourceId: string;
+  readonly kind: Kind | null;
+  /** The beat it scored highest in, of the beats it belongs to. */
+  readonly beat: Beat;
+  /** `read_score` with this read's decay applied -- never a stored number. */
+  readonly readScore: number;
+  readonly publishedAt: string | null;
+  /** `publishedAt`, or the first instant this system saw the item. */
+  readonly effectiveAt: string;
+  /** `effectiveAt` as a calendar day in WF_TZ. What the week window compares. */
+  readonly effectiveDay: string;
+  readonly evidence: BlurbEvidence;
+  readonly readTime: ReadTimeEstimate;
+}
+
+/** Why items that ranked did not become candidates. Rendered, not swallowed. */
+export interface WeeklyExclusions {
+  readonly wrongKind: number;
+  readonly alreadyRead: number;
+  readonly dismissed: number;
+  readonly outsideWeek: number;
+}
+
+export interface WeeklySelection {
+  readonly week: IsoWeek;
+  /** Blurbable items, highest decayed `read_score` first. */
+  readonly candidates: readonly WeeklyCandidate[];
+  /**
+   * Items that ranked but carry no material -- listed in the note without a
+   * blurb rather than dropped, so the note does not misreport the ranking.
+   */
+  readonly headlineOnly: readonly WeeklyCandidate[];
+  /** Distinct unread, in-week, reading-kind items considered. */
+  readonly consideredCount: number;
+  readonly excluded: WeeklyExclusions;
+}
+
+interface RankedForWeek {
+  readonly itemKey: string;
+  readonly title: string;
+  readonly sourceId: string;
+  readonly beat: Beat;
+  readonly readScore: number;
+  readonly publishedAt: string | null;
+}
+
+/**
+ * Every scored item, best beat only, highest decayed `read_score` first.
+ *
+ * Ranking per beat and concatenating lists a cross-listed item once per lane
+ * -- the mistake `CLAUDE.md` records as having bitten four times. Deduping on
+ * `item_key` and keeping the best-scoring lane is the same shape as
+ * `pickBestBeat` in `src/api/routes/feed.ts`.
+ */
+function rankedAcrossBeats(db: Db, deps: WeeklySelectionDeps, now: string): RankedForWeek[] {
+  const best = new Map<string, RankedForWeek>();
+  for (const beat of BEATS) {
+    // `markets` has no configured sources (M4b is deferred) and no entry in
+    // config/decay.yaml's `beats`, so ranking it is not merely empty -- it
+    // would ask for a half-life that file deliberately does not define.
+    if (beat === 'markets') continue;
+    for (const item of rankBeat(db, beat, now, deps.rank, 'read').items) {
+      const existing = best.get(item.itemKey);
+      if (existing === undefined || item.readScore > existing.readScore) {
+        best.set(item.itemKey, {
+          itemKey: item.itemKey,
+          title: item.title,
+          sourceId: item.sourceId,
+          beat: item.beat,
+          readScore: item.readScore,
+          publishedAt: item.publishedAt,
+        });
+      }
+    }
+  }
+  return [...best.values()].sort(
+    (a, b) => b.readScore - a.readScore || a.title.localeCompare(b.title),
+  );
+}
+
+/**
+ * The week's top unread items, and the evidence we hold about each.
+ *
+ * Order of filters is deliberate: the cheap in-memory ones (kind, week window
+ * for a dated item) run before any per-item query, so a corpus of six thousand
+ * items costs a handful of reads rather than three per item.
+ */
+export function selectWeeklyReading(
+  db: Db,
+  deps: WeeklySelectionDeps,
+  opts: WeeklySelectionOptions,
+): WeeklySelection {
+  assertCanonicalTimestamp('now', opts.now);
+  const week = isoWeekOf(localDay(opts.now, opts.tz));
+  const readingKinds = deps.readingKinds ?? WEEKLY_READING_KINDS;
+  const limit = opts.limit ?? DEFAULT_WEEKLY_LIMIT;
+
+  const candidates: WeeklyCandidate[] = [];
+  const headlineOnly: WeeklyCandidate[] = [];
+  let wrongKind = 0;
+  let alreadyRead = 0;
+  let dismissed = 0;
+  let outsideWeek = 0;
+  let consideredCount = 0;
+
+  for (const ranked of rankedAcrossBeats(db, deps, opts.now)) {
+    if (candidates.length >= limit && headlineOnly.length >= HEADLINE_ONLY_LIMIT) break;
+
+    const kind = deps.sourceKinds.get(ranked.sourceId) ?? null;
+    if (kind === null || !readingKinds.has(kind)) {
+      wrongKind += 1;
+      continue;
+    }
+
+    // An undated item's baseline is the FIRST fetch across every version
+    // sharing its key, never the current version's -- cisa-kev re-delivers its
+    // whole catalogue and would otherwise look new on every poll
+    // (src/domain/itemFirstFetchedAt.ts). Queried only when it is needed.
+    const effectiveAt =
+      ranked.publishedAt ?? getItemFirstFetchedAt(db, ranked.itemKey) ?? opts.now;
+    const effectiveDay = localDay(effectiveAt, opts.tz);
+    if (effectiveDay < week.startDay || effectiveDay > week.endDay) {
+      outsideWeek += 1;
+      continue;
+    }
+
+    const state = getItemState(db, ranked.itemKey);
+    if (state?.readAt !== null && state?.readAt !== undefined) {
+      alreadyRead += 1;
+      continue;
+    }
+    if (state?.dismissedAt !== null && state?.dismissedAt !== undefined) {
+      dismissed += 1;
+      continue;
+    }
+
+    const item = getCurrentItem(db, ranked.itemKey);
+    // Unreachable: the key came from a scored row moments ago. Skipped rather
+    // than thrown so one impossible row cannot cost the week its note.
+    if (item === null) continue;
+
+    consideredCount += 1;
+
+    // The CURRENT version's own title, excerpt and payload -- not the
+    // ranking row's. A wire service edits a story in place under one URL, and
+    // ten keys in the live corpus have versions whose claim reverses
+    // ("Wall Street holds near its record" -> "slips back from its record").
+    // Beats and entities are the fields the single-version read gets wrong;
+    // content is the field it gets right.
+    const evidence = classifyEvidence({
+      title: item.title,
+      summaryRaw: item.summaryRaw,
+      rawJson: item.rawJson,
+    });
+
+    const candidate: WeeklyCandidate = {
+      itemKey: ranked.itemKey,
+      title: item.title,
+      url: item.url,
+      sourceId: ranked.sourceId,
+      kind,
+      beat: ranked.beat,
+      readScore: ranked.readScore,
+      publishedAt: item.publishedAt,
+      effectiveAt,
+      effectiveDay,
+      evidence,
+      readTime: estimateReadTime(evidence),
+    };
+
+    if (evidence.level === 'headline') {
+      if (headlineOnly.length < HEADLINE_ONLY_LIMIT) headlineOnly.push(candidate);
+    } else if (candidates.length < limit) {
+      candidates.push(candidate);
+    }
+  }
+
+  return {
+    week,
+    candidates,
+    headlineOnly,
+    consideredCount,
+    excluded: { wrongKind, alreadyRead, dismissed, outsideWeek },
+  };
 }
