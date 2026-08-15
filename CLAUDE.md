@@ -213,14 +213,27 @@ and reintroduces the error.
   tooling reads as authoritative — and was **not** gitignored, so it was simultaneously
   readable as instructions and one `git add -A` from being committed as guidance.
 
-  Investigated: **no hook, script, or plugin generates it.** `.claude/settings.json` has no
-  `hooks` key, user-scope settings have none, and this file is the only one in the tree that
-  mentions it. It was a one-off artifact, not a build product, so it will not come back.
+  ~~Investigated: **no hook, script, or plugin generates it.**~~ **That conclusion was wrong,
+  and a fresh corrupt copy appeared at the repo root the same evening, timestamped during an
+  active session.** The original search covered this repo's settings, user-scope Claude
+  settings, and plugins — all correctly, and all in the wrong place.
 
-  Moved to `attic/AGENTS.md.corrupt-2026-08-14` and gitignored — preserved on this machine,
-  absent from a clone, exactly how the archived first-run database is handled. The repo-root
-  path is deliberately left free: a *correct* `AGENTS.md` could be written there later.
-  **This file remains the authority** regardless.
+  **The generator is OpenAI Codex (ChatGPT.app).** `AGENTS.md` is Codex's own
+  instruction-file convention, exactly as `CLAUDE.md` is Claude's, and it mirrors this file
+  into that path with a vendor-name substitution — which is precisely what corrupts the three
+  places "claude" appears inside a real path or package name. Evidence: `~/.codex/` holds
+  sessions naming this repo, plus a `claude-cowork-import-history.json`, and
+  `com.openai.codex` processes run on this machine. **Nothing in Claude's configuration is
+  involved, which is why searching Claude's configuration found nothing** — the lesson worth
+  keeping is that "no hook in *our* tool generates it" does not establish "nothing generates
+  it" on a machine running more than one agent.
+
+  The original copy is at `attic/AGENTS.md.corrupt-2026-08-14`. The repo-root path is now
+  **gitignored** (`/AGENTS.md`) rather than left free: it will keep being regenerated, and
+  each regeneration is a corrupt instruction file sitting in a public repo's root. A
+  deliberately-authored one can still be committed with `git add -f`.
+  **This file remains the authority** regardless — and if you use Codex here, be aware the
+  `AGENTS.md` it reads is a lossy copy of this one.
 
 ## How to run
 

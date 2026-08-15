@@ -28,12 +28,29 @@ config/portfolio.yaml
 # AGENTS.md is a real convention that some agent tooling reads as authoritative,
 # and this file was NOT gitignored while it sat at the repo root -- so it was
 # both readable as instructions and one `git add -A` away from being committed
-# as if it were guidance. Investigated 2026-08-14: no hook, script, or plugin in
-# this repo or in user-scope settings generates it, and CLAUDE.md is the only
-# file that references it, so it will not reappear on its own.
+# as if it were guidance.
 #
-# The repo-root path is left free deliberately: a correct AGENTS.md could be
-# written there later. CLAUDE.md remains the authority either way.
+# CORRECTION, 2026-08-14 evening: the paragraph that used to sit here said "no
+# hook, script, or plugin generates it ... so it will not reappear on its own."
+# That was wrong, and a fresh corrupt copy appeared at the repo root the same
+# day, timestamped DURING an active session. The original investigation searched
+# this repo's settings, user-scope Claude settings, and plugins -- all correctly,
+# and all in the wrong place.
+#
+# The generator is OpenAI Codex (ChatGPT.app). `AGENTS.md` is Codex's own
+# instruction-file convention, the way CLAUDE.md is Claude's, and it mirrors
+# CLAUDE.md into it with a vendor-name substitution. That substitution is what
+# corrupts the three places "claude" appears inside a real path or package name.
+# Evidence: ~/.codex/ holds sessions referencing this repo by name, plus a
+# claude-cowork-import-history.json, and com.openai.codex processes run on this
+# machine. Nothing in Claude's configuration is involved, which is exactly why
+# searching Claude's configuration found nothing.
+#
+# So the repo-root path is now ignored rather than left free: it will keep being
+# regenerated, and each regeneration is a corrupt instruction file in a PUBLIC
+# repo's root. A deliberately-authored AGENTS.md can still be committed with
+# `git add -f`. CLAUDE.md remains the authority either way.
+/AGENTS.md
 attic/AGENTS.md.corrupt-2026-08-14
 
 # A stray, byte-identical duplicate of src/score/overrides.ts that was written
@@ -63,3 +80,11 @@ attic/wf-route-debug.mjs.task7-scratch-2026-08-14
 # verification pass -- never written to, matches the *.db ignore pattern
 # above already, listed here only for the paper trail.
 data/scratch-verify-task7.db
+
+# The VACUUM INTO scratch copy of data/wf.db made for M4a task 11's live
+# verification (migrate 0008, three real enrichment passes, one real
+# `npm run ingest`). data/wf.db itself was never migrated or written to --
+# verified afterwards: still 7 applied migrations, no github_repo_readmes
+# table, mtime unchanged. Matches the *.db pattern above already; listed here
+# for the paper trail, exactly as task 7's copy is.
+data/scratch-verify-task11.db
