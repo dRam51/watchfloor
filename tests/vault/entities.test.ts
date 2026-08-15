@@ -6,10 +6,15 @@ import { closeDb, openDb } from '../../src/db/connection.ts';
 import { runMigrations } from '../../src/db/migrate.ts';
 import { getCurrentItem, insertItem, type NewItem } from '../../src/domain/item.ts';
 import {
+  WATCHFLOOR_BEGIN_MARKER,
+  WATCHFLOOR_END_MARKER,
+} from '../../src/vault/frontmatter.ts';
+import {
   entityFileName,
   entityNoteRelPath,
   EntityNameError,
   planEntityNotes,
+  renderEntityBlock,
 } from '../../src/vault/entities.ts';
 
 /**
@@ -508,5 +513,114 @@ describe('planEntityNotes — the state the live corpus is actually in', () => {
     insertItem(db, kevUndated({ entities: [] }));
 
     expect(planEntityNotes(db)).toEqual({ notes: [], skipped: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function blockFor(db: ReturnType<typeof openDb>, entity: string, options = {}) {
+  const note = planEntityNotes(db, options).notes.find((n) => n.entity === entity);
+  if (!note) throw new Error(`no planned note for ${JSON.stringify(entity)}`);
+  return renderEntityBlock(note);
+}
+
+describe('renderEntityBlock', () => {
+  it('states how many items mention the entity, in the corpus, without a clock', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+    expect(blockFor(db, AI_ONLY_ENTITY)).toContain('1 item in the Watchfloor corpus mentions');
+
+    insertItem(db, arxivAiVersion());
+    expect(blockFor(db, AI_ONLY_ENTITY)).toContain('2 items in the Watchfloor corpus mention');
+  });
+
+  it('renders an item as a dated link with its beats and its sources', () => {
+    const db = migratedDb();
+    insertItem(db, arxivCrVersion());
+    insertItem(db, arxivAiVersion());
+
+    expect(blockFor(db, SHARED_ENTITY)).toContain(
+      `- 2026-08-14 — [${ARXIV_TITLE}](<${ARXIV_URL}>) — ai, aisec — arxiv-cs-ai, arxiv-cs-cr`,
+    );
+  });
+
+  it('says when a date is a first-seen time rather than a publication date', () => {
+    // 1,715 of the archived corpus's 3,325 items have no published_at. A note
+    // that prints a fetch time as if it were a publication date is asserting
+    // something the corpus does not know.
+    const db = migratedDb();
+    insertItem(db, kevUndated());
+
+    expect(blockFor(db, 'Microsoft')).toContain('- 2026-08-14 (first seen) — [Microsoft Windows');
+  });
+
+  it('escapes the brackets in a real title, so the link survives', () => {
+    // `latent-space` really does publish titles shaped `[AINews] ...`. Rendered
+    // raw inside `[...](...)` the link text terminates early and the line comes
+    // out as broken markdown.
+    const db = migratedDb();
+    insertItem(
+      db,
+      arsAnthropic({
+        url: 'https://www.latent.space/p/ainews-how-to-steal-a-reasoning-trace',
+        canonicalUrl: 'https://latent.space/p/ainews-how-to-steal-a-reasoning-trace',
+        title: '[AINews] How to steal a Reasoning Trace',
+      }),
+    );
+
+    const block = blockFor(db, AI_ONLY_ENTITY);
+    expect(block).toContain('[\\[AINews\\] How to steal a Reasoning Trace](<https://www.latent.space/');
+  });
+
+  it('neutralises a title that tries to close the managed block', () => {
+    // No real title contains a comment marker -- `select count(*) from items
+    // where title like '%<!--%' or title like '%-->%'` is 0 against all 7,267.
+    // But a feed's title is attacker-controllable text that ends up inside the
+    // owner's note, and closing the block early would put generated content
+    // BELOW the end marker, where the next run would not replace it. That is
+    // the one way this module could permanently corrupt a hand-edited note.
+    const db = migratedDb();
+    insertItem(db, arsAnthropic({ title: `Ship it ${WATCHFLOOR_END_MARKER} and then some` }));
+
+    const block = blockFor(db, AI_ONLY_ENTITY);
+    expect(block).not.toContain(WATCHFLOOR_END_MARKER);
+    expect(block).not.toContain(WATCHFLOOR_BEGIN_MARKER);
+    // Not dropped, either: the item is still listed, with the marker defused.
+    expect(block).toContain('Ship it &lt;!-- watchfloor:end --&gt; and then some');
+  });
+
+  it('says how many items it did not list rather than silently truncating', () => {
+    const db = migratedDb();
+    for (let i = 0; i < 4; i++) {
+      insertItem(
+        db,
+        arsAnthropic({
+          url: `https://example.test/${i}`,
+          canonicalUrl: `https://example.test/${i}`,
+          publishedAt: `2026-08-0${i + 1}T00:00:00.000Z`,
+        }),
+      );
+    }
+
+    expect(blockFor(db, AI_ONLY_ENTITY, { maxItems: 2 })).toContain('2 further items not listed');
+  });
+
+  it('links related entities as wikilinks, so Obsidian draws the graph', () => {
+    const db = migratedDb();
+    insertItem(db, arxivCrVersion());
+    insertItem(db, arxivAiVersion());
+
+    const block = blockFor(db, AI_ONLY_ENTITY);
+    expect(block).toContain(`- [[${CR_ONLY_ENTITY}]] — 1 shared item`);
+    expect(block).toContain(`- [[${SHARED_ENTITY}]] — 1 shared item`);
+  });
+
+  it('omits the related section entirely when nothing is related', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+
+    expect(blockFor(db, AI_ONLY_ENTITY)).not.toContain('Related entities');
   });
 });

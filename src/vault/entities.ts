@@ -425,3 +425,142 @@ export function planEntityNotes(db: Db, options: EntityPlanOptions = {}): Entity
 
   return { notes, skipped: skipped.sort((a, b) => byCodePoint(a.entity, b.entity)) };
 }
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+/**
+ * Escapes text that is about to sit inside a Markdown link label, in a file
+ * whose structure is delimited by HTML comments.
+ *
+ * Two distinct hazards, both from feed-supplied text:
+ *
+ * - `[`, `]` and backslash break the `[label](target)` form. Real, not
+ *   theoretical: the `latent-space` source publishes titles shaped
+ *   `[AINews] ...`, so a raw render terminates the label at the first `]` and
+ *   emits broken Markdown for every one of them.
+ * - `<` and `>` are escaped to entities so that no title can contain
+ *   `<!-- watchfloor:end -->`. That is the one input that could permanently
+ *   corrupt a hand-edited note: an early end marker leaves the rest of the
+ *   generated text sitting BELOW the block, where the next run neither
+ *   replaces nor removes it, and the owner's own prose is then separated from
+ *   their file by our leftovers. `assertNoMarkers` in `./frontmatter.ts` would
+ *   throw on it — correctly — but a throw aborts the whole entity sync over
+ *   one hostile title, so it is defused here and the item is still listed.
+ *
+ * No title in the live corpus contains a comment marker today (0 of 7,267).
+ * That is a fact about this week's feeds, not a property of the input.
+ */
+function escapeLinkLabel(text: string): string {
+  let out = '';
+  for (const char of text) {
+    if (char === '\\') out += '\\\\';
+    else if (char === '[') out += '\\[';
+    else if (char === ']') out += '\\]';
+    else if (char === '<') out += '&lt;';
+    else if (char === '>') out += '&gt;';
+    else out += char;
+  }
+  return out;
+}
+
+/**
+ * The `<...>` destination form tolerates parentheses and spaces, which no live
+ * URL currently has and any URL may. Only the three characters that would
+ * terminate that form are encoded, and each is percent-encoded rather than
+ * dropped, so the URL still resolves.
+ */
+function escapeLinkTarget(url: string): string {
+  return url.replace(/ /g, '%20').replace(/</g, '%3C').replace(/>/g, '%3E');
+}
+
+/**
+ * The calendar date, in UTC.
+ *
+ * Not `WF_TZ`: this module reads no configuration and no clock, which is what
+ * makes the block a pure function of the corpus. Every stored timestamp is
+ * already canonical UTC (`assertCanonicalTimestamp`), so the slice is exact
+ * rather than a conversion, and the same corpus renders the same date on every
+ * host. The daily note keys its FILENAME on `WF_TZ` because it is naming a day;
+ * this is labelling an instant, which is a different question.
+ */
+function dateOf(timestamp: string): string {
+  return timestamp.slice(0, 10);
+}
+
+function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
+}
+
+function itemLine(item: EntityItemRef): string {
+  // "(first seen)" rather than a bare date: 1,715 of the archived corpus's
+  // 3,325 items carry no published_at, and printing a fetch time as if it were
+  // a publication date asserts something the corpus does not know.
+  const when = item.dated ? dateOf(item.at) : `${dateOf(item.at)} (first seen)`;
+  const label = escapeLinkLabel(item.title);
+  const target = escapeLinkTarget(item.url);
+  return `- ${when} — [${label}](<${target}>) — ${item.beats.join(', ')} — ${item.sourceIds.join(', ')}`;
+}
+
+/**
+ * The managed block's body: everything between the markers, and nothing else.
+ *
+ * ## What goes in, and why it is this and not more
+ *
+ * §8.1 does not enumerate the contents, so the constraint that decides them is
+ * M5 acceptance: *delete the tree, re-run sync, `entities/` reproduces
+ * identically.* Everything here is therefore a **pure function of corpus
+ * state** — counts, dates the corpus stores, titles, links, co-occurrence.
+ *
+ * What is deliberately absent is more informative than what is present:
+ *
+ * - **No score.** `signal_score` decays at read time and is never stored
+ *   (`CLAUDE.md`, "recency decay"), so a score in the block would change
+ *   between two runs over an unchanged corpus — the note would rewrite itself
+ *   every sync and the acceptance test could not pass. Storing the
+ *   decay-invariant component instead would print a number that is not the
+ *   score anything else shows, which is worse than printing none.
+ * - **No relative age.** "3 days ago" is the same bug in prose.
+ * - **No generation timestamp.** `watchfloor_generated_at` lives in the
+ *   frontmatter, which is written once when the file is created and then sits
+ *   in the prologue the block protocol never touches.
+ * - **No summary or blurb.** The weekly note (task 6) is where an LLM writes
+ *   prose; a summary here would make the block depend on the enrichment cache
+ *   as well as the corpus, and a cache miss would rewrite the note.
+ *
+ * The related-entity list is the §7.4 `related_entities` relation expressed in
+ * the vault's own idiom: `[[wikilinks]], which Obsidian's graph view renders
+ * natively. Every link is guaranteed to resolve — `planEntityNotes` only names
+ * entities that get a note.
+ */
+export function renderEntityBlock(note: EntityNotePlan): string {
+  const lines: string[] = [];
+  lines.push(
+    `_${note.totalItems} ${plural(note.totalItems, 'item', 'items')} in the Watchfloor corpus ` +
+      `${plural(note.totalItems, 'mentions', 'mention')} this entity._`,
+  );
+
+  if (note.items.length > 0) {
+    lines.push('', '### Recent items', '');
+    for (const item of note.items) lines.push(itemLine(item));
+    const notListed = note.totalItems - note.items.length;
+    if (notListed > 0) {
+      // Stated rather than silently truncated: a list that stops at twenty
+      // with no marker reads like a complete list of twenty.
+      lines.push('', `_${notListed} further ${plural(notListed, 'item', 'items')} not listed._`);
+    }
+  }
+
+  if (note.related.length > 0) {
+    lines.push('', '### Related entities', '');
+    for (const related of note.related) {
+      lines.push(
+        `- [[${related.entity}]] — ${related.sharedItems} shared ` +
+          `${plural(related.sharedItems, 'item', 'items')}`,
+      );
+    }
+  }
+
+  return lines.join('\n');
+}
