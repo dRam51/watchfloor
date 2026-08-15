@@ -106,6 +106,51 @@ export function weeklyNoteRelPath(week: IsoWeek): string {
   return `weekly/${week.label}.md`;
 }
 
+/**
+ * The note's own as-of instant: the **last millisecond of `week` in `tz`**.
+ *
+ * Controller ruling, escalated by task 5 and binding on every fully-managed
+ * area. Task 4's `renderManagedNote` requires a `generatedAt`, and passing the
+ * run's `now` collides with the tier's own "idempotent overwrite" rule in a way
+ * that does not fail loudly: the note simply differs on every run over an
+ * identical corpus, failing M5's "delete the tree and reproduce it exactly"
+ * while passing every ordinary test. Deriving the stamp from the period makes
+ * the whole render a pure function of (corpus, week, zone).
+ *
+ * It is also the honest value. A weekly note is a statement about a week, and
+ * the last instant of that week is the point it is a statement *as of* —
+ * Friday evening's run and Saturday morning's run are two renderings of the
+ * same claim, not two different claims.
+ *
+ * Found by bisecting {@link localDay} rather than by adding a zone offset.
+ * `localDay` is already the one place this project turns an instant into a
+ * day; an offset is a number somebody has to keep right across DST and across
+ * the zones whose offset is not a whole hour. The predicate "this instant's
+ * local day is at or before `endDay`" is monotone in the instant, including
+ * across a transition, which is what makes a bisection correct here.
+ *
+ * Task 5's `dailyNoteInstant` is private to its module, so this is the weekly
+ * equivalent rather than an import.
+ */
+export function weeklyNoteInstant(week: IsoWeek, tz: string): string {
+  const endMs = dayToUtcMs(week.endDay);
+  // Wide enough for every real zone (UTC-12 … UTC+14) with a day of slack at
+  // each end, so the bisection cannot be cornered by a transition.
+  let low = endMs - 36 * 3_600_000;
+  let high = endMs + 60 * 3_600_000;
+
+  const withinWeek = (ms: number): boolean =>
+    localDay(new Date(ms).toISOString(), tz) <= week.endDay;
+
+  // Invariant: `low` is inside the week, `high` is past it.
+  while (high - low > 1) {
+    const mid = low + Math.floor((high - low) / 2);
+    if (withinWeek(mid)) low = mid;
+    else high = mid;
+  }
+  return new Date(low).toISOString();
+}
+
 // ---------------------------------------------------------------------------
 // Evidence: what we actually hold about a piece
 // ---------------------------------------------------------------------------
