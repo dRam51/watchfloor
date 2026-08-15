@@ -1,0 +1,81 @@
+# Watchfloor -- enrichment policy (M5 task 3).
+#
+# Loaded by src/enrich/ceiling.ts. Two dials, both of which change behaviour
+# without a code change, which is why they are here at all.
+#
+# ---------------------------------------------------------------------------
+# Why this is not part of config/llm.yaml
+# ---------------------------------------------------------------------------
+# There is a real seam between the two files: config/llm.yaml says HOW TO CALL
+# a model (which backend, which model, what transport bounds), and this one
+# says WHAT WE ARE WILLING TO SPEND doing it and which generation of answers
+# is current. The first travels with the host; the second travels with the
+# operator's appetite.
+#
+# There was also a practical reason at the time of writing: llm.yaml's schema
+# is `.strict()` and was being edited concurrently by M5 task 2 (the Anthropic
+# block), so adding a key to it would have failed its own loader and collided
+# with a sibling's work. If the two files are ever merged, the seam above is
+# the argument to weigh -- not this paragraph.
+
+# ---------------------------------------------------------------------------
+# §5's daily token ceiling. Applies to EVERY backend that reports usage,
+# including Ollama: a local model's tokens are free in dollars and not free in
+# time or heat, and a runaway loop is the thing being bounded.
+# ---------------------------------------------------------------------------
+ceiling:
+  # Tokens per calendar day in WF_TZ. At the line, enrichment REFUSES -- it
+  # does not defer, queue, or retry later (§15: "never a silent fallback that
+  # retries later"), and the refusal is reported as such.
+  #
+  # The number is grounded, not picked. Measured against the live corpus on
+  # 2026-08-15: title + summary averages 209 characters, so a summarisation
+  # prompt runs roughly 100 input tokens with a system instruction and ~80
+  # output at max_output_tokens: 512 -- call it 180 tokens per item. 250,000
+  # therefore buys about 1,400 items a day.
+  #
+  # A CONSEQUENCE WORTH STATING: the live corpus already holds 5,937 items, so
+  # a cold start does not enrich all of it on day one. It converges over about
+  # five days, because the cache makes each day's work permanent -- the same
+  # "coverage compounds across polls" property src/ingest/repoEnrichment.ts
+  # relies on against GitHub's 60-request budget. A ceiling a cold start blows
+  # straight through would not be a ceiling.
+  daily_tokens: 250000
+
+  # What one UNMETERED call is charged.
+  #
+  # A backend that reaches a model and reports no token counts consumed real
+  # tokens that nobody counted. Crediting it zero would let such a backend run
+  # forever under any ceiling -- the exact runaway this bound exists to stop --
+  # so the ceiling charges it a worst case instead. The LEDGER still stores
+  # nulls: this substitution is enforcement, never a measurement, the same way
+  # computeCost reports unmeasured rather than a placeholder $0.
+  #
+  # Derived from config/llm.yaml's limits: max_prompt_chars 24,000 at roughly
+  # 4 characters per token is ~6,000 input, plus max_output_tokens 512.
+  # RE-DERIVE THIS IF THOSE CHANGE -- nothing checks the relationship
+  # mechanically, because llm.yaml was owned by a concurrent task when this
+  # was written.
+  #
+  # Ollama reports prompt_eval_count and eval_count on every completion, so on
+  # the currently-enabled backend this should never actually be charged. It is
+  # here for the backend that does not.
+  unmetered_call_tokens: 6500
+
+# ---------------------------------------------------------------------------
+# Cache generation.
+# ---------------------------------------------------------------------------
+cache:
+  # Bump this to invalidate every stored answer.
+  #
+  # It is an input to the cache key (src/enrich/cacheKey.ts), so raising it
+  # makes every existing row unreachable WITHOUT deleting one -- which is the
+  # only invalidation CLAUDE.md's never-delete rule permits. The old answers
+  # stay on disk and stay inspectable.
+  #
+  # Bump it when the prompt TEMPLATE changes in a way the key cannot see. The
+  # key already covers the system and user prompts themselves, the model, the
+  # backend, the task, and the bounds -- so a reworded prompt invalidates
+  # itself. This is for the cases it cannot see: a changed post-processing
+  # step, or a change in which item fields go into the prompt.
+  version: 1
