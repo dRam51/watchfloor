@@ -1,0 +1,9 @@
+{
+  "sourceId": "the-hacker-news",
+  "itemKey": "6c0fe6acb311af0f2aff2d8d8a2afcb7e2f7e7b2802050bc100619eed42bf8d6",
+  "title": "Malicious MCP Servers Can Split Instructions to Make AI Coding Agents Exfiltrate Secrets",
+  "url": "https://thehackernews.com/2026/08/malicious-mcp-servers-can-split.html",
+  "publishedAt": "2026-08-11T10:24:00.000Z",
+  "summaryRaw": "A malicious tool server connected to an AI coding assistant can quietly walk off with SSH keys, environment secrets, source code, and customer data without ever sending one obviously harmful instruction.\n\nThe trick can work even after a blunt version of the same theft is refused: split the request",
+  "rawJson": "{\"title\":\"Malicious MCP Servers Can Split Instructions to Make AI Coding Agents Exfiltrate Secrets\",\"description\":\"A malicious tool server connected to an AI coding assistant can quietly walk off with SSH keys, environment secrets, source code, and customer data without ever sending one obviously harmful instruction.\\n\\nThe trick can work even after a blunt version of the same theft is refused: split the request into fragments that each look routine, place them in channels the assistant already uses, and let\",\"link\":\"https://thehackernews.com/2026/08/malicious-mcp-servers-can-split.html\",\"guid\":{\"#text\":\"https://thehackernews.com/2026/08/malicious-mcp-servers-can-split.html\",\"@_isPermaLink\":\"false\"},\"pubDate\":\"Tue, 11 Aug 2026 15:54:00 +0530\",\"author\":\"info@thehackernews.com (The Hacker News)\",\"enclosure\":{\"@_length\":\"12216320\",\"@_type\":\"image/jpeg\",\"@_url\":\"https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEj2hJoWr0m-Mx1rwaqZpbsdsQa5iSVY8J_jAnt0zKgBUlynOrS-NgEcINm3asfWZR-Ypx9y1iw28BOVud8sfaOQbiq4lmrvSnaZHUBlrkmkH9KXSPy4AXQkklS-AxG83dzpV8sSMj_uUDyVvZTgKs68EpYd18qHJTWF8s2NRaQIF80mh0e7mok6y0SqFi4/s1600/mcp-agent.jpg\"}}"
+}

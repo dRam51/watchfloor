@@ -98,3 +98,282 @@ export function isoWeekOf(day: string): IsoWeek {
 export function weeklyNoteRelPath(week: IsoWeek): string {
   return `weekly/${week.label}.md`;
 }
+
+// ---------------------------------------------------------------------------
+// Evidence: what we actually hold about a piece
+// ---------------------------------------------------------------------------
+
+/**
+ * Words of prose a stored payload must carry before it is treated as the
+ * article rather than as a teaser.
+ *
+ * There is **no cliff in the data** to put this on. Measured across the live
+ * corpus on 2026-08-15, the payload-length distribution is smooth: ten of the
+ * twenty-eight configured sources syndicate a real body (median 755–3,151
+ * words), and the rest carry a lead paragraph (13–202 words). 400 words is
+ * two minutes at {@link WORDS_PER_MINUTE} — the point below which a read-time
+ * estimate says nothing a reader could not have guessed, and above which the
+ * material is long enough that a blurb drawn from it is describing the piece
+ * rather than its opening sentence. It is a judgement, it is named, and
+ * retuning it is one edit.
+ */
+export const BODY_WORDS_MIN = 400;
+
+/**
+ * Content words an excerpt must add over the headline before it counts as
+ * material.
+ *
+ * The failure this prevents is specific and was reproduced live: given
+ * *"Down, but not out!"* under the headline *"[AINews] Gemini 3.7 Flash brings
+ * GDM back to the forefront"*, `llama3.2` invented "GDM (Graphics Display
+ * Manager)" and `llama3.1:8b` invented "GDM (Gemini Desktop Manager)". GDM is
+ * Google DeepMind. A length check does not catch that excerpt's siblings
+ * either: 24 real rows carry a summary with **zero** content words the title
+ * lacks, and a character count passes every one of them.
+ *
+ * Eight is the same kind of judgement as {@link BODY_WORDS_MIN}, and the same
+ * measurement says why it is not lower: 170 of 5,878 excerpts add three words
+ * or fewer, which is the tagline band the gate exists to reject.
+ */
+export const EXCERPT_NOVEL_WORDS_MIN = 8;
+
+/**
+ * How much of a body goes into a prompt.
+ *
+ * `config/llm.yaml`'s `max_prompt_chars` is 24,000 and the backend THROWS
+ * above it rather than truncating; this keeps a 3,000-word article — or a
+ * 1.3 MB Blogger payload — comfortably inside that with room for the system
+ * message. The slice is always a PREFIX, never a middle-out cut, for the
+ * reason that config file states in its own comment.
+ */
+export const MAX_MATERIAL_CHARS = 6000;
+
+/**
+ * The reading speed the estimate is quoted at. Round, conservative, and
+ * stated in the note itself so the number is never presented as a measurement
+ * of the reader.
+ */
+export const WORDS_PER_MINUTE = 200;
+
+/** §8.1's three grades of "what do we actually hold about this piece". */
+export type EvidenceLevel =
+  /** The stored payload carries the article. A blurb describes the piece. */
+  | 'body'
+  /** A real lead or abstract. A blurb describes what the piece says it does. */
+  | 'excerpt'
+  /**
+   * A headline, and nothing that adds to it. **No blurb is generated at this
+   * level** — see {@link EXCERPT_NOVEL_WORDS_MIN} for what happened when one
+   * was.
+   */
+  | 'headline';
+
+export interface EvidenceInput {
+  readonly title: string;
+  /** The stored ~300-character excerpt (`items.summary_raw`). */
+  readonly summaryRaw: string | null;
+  /** The source's own payload, preserved verbatim (`items.raw_json`). */
+  readonly rawJson: string;
+}
+
+export interface BlurbEvidence {
+  readonly level: EvidenceLevel;
+  /** The plain text a prompt may use. Empty at the `headline` level. */
+  readonly material: string;
+  /** True when `material` is a prefix of a longer body. */
+  readonly truncated: boolean;
+  /** Words of prose in the stored payload, or `null` when it carried none. */
+  readonly bodyWords: number | null;
+  /** Content words the excerpt adds over the headline. */
+  readonly novelWords: number;
+  /** One renderable sentence saying which level this is and why. */
+  readonly basis: string;
+}
+
+/**
+ * Plain text from feed markup.
+ *
+ * Deliberately blunt: this runs over a payload a *source* controls, and a
+ * clever parser is a larger attack surface for no gain — the only question
+ * asked of the result is "how many words of prose is this, and what do they
+ * say". Script and style bodies are dropped first so their contents do not
+ * become "words".
+ */
+function stripMarkup(text: string): string {
+  return text
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&(?:#8217|#39|rsquo|apos);/g, "'")
+    .replace(/&(?:#8220|#8221|ldquo|rdquo|quot);/g, '"')
+    .replace(/&(?:#8212|mdash);/g, '—')
+    .replace(/&[a-z]+;|&#\d+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function countWords(text: string): number {
+  return text === '' ? 0 : text.split(/\s+/).filter(Boolean).length;
+}
+
+/**
+ * Words too common to carry meaning, for the novelty comparison only. Short
+ * enough to read, which is the point: a long stop list would make the novelty
+ * count depend on a table nobody audits.
+ */
+const STOP_WORDS: ReadonlySet<string> = new Set(
+  ('a an the and or but of in on for to with by from as at is are was were be been being it its ' +
+    'this that these those we our you your they their he she his her not no if then than so such ' +
+    'into over under after before new has have had will would can could may might do does did')
+    .split(' '),
+);
+
+function contentWords(text: string): Set<string> {
+  const words = text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !STOP_WORDS.has(word));
+  return new Set(words);
+}
+
+/** Content words in `text` that the headline does not already contain. */
+function novelContentWords(title: string, text: string): number {
+  const inTitle = contentWords(title);
+  let novel = 0;
+  for (const word of contentWords(text)) if (!inTitle.has(word)) novel += 1;
+  return novel;
+}
+
+/**
+ * The longest run of prose a stored feed payload carries, or `null`.
+ *
+ * Feed shapes differ and this reads all four fields that carry text across the
+ * configured sources — `content:encoded` (RSS full-content), Atom `content`,
+ * `description`, and `summary` — taking the longest. That is best effort by
+ * design: a payload whose text this cannot find simply lands at a lower
+ * evidence level, which fails toward "we hold less than we thought", never
+ * toward a blurb written from nothing.
+ *
+ * **This never reproduces the text it counts.** The word count reaches the
+ * note; a bounded prefix reaches a local model; nothing here writes article
+ * body into the vault. That distinction is why counting it does not conflict
+ * with the standing "links and ~300-character excerpts, never full text" rule,
+ * which governs what this project *stores* — and `items.raw_json` already
+ * holds these bytes, preserved verbatim by M1.
+ */
+function bodyTextOf(rawJson: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return null; // an unreadable payload is one we hold nothing from
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const record = parsed as Record<string, unknown>;
+  const candidates: string[] = [];
+  for (const key of ['content:encoded', 'content', 'description', 'summary']) {
+    const value = record[key];
+    if (typeof value === 'string') candidates.push(value);
+    else if (value !== null && typeof value === 'object') {
+      // fast-xml-parser represents an element with attributes as an object
+      // whose text content sits under `#text`.
+      const text = (value as Record<string, unknown>)['#text'];
+      if (typeof text === 'string') candidates.push(text);
+    }
+  }
+  if (candidates.length === 0) return null;
+  return candidates.reduce((longest, next) => (next.length >= longest.length ? next : longest));
+}
+
+/**
+ * Which of §8.1's three grades of evidence we hold for one item.
+ *
+ * Pure: no clock, no filesystem, no database. Every input is a column of the
+ * item's current version.
+ */
+export function classifyEvidence(input: EvidenceInput): BlurbEvidence {
+  const rawBody = bodyTextOf(input.rawJson);
+  const bodyText = rawBody === null ? null : stripMarkup(rawBody);
+  const bodyWords = bodyText === null ? null : countWords(bodyText);
+
+  const excerpt = input.summaryRaw === null ? '' : stripMarkup(input.summaryRaw);
+  const novelWords = novelContentWords(input.title, excerpt);
+
+  if (bodyText !== null && bodyWords !== null && bodyWords >= BODY_WORDS_MIN) {
+    const truncated = bodyText.length > MAX_MATERIAL_CHARS;
+    return {
+      level: 'body',
+      material: truncated ? bodyText.slice(0, MAX_MATERIAL_CHARS) : bodyText,
+      truncated,
+      bodyWords,
+      novelWords,
+      basis: `the ${bodyWords}-word body this feed carries`,
+    };
+  }
+
+  if (novelWords >= EXCERPT_NOVEL_WORDS_MIN) {
+    return {
+      level: 'excerpt',
+      material: excerpt,
+      truncated: false,
+      bodyWords,
+      novelWords,
+      basis: `the stored ${excerpt.length}-character excerpt — this feed carries no article text`,
+    };
+  }
+
+  return {
+    level: 'headline',
+    material: '',
+    truncated: false,
+    bodyWords,
+    novelWords,
+    basis:
+      novelWords === 0
+        ? 'the headline alone — this feed carried no excerpt, or one that only repeats it'
+        : `the headline alone — the excerpt adds only ${novelWords} word(s) to it`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Read time
+// ---------------------------------------------------------------------------
+
+/**
+ * §8.1's "estimated read time", and what it is worth.
+ *
+ * `minutes` is `null` far more often than it is a number, and that is the
+ * design rather than a gap. This project stores links and ~300-character
+ * excerpts, never full text, so for eighteen of the twenty-eight configured
+ * sources there is nothing to count and no honest number to print. A minute
+ * count guessed from a headline reads exactly as authoritative as one counted
+ * from an article, which is precisely why it is not printed.
+ */
+export interface ReadTimeEstimate {
+  /** Whole minutes, or `null` when there is nothing to count. */
+  readonly minutes: number | null;
+  /** What the figure was computed from. Rendered next to it, always. */
+  readonly basis: string;
+}
+
+export function estimateReadTime(evidence: BlurbEvidence): ReadTimeEstimate {
+  if (evidence.level !== 'body' || evidence.bodyWords === null) {
+    return {
+      minutes: null,
+      basis:
+        evidence.level === 'excerpt'
+          ? 'unknown — this feed carries no article text, only a short excerpt'
+          : 'unknown — this feed carries no text beyond the headline',
+    };
+  }
+  return {
+    // Never zero: a 400-word floor over 200 wpm cannot round below 2, but the
+    // floor is a named constant somebody may lower.
+    minutes: Math.max(1, Math.round(evidence.bodyWords / WORDS_PER_MINUTE)),
+    basis: `${evidence.bodyWords} words of stored feed text at ${WORDS_PER_MINUTE} wpm`,
+  };
+}
