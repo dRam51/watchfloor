@@ -67,3 +67,36 @@ ollama:
   # machine against 0.19s warm, and a scheduled pass over many items would
   # otherwise pay that repeatedly.
   keep_alive: 5m
+
+# The paid backend, and it is OFF. Present so that enabling it is the
+# `backend:` line above and nothing else -- M5 plan RULING 2: "Build both.
+# Anthropic ships hard-disabled with WF_ALLOW_PAID_ANTHROPIC unset, exactly as
+# §15 requires, for the owner to enable deliberately later."
+#
+# Reading this block is not enough to spend anything. TWO things must both be
+# true: WF_ALLOW_PAID_ANTHROPIC=1, and WF_ANTHROPIC_API_KEY set to a real
+# credential (a machine-wide ANTHROPIC_API_KEY is deliberately ignored -- see
+# docs/costs.md). Without them the backend still constructs and reports
+# `disabled_by_cost_policy` on every call, which is what lets the dashboard
+# show the feature as off; it never reads the credential at all.
+anthropic:
+  # The API host. Deliberately here rather than defaulted in code: a test
+  # asserts no module under src/ contains a paid vendor hostname, so a
+  # hardcoded endpoint anywhere in the tree fails loudly.
+  base_url: https://api.anthropic.com
+  # The model. Config, never code -- same rule as ollama's above, and here a
+  # wrong value is a wrong bill as well as a wrong answer.
+  model: claude-opus-5
+  # Published per-million-token rates for the model above. NOTHING VERIFIES
+  # THESE LIVE -- no code path here reads a price list, so they are a fact
+  # copied in by a human and they go stale silently when the vendor's pricing
+  # changes. A wrong figure mis-REPORTS spend on /api/dashboard/header; it
+  # cannot cause spend. Keep them in step with the row in docs/costs.md.
+  #
+  # Zero is rejected at config load: computeCost prices a zero-rate backend as
+  # a MEASURED $0 unconditionally (true for ollama-local, which cannot bill at
+  # any volume), so a zero here would report every billable call as measured
+  # and free -- the most expensive typo available in this file.
+  pricing:
+    usd_per_million_input_tokens: 5
+    usd_per_million_output_tokens: 25

@@ -65,6 +65,44 @@ introductory price, and is disqualified from the default path.
 > The daemon's address is `config/llm.yaml`'s `base_url`, defaulting to loopback. Pointing it
 > at a host you do not own would change this row's classification; nothing in the code does.
 
+> [!note] `anthropic-api` stopped being speculative at M5 task 2 — and it ships OFF
+> This row also predates its code. `src/enrich/llm/anthropic.ts` is that code, built
+> per the M5 plan's RULING 2: *"Build both. Anthropic ships hard-disabled with
+> `WF_ALLOW_PAID_ANTHROPIC` unset, exactly as §15 requires, for the owner to enable
+> deliberately later."* It is **the only module in this repository that can originate a
+> charge**, and with the flag unset it provably originates none — see "Before the first
+> paid integration" below, which this is what discharged.
+>
+> **Two things must both be true before a single request is possible**, and the one-liner
+> at the bottom of this file only shows the first:
+>
+> 1. `WF_ALLOW_PAID_ANTHROPIC=1`, and
+> 2. `WF_ANTHROPIC_API_KEY` set to a real credential.
+>
+> The variable is **deliberately `WF_`-prefixed**. A development machine with Claude Code
+> installed very plausibly exports `ANTHROPIC_API_KEY`, and honouring it would let this
+> project bill a credential nobody handed it, on nothing more than a flag flip. That
+> variable is ignored, and a test pins it.
+>
+> With the flag unset the backend still *constructs* — it reports
+> `disabled_by_cost_policy` on every call and reads no credential at all — because §15
+> asks the API and dashboard to show the feature as off, which needs an object to ask.
+> `createLlmBackend` does **not** fall back to Ollama in that state; a silent
+> substitution would report enrichment as running on a backend it is not.
+>
+> **The endpoint, model, and per-token rates live in `config/llm.yaml`, not in code.** The
+> rates there are Anthropic's published per-million-token prices for the configured model
+> and are **not verified live by anything** — no code path here reads a price list. A
+> stale rate mis-*reports* spend on `/api/dashboard/header`; it cannot cause spend. Update
+> it when the vendor's pricing changes, and note that `computeCost` refuses a zero rate at
+> config load, because a zero would make every billable call report a *measured* `$0`.
+>
+> **No SDK.** `@anthropic-ai/sdk` would bring its own transport (widening what the
+> zero-dollar proof must cover), a default retry-twice on 429/5xx — a *deferred retry*,
+> which §15 names — and a built-in `api.anthropic.com` default that would move the paid
+> host inside a dependency where the hostname check cannot see it. The request is one POST
+> with a JSON body and two headers.
+
 > [!note] `github-api` is the first and only `free-tier-no-card` entry, and the class is exact
 > Every other row is `free-forever`. GitHub differs because holding a personal access token
 > requires a GitHub **account** — so it is not "an account that cannot be billed" — while
@@ -118,22 +156,63 @@ this project's own politeness layer (`politeFetch`'s 2s/host minimum spacing and
 source's configured `poll_interval`), not a server-side quota we could exhaust into a
 bill — there is no billing relationship with any of these hosts at all.
 
-## Before the first paid integration
+## Before the first paid integration — **discharged, M5 task 2 (option b)**
 
-The zero-flag test in `tests/cost/gate.test.ts` proves only that
-`isPaidAllowed()` returns **false when it is called**. It does **not** prove
-that no code path can reach a paid service — a client that simply never
-consults the gate would sail past it. Today the gap is inert: there are no
-paid clients in `src/` at all. It stops being inert the moment one lands.
+The standing requirement was:
 
-Before or alongside the first real paid client, ship **one** of:
+> The zero-flag test in `tests/cost/gate.test.ts` proves only that
+> `isPaidAllowed()` returns **false when it is called**. It does **not** prove
+> that no code path can reach a paid service — a client that simply never
+> consults the gate would sail past it. […] Before or alongside the first real
+> paid client, ship **one** of: **(a)** a check that every module importing a
+> paid-classified client also calls the gate before any request; or **(b)** an
+> integration test that stubs the network layer and asserts **zero requests
+> fire** with the flag unset. This must not ship without one of the two.
 
-- **(a)** a check that every module importing a paid-classified client also
-  calls the gate before any request; or
-- **(b)** an integration test that stubs the network layer and asserts **zero
-  requests fire** with the flag unset.
+`src/enrich/llm/anthropic.ts` is that first paid client, and
+**`tests/cost/no-paid-requests.test.ts` is option (b)**, shipped in the same
+commit sequence rather than after it. (b) over (a) because (a) tests a proxy —
+*does this module mention the gate* — while (b) tests the property the rule
+actually cares about: *does a request leave*. A module can import the gate,
+call it, and ignore the answer.
 
-This must not ship without one of the two.
+**Where the trap sits, and why that matters.** `tests/cost/networkTrap.ts`
+patches **`net.Socket.prototype.connect`**, not only `globalThis.fetch`. The
+obvious fetch-only version is fooled by exactly the defect being hunted: a
+client reaching the wire through `node:http`, `node:https`, or a vendor SDK's
+own transport never touches `globalThis.fetch`, so the trap reports a serene
+zero while the request leaves the machine. It also **blocks** rather than
+observes — an observing trap would let the request complete, so the suite
+proving this system cannot spend money could spend money.
+
+Three properties keep it from rotting:
+
+- **Symmetry.** Same client, same prompt, one environment variable apart: flag
+  unset must fire **exactly zero** outbound attempts, flag set **exactly one**.
+  A zero-only assertion is satisfied just as well by a client that does
+  nothing at all.
+- **Registry-driven coverage.** Every `paid` entry in `src/cost/registry.ts`
+  must have an exerciser in that file. When M4b adds a markets-data client, the
+  test fails until it is covered rather than quietly proving nothing about it.
+- **A static complement**, which is where a little of (a) survives: no module
+  under `src/` may contain a paid vendor's hostname. That is what bounds the
+  exerciser map to something meaningful — if no module can name a paid host,
+  none can reach one except through the configured `base_url` the tests drive.
+
+**It was verified by injecting the defect, not by passing.** With the gate
+check deleted from `anthropic.ts`, `tests/cost/gate.test.ts` stayed **12/12
+green** — precisely the blindness this section predicted — while the new test
+went red naming the offending line. With that ungated client additionally
+hardcoding the real vendor URL, the trap caught a genuine request to
+`api.anthropic.com` before a packet left the machine, and the hostname check
+went red as well. Neutering only the socket assertion showed the local-recorder
+hit count still reading `0` while that request was in flight: a
+**recorder-only** implementation of (b) would have passed.
+
+**What it does not prove.** It covers clients reachable from
+`createLlmBackend`; a paid client invoked from a shell script, a migration, or
+a future entrypoint that no exerciser drives is outside it. The hostname check
+is the backstop for that, and it is only as good as `PAID_VENDOR_HOSTS`.
 
 ## The complete set of ways this system can spend money
 
@@ -142,3 +221,12 @@ env | grep WF_ALLOW_PAID
 ```
 
 Empty output means the system cannot originate a charge.
+
+Non-empty output does **not** by itself mean it can: `anthropic-api`, the only
+`paid` entry, additionally needs `WF_ANTHROPIC_API_KEY`, and the process
+refuses to build the backend at all if the flag is set without it. So a flag
+alone is a misconfiguration that fails loudly, not a quiet licence to spend.
+Both halves are checked in one place —
+`createAnthropicBackend` in `src/enrich/llm/anthropic.ts` — and
+`tests/cost/no-paid-requests.test.ts` proves nothing reaches the network
+around it.

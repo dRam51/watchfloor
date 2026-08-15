@@ -10,8 +10,13 @@ import {
   AnthropicCredentialError,
   AnthropicSamplingUnsupportedError,
   createAnthropicBackend,
+  parseAnthropicConfig,
 } from '../../../src/enrich/llm/anthropic.ts';
-import { LlmConfigError } from '../../../src/enrich/llm/config.ts';
+import {
+  DEFAULT_LLM_CONFIG_PATH,
+  LlmConfigError,
+  loadLlmConfig,
+} from '../../../src/enrich/llm/config.ts';
 import { LlmPromptTooLargeError, isLlmOk } from '../../../src/enrich/llm/types.ts';
 import type { LlmConfig } from '../../../src/enrich/llm/config.ts';
 
@@ -739,5 +744,36 @@ describe('transport outcomes', () => {
 
     expect(result.cost.amountUsd).toBeNull();
     expect(result.cost.measured).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The shipped config
+// ---------------------------------------------------------------------------
+
+describe('the shipped config/llm.yaml', () => {
+  it('carries an anthropic block that parses, so flipping the backend is one line', () => {
+    // Without this the block could rot unnoticed and only fail on the day the
+    // owner actually flips `backend: anthropic` -- turning a one-line change
+    // into "now go invent the block's shape".
+    const config = loadLlmConfig(join(process.cwd(), DEFAULT_LLM_CONFIG_PATH));
+    const parsed = parseAnthropicConfig(config.anthropic);
+
+    expect(parsed.model.length).toBeGreaterThan(0);
+    expect(parsed.baseUrl.startsWith('https://')).toBe(true);
+    expect(parsed.pricing.usdPerMillionInputTokens).toBeGreaterThan(0);
+    expect(parsed.pricing.usdPerMillionOutputTokens).toBeGreaterThan(0);
+  });
+
+  it('still selects ollama -- RULING 2 ships the paid backend built and OFF', () => {
+    expect(loadLlmConfig(join(process.cwd(), DEFAULT_LLM_CONFIG_PATH)).backend).toBe('ollama');
+  });
+
+  it('builds a disabled backend from the real file and a real empty environment', () => {
+    // The end-to-end statement, with nothing invented: shipped config, no
+    // flags, no credential -- off.
+    const config = loadLlmConfig(join(process.cwd(), DEFAULT_LLM_CONFIG_PATH));
+    const backend = createAnthropicBackend(config, {});
+    expect(backend.enabled).toBe(false);
   });
 });
