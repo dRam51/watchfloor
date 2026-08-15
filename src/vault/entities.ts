@@ -32,6 +32,14 @@ import { getCurrentItem } from '../domain/item.ts';
 import { getItemBeats } from '../domain/itemBeats.ts';
 import { getItemEntities } from '../domain/itemEntities.ts';
 import { getItemFirstFetchedAt } from '../domain/itemFirstFetchedAt.ts';
+import { VaultContentError } from './frontmatter.ts';
+import {
+  VaultCapError,
+  VaultWriteError,
+  type VaultSession,
+  type VaultWriteRefusal,
+  type VaultWriteResult,
+} from './session.ts';
 
 export type EntityNameRefusal =
   | 'empty'
@@ -220,7 +228,20 @@ export interface EntityNotePlan {
   readonly related: readonly RelatedEntity[];
 }
 
-export type EntitySkipReason = EntityNameRefusal | 'case_collision';
+/**
+ * Everything that can stop an entity from getting a note.
+ *
+ * One union rather than three lists, because a caller acts on all of them the
+ * same way — report it — and because the alternative is three arrays whose
+ * relative ordering nobody can remember. `VaultWriteRefusal` is folded in as
+ * it stands so a refusal task 4 adds later cannot be silently unhandled here.
+ */
+export type EntitySkipReason =
+  | EntityNameRefusal
+  | 'case_collision'
+  | 'malformed_block'
+  | 'too_large'
+  | VaultWriteRefusal;
 
 export interface EntitySkip {
   readonly entity: string;
@@ -563,4 +584,93 @@ export function renderEntityBlock(note: EntityNotePlan): string {
   }
 
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+export interface EntitySyncOptions extends EntityPlanOptions {
+  /** Canonical UTC timestamp, injected. This module reads no clock. */
+  readonly generatedAt: string;
+}
+
+export interface EntitySyncResult {
+  readonly written: readonly VaultWriteResult[];
+  /** Every entity that did not get a note, with the reason. Never silent. */
+  readonly skipped: readonly EntitySkip[];
+  /** Set when a cap ended the run early, so a short run is never mistaken for a complete one. */
+  readonly stopped: 'files_per_run' | null;
+}
+
+/**
+ * Writes the whole `entities/` area through the task 4 session.
+ *
+ * Nothing here opens a file. `writeEntityNote` owns the marker protocol, the
+ * containment and area gates, the atomic rename and the caps; this function
+ * owns only the decision of what to hand it and what to do when it refuses.
+ *
+ * ## Why refusals are collected rather than thrown
+ *
+ * Every refusal below is per-note and leaves that note exactly as it was.
+ * Letting one propagate would abandon the rest of the run — the sync would
+ * write eleven notes out of forty and exit non-zero, and the next run would
+ * hit the same note and stop in the same place. So each is recorded against
+ * the entity it belongs to and the run continues, with two deliberate
+ * exceptions to that rule:
+ *
+ * - **`files_per_run` stops the run**, because task 4's cap latches the
+ *   session shut: continuing is not an option the caller has, and reporting
+ *   `stopped` is what keeps a short run from reading like a complete one.
+ * - **An unexpected error still throws.** A refusal this function does not
+ *   recognise is not a refusal; it is a bug, and swallowing it into a list
+ *   nobody reads is how the vault integration would lose the owner's trust
+ *   quietly rather than loudly.
+ */
+export function syncEntityNotes(
+  session: VaultSession,
+  db: Db,
+  options: EntitySyncOptions,
+): EntitySyncResult {
+  const plan = planEntityNotes(db, options);
+  const written: VaultWriteResult[] = [];
+  const skipped: EntitySkip[] = [...plan.skipped];
+  let stopped: 'files_per_run' | null = null;
+
+  for (const note of plan.notes) {
+    try {
+      written.push(
+        session.writeEntityNote(note.relPath, renderEntityBlock(note), {
+          generatedAt: options.generatedAt,
+          title: note.entity,
+        }),
+      );
+    } catch (err) {
+      if (err instanceof VaultCapError) {
+        if (err.reason === 'files_per_run') {
+          stopped = 'files_per_run';
+          break;
+        }
+        // Per-file, and task 4 deliberately does not latch on it: "refusing
+        // the run's other forty notes because of one turns a bad note into an
+        // outage."
+        skipped.push({ entity: note.entity, reason: 'too_large', detail: err.message });
+        continue;
+      }
+      if (err instanceof VaultContentError) {
+        // A block with two begin markers, or an end before its begin. Task 4
+        // fails closed here rather than guessing which of the owner's
+        // paragraphs the block was meant to cover, and the file is untouched.
+        skipped.push({ entity: note.entity, reason: 'malformed_block', detail: err.message });
+        continue;
+      }
+      if (err instanceof VaultWriteError) {
+        skipped.push({ entity: note.entity, reason: err.reason, detail: err.message });
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  return { written, skipped, stopped };
 }

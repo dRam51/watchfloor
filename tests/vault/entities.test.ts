@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeDb, openDb } from '../../src/db/connection.ts';
@@ -9,13 +9,23 @@ import {
   WATCHFLOOR_BEGIN_MARKER,
   WATCHFLOOR_END_MARKER,
 } from '../../src/vault/frontmatter.ts';
+import { openVaultSession } from '../../src/vault/session.ts';
 import {
   entityFileName,
   entityNoteRelPath,
   EntityNameError,
   planEntityNotes,
   renderEntityBlock,
+  syncEntityNotes,
 } from '../../src/vault/entities.ts';
+import {
+  createFixtureVault,
+  digestTree,
+  listTree,
+  HAND_AUTHORED_ENTITY_PATH,
+  HAND_AUTHORED_ENTITY_TEXT,
+  HAND_AUTHORED_NOTES,
+} from './fixture.ts';
 
 /**
  * An entity name becomes a FILENAME. That is the whole hazard of this task.
@@ -622,5 +632,219 @@ describe('renderEntityBlock', () => {
     insertItem(db, arsAnthropic());
 
     expect(blockFor(db, AI_ONLY_ENTITY)).not.toContain('Related entities');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Syncing — the tier §8.1 says "getting this wrong is the failure that makes
+// me stop trusting the integration"
+// ---------------------------------------------------------------------------
+
+const AT = '2026-08-15T12:00:00.000Z';
+
+function syncedVault(db: ReturnType<typeof openDb>, options = {}) {
+  const { anchor, root } = createFixtureVault();
+  const session = openVaultSession(root, options);
+  const result = syncEntityNotes(session, db, { generatedAt: AT, ...options });
+  return { anchor, root, result };
+}
+
+function readNote(root: string, relPath: string): string {
+  return readFileSync(join(root, relPath), 'utf8');
+}
+
+describe('syncEntityNotes — writes only where §8.1 allows', () => {
+  it('writes one note per entity, inside entities/', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+    insertItem(db, kevUndated());
+
+    const { root, result } = syncedVault(db);
+    expect(result.written.map((w) => w.relPath).sort()).toEqual([
+      'entities/Anthropic.md',
+      'entities/Microsoft.md',
+    ]);
+    expect(readNote(root, 'entities/Microsoft.md')).toContain('watchfloor: managed');
+  });
+
+  it('leaves the owner\'s twelve hand-authored notes byte-identical, hostile entity included', () => {
+    // `../../Architecture` is the case the whole name layer exists for: if it
+    // were sanitised to `Architecture`, this assertion is what would fail.
+    const db = migratedDb();
+    insertItem(db, arsAnthropic({ entities: [AI_ONLY_ENTITY, '../../Architecture'] }));
+
+    const { anchor, root } = createFixtureVault();
+    const before = digestTree(anchor);
+    const session = openVaultSession(root);
+    syncEntityNotes(session, db, { generatedAt: AT });
+    const after = digestTree(anchor);
+
+    for (const [name] of HAND_AUTHORED_NOTES) {
+      const key = join('Watchfloor', name);
+      expect(after.get(key), `${name} must still exist`).toBeDefined();
+      expect(after.get(key), `${name} must be byte-identical`).toBe(before.get(key));
+    }
+    // Nothing new appeared anywhere in the vault -- the fixture already has a
+    // hand-authored entities/Anthropic.md, so this run appends to that one file
+    // and creates none.
+    expect([...after.keys()].filter((p) => !before.has(p))).toEqual([]);
+    const changed = [...after].filter(([p, d]) => before.get(p) !== d).map(([p]) => p);
+    expect(changed).toEqual([join('Watchfloor', 'entities', 'Anthropic.md')]);
+  });
+
+  it('reports a refused name instead of writing something plausible', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic({ entities: ['../../Architecture'] }));
+
+    const { result } = syncedVault(db);
+    expect(result.written).toEqual([]);
+    expect(result.skipped).toEqual([
+      expect.objectContaining({ entity: '../../Architecture', reason: 'separator' }),
+    ]);
+  });
+});
+
+describe('syncEntityNotes — the hand-edited note survives, which is the whole tier', () => {
+  it('appends to a marker-less hand-authored note, keeping its prose as a strict prefix', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+
+    const { root } = syncedVault(db);
+    const after = readNote(root, HAND_AUTHORED_ENTITY_PATH);
+    expect(after.startsWith(HAND_AUTHORED_ENTITY_TEXT)).toBe(true);
+    expect(after).toContain(WATCHFLOOR_BEGIN_MARKER);
+  });
+
+  it('preserves prose the owner writes ABOVE and BELOW the block, byte for byte', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+
+    const { root } = syncedVault(db);
+    const path = join(root, HAND_AUTHORED_ENTITY_PATH);
+
+    // The owner edits: a paragraph above the block and a section below it.
+    const prologue = `${HAND_AUTHORED_ENTITY_TEXT}\nWhat I actually think: the RSP is the interesting artifact.\n\n`;
+    const epilogue = '\n\n## My open questions\n\n- Does the block ordering match the dashboard?\n';
+    const withBlock = readFileSync(path, 'utf8');
+    const blockStart = withBlock.indexOf(WATCHFLOOR_BEGIN_MARKER);
+    const blockEnd = withBlock.indexOf(WATCHFLOOR_END_MARKER) + WATCHFLOOR_END_MARKER.length;
+    writeFileSync(path, `${prologue}${withBlock.slice(blockStart, blockEnd)}${epilogue}`);
+
+    // The corpus moves on, so the block genuinely has to change.
+    insertItem(
+      db,
+      arsAnthropic({
+        url: 'https://example.test/new',
+        canonicalUrl: 'https://example.test/new',
+        title: 'A second Anthropic story',
+      }),
+    );
+    const session = openVaultSession(root);
+    syncEntityNotes(session, db, { generatedAt: AT });
+
+    const after = readFileSync(path, 'utf8');
+    expect(after.startsWith(prologue)).toBe(true);
+    expect(after.endsWith(epilogue)).toBe(true);
+    expect(after).toContain('A second Anthropic story');
+  });
+
+  it('refuses a note whose block is malformed, and leaves it exactly as it was', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+
+    const { root } = createFixtureVault();
+    const path = join(root, HAND_AUTHORED_ENTITY_PATH);
+    const malformed = `${HAND_AUTHORED_ENTITY_TEXT}\n${WATCHFLOOR_BEGIN_MARKER}\nmine\n${WATCHFLOOR_BEGIN_MARKER}\n${WATCHFLOOR_END_MARKER}\n`;
+    writeFileSync(path, malformed);
+
+    const session = openVaultSession(root);
+    const result = syncEntityNotes(session, db, { generatedAt: AT });
+
+    expect(readFileSync(path, 'utf8')).toBe(malformed);
+    expect(result.skipped).toEqual([
+      expect.objectContaining({ entity: AI_ONLY_ENTITY, reason: 'malformed_block' }),
+    ]);
+  });
+
+  it('skips one oversized note and still writes the others', () => {
+    // Task 4's per-file cap deliberately does not latch: "refusing the run's
+    // other forty notes because of one turns a bad note into an outage." A
+    // 300 KiB hand-written note is what makes that reachable.
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+    insertItem(db, kevUndated());
+
+    const { root } = createFixtureVault();
+    writeFileSync(join(root, HAND_AUTHORED_ENTITY_PATH), 'x'.repeat(300 * 1024));
+
+    const session = openVaultSession(root);
+    const result = syncEntityNotes(session, db, { generatedAt: AT });
+
+    expect(result.written.map((w) => w.relPath)).toEqual(['entities/Microsoft.md']);
+    expect(result.skipped).toEqual([
+      expect.objectContaining({ entity: AI_ONLY_ENTITY, reason: 'too_large' }),
+    ]);
+  });
+});
+
+describe('syncEntityNotes — idempotence, which is what M5 acceptance measures', () => {
+  it('produces byte-identical files when run twice over the same corpus', () => {
+    const db = migratedDb();
+    insertItem(db, arxivCrVersion());
+    insertItem(db, arxivAiVersion());
+    insertItem(db, arsAnthropic());
+    insertItem(db, kevUndated());
+
+    const { root } = syncedVault(db);
+    const first = digestTree(join(root, 'entities'));
+
+    const session = openVaultSession(root);
+    syncEntityNotes(session, db, { generatedAt: AT });
+
+    expect(digestTree(join(root, 'entities'))).toEqual(first);
+  });
+
+  it('rebuilds an identical entities/ tree in a vault that never had one', () => {
+    // The M5 acceptance test deletes the whole `watchfloor/` tree and re-runs
+    // sync. Nothing here deletes anything (CLAUDE.md), so the equivalent is
+    // built the other way round: two vaults, one corpus, one generatedAt.
+    const db = migratedDb();
+    insertItem(db, arxivCrVersion());
+    insertItem(db, arxivAiVersion());
+    insertItem(db, kevUndated());
+
+    const a = syncedVault(db);
+    const b = syncedVault(db);
+
+    expect(digestTree(join(b.root, 'entities'))).toEqual(digestTree(join(a.root, 'entities')));
+  });
+
+  it('every wikilink it writes resolves to a note it wrote', () => {
+    const db = migratedDb();
+    insertItem(db, arxivCrVersion());
+    insertItem(db, arxivAiVersion());
+    insertItem(db, arsAnthropic());
+
+    const { root } = syncedVault(db);
+    const present = new Set(listTree(join(root, 'entities')));
+    const links: string[] = [];
+    for (const file of present) {
+      const text = readFileSync(join(root, 'entities', file), 'utf8');
+      for (const match of text.matchAll(/\[\[([^\]]+)\]\]/g)) links.push(`${match[1]}.md`);
+    }
+
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) expect(present.has(link), `${link} must exist`).toBe(true);
+  });
+});
+
+describe('syncEntityNotes — the files-per-run cap', () => {
+  it('stops at the cap and says so, rather than continuing past it', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic({ entities: ['Anthropic', 'Microsoft', 'OpenAI'] }));
+
+    const { result } = syncedVault(db, { maxFilesPerRun: 2 });
+    expect(result.written).toHaveLength(2);
+    expect(result.stopped).toBe('files_per_run');
   });
 });
