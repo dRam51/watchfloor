@@ -492,10 +492,18 @@ function renderFlagged(
     lines.push('Nothing is pinned by a hard override as of this instant.', '');
     return lines;
   }
+  // "the first N in that order", never "the N highest-priority": on the live
+  // corpus all 106 pins share priority 30, so it is the SECONDARY key --
+  // publication time -- that decides what the cap keeps. Naming only priority
+  // would describe a selection that is not the one being made.
+  const ordering =
+    'ordered by override priority, then by publication time — never by score, ' +
+    'which a pin bypasses rather than competes with';
+  const preamble = `${flaggedTotal} pinned by a hard override, ${ordering}.`;
   lines.push(
     flagged.length === flaggedTotal
-      ? `${flaggedTotal} pinned by a hard override, ordered by override priority — never by score, which a pin bypasses rather than competes with.`
-      : `${flaggedTotal} pinned by a hard override; showing the ${flagged.length} highest-priority. Ordered by override priority — never by score, which a pin bypasses rather than competes with.`,
+      ? preamble
+      : `${preamble} Showing the first ${flagged.length} in that order.`,
     '',
   );
   for (const entry of flagged) lines.push(renderEntry(entry, asOf, trustById, true));

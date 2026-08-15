@@ -510,7 +510,21 @@ describe('Flagged — ordered by override priority, never by score', () => {
     );
     expect(note.flaggedTotal).toBe(2);
     expect(note.flagged).toHaveLength(1);
-    expect(note.content).toContain('2 pinned by a hard override; showing the 1 highest-priority.');
+    // "the first 1 in that order", not "the 1 highest-priority": on the live
+    // corpus all 106 pins share priority 30, so it is the SECONDARY key --
+    // publication time -- that decides what the cap keeps. Saying
+    // "highest-priority" would describe a selection that is not happening.
+    expect(note.content).toContain('Showing the first 1 in that order.');
+    expect(note.content).toContain('ordered by override priority, then by publication time');
+  });
+
+  it('names both ordering keys, and claims no truncation when there was none', () => {
+    const { db } = pinnedCorpus();
+    const note = buildDailyNote(db, DATE, deps({ overridesConfig: pinningOverridesConfig() }));
+    expect(note.content).toContain(
+      '2 pinned by a hard override, ordered by override priority, then by publication time — never by score, which a pin bypasses rather than competes with.',
+    );
+    expect(note.content).not.toContain('Showing the first');
   });
 
   it('pins a cross-listed item once, naming every beat it carries', () => {
