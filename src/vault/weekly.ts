@@ -14,6 +14,7 @@
  */
 
 import { assertCalendarDay } from '../db/repoSnapshots.ts';
+import { WATCHFLOOR_BEGIN_MARKER, WATCHFLOOR_END_MARKER } from './frontmatter.ts';
 
 // ---------------------------------------------------------------------------
 // The week
@@ -376,4 +377,156 @@ export function estimateReadTime(evidence: BlurbEvidence): ReadTimeEstimate {
     minutes: Math.max(1, Math.round(evidence.bodyWords / WORDS_PER_MINUTE)),
     basis: `${evidence.bodyWords} words of stored feed text at ${WORDS_PER_MINUTE} wpm`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The two questions
+// ---------------------------------------------------------------------------
+
+/**
+ * §8.1's two model-answerable questions, asked **separately**.
+ *
+ * The third — read time — is arithmetic (see {@link estimateReadTime}) and is
+ * never asked of a model, because a model given a headline will produce a
+ * confident number for a document it has not seen.
+ *
+ * Two calls rather than one structured call costs twice the tokens and buys:
+ * no parsing (both local models dropped their own output labels on real items
+ * — `llama3.1:8b` twice and `llama3.2` once in one eight-item run on
+ * 2026-08-15); independent failure, so a missing "worth it" does not take the
+ * "argues" line with it; and independent cache keys, so rewording one question
+ * does not retire the other's stored answers.
+ */
+export const BLURB_QUESTIONS = ['argues', 'worth'] as const;
+
+export type BlurbQuestion = (typeof BLURB_QUESTIONS)[number];
+
+/**
+ * The `task` field of the enrichment cache key (`src/enrich/cacheKey.ts`).
+ * Distinct per question, so one item's two answers never share a row.
+ */
+export const BLURB_TASK_ID: Readonly<Record<BlurbQuestion, string>> = {
+  argues: 'weekly_blurb_argues',
+  worth: 'weekly_blurb_worth',
+};
+
+/**
+ * The system message per question. Part of the cache key, so editing one of
+ * these retires exactly its own answers and nothing else — no
+ * `config/enrichment.yaml` version bump needed.
+ *
+ * `worth`'s wording is the second draft and the difference is visible in the
+ * output. The first asked "why is it worth this reader's time"; both models
+ * answered with a formula — *"This piece is worth a technical reader's time
+ * because..."* — followed by a second summary of the piece. Naming the reader
+ * first and banning the opening phrase produced *"For anyone responsible for
+ * protecting payment platforms from phishing attacks, this piece provides a
+ * detailed technical analysis of the JWR framework's architecture"* from the
+ * same model on the same item.
+ */
+export const BLURB_SYSTEM: Readonly<Record<BlurbQuestion, string>> = {
+  argues: [
+    'You write one entry of a weekly reading list for a single technical reader.',
+    'Say what this piece actually claims or establishes: the substance, not the subject area.',
+    'Two sentences at most. Use only what the text below states -- add nothing.',
+    'Do not restate the headline. No preamble, no markdown, no bullet points, no quotation.',
+  ].join('\n'),
+  worth: [
+    'You write one entry of a weekly reading list for a single technical reader.',
+    'Answer only this: who does this piece pay off for, and what do they get out of it that they would not get from the headline?',
+    'One sentence, at most 30 words. Start with the reader it serves, e.g. "For anyone running ...".',
+    'Never begin with "This piece" or "This article". Do not summarise the piece. No markdown.',
+  ].join('\n'),
+};
+
+export class WeeklyBlurbError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WeeklyBlurbError';
+  }
+}
+
+export interface BlurbPromptItem {
+  readonly sourceId: string;
+  readonly title: string;
+}
+
+/**
+ * The user message, identical for both questions — only the system message
+ * differs, so the material is described once.
+ *
+ * Throws at the `headline` level rather than building a prompt with nothing in
+ * it. That is the whole point of the evidence gate: a caller that reaches here
+ * with no material has a bug, and returning a prompt would hide it behind a
+ * plausible-sounding blurb.
+ */
+export function buildBlurbPrompt(item: BlurbPromptItem, evidence: BlurbEvidence): string {
+  if (evidence.level === 'headline') {
+    throw new WeeklyBlurbError(
+      `refusing to build a blurb prompt for ${JSON.stringify(item.title)}: ${evidence.basis}`,
+    );
+  }
+  const lead = evidence.truncated
+    ? 'The opening of the piece (it continues beyond this):'
+    : 'The piece:';
+  return `Source: ${item.sourceId}\nHeadline: ${item.title}\n\n${lead}\n${evidence.material}`;
+}
+
+// ---------------------------------------------------------------------------
+// Validating what came back
+// ---------------------------------------------------------------------------
+
+/**
+ * Content words a blurb must add over the headline.
+ *
+ * Guards a different failure from {@link EXCERPT_NOVEL_WORDS_MIN}, and the two
+ * must not be confused. The evidence gate stops a blurb being written from
+ * nothing; this one stops a blurb that is the headline read back. Neither
+ * catches the other's case: a fabricated blurb is full of novel words, and a
+ * restatement can be produced from a perfectly good article.
+ */
+export const BLURB_NOVEL_WORDS_MIN = 5;
+
+export type BlurbRejection =
+  /** The model had nothing to say. A real answer, but not a blurb. */
+  | 'empty'
+  /** The headline, read back. §8.1's named failure. */
+  | 'restated_headline'
+  /**
+   * Generated text carrying a managed-block marker. It would decide where the
+   * managed block ends inside a file this project rewrites — see
+   * `src/vault/frontmatter.ts`.
+   */
+  | 'contains_marker';
+
+export type BlurbValidation =
+  | { readonly ok: true; readonly text: string }
+  | { readonly ok: false; readonly reason: BlurbRejection };
+
+/** A label the model emitted despite the system message. Observed on both. */
+const EMITTED_LABEL = /^(?:ARGUES|WORTH|ANSWER)\s*:\s*/i;
+
+/**
+ * Normalises one completion and decides whether it may be rendered.
+ *
+ * Collapses to a single line first: a blurb is one or two sentences, and a
+ * line break inside one is the difference between a sentence and a Markdown
+ * heading in a file this project rewrites unattended.
+ */
+export function validateBlurbText(title: string, text: string): BlurbValidation {
+  const oneLine = text.replace(/\s+/g, ' ').trim().replace(EMITTED_LABEL, '').trim();
+  if (oneLine === '') return { ok: false, reason: 'empty' };
+  if (
+    oneLine.includes(WATCHFLOOR_BEGIN_MARKER) ||
+    oneLine.includes(WATCHFLOOR_END_MARKER) ||
+    // Checked loosely as well as exactly: a marker the renderer would not
+    // recognise is still a comment this module did not intend to write.
+    /<!--\s*watchfloor:/i.test(oneLine)
+  ) {
+    return { ok: false, reason: 'contains_marker' };
+  }
+  if (novelContentWords(title, oneLine) < BLURB_NOVEL_WORDS_MIN) {
+    return { ok: false, reason: 'restated_headline' };
+  }
+  return { ok: true, text: oneLine };
 }
