@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, statSync, symlinkSync } from 'node:fs';
+import { afterEach, describe, expect, it } from 'vitest';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   SAVED_KEY_SUFFIX_LENGTH,
   SAVED_SLUG_MAX_LENGTH,
   promoteSavedItem,
+  readSavedItem,
   renderSavedNote,
   savedNotePath,
   savedTitleSlug,
@@ -12,10 +14,15 @@ import {
 import { resolveVaultPath } from '../../src/vault/paths.ts';
 import {
   isWatchfloorManaged,
+  renderManagedNote,
   VaultContentError,
   WATCHFLOOR_BEGIN_MARKER,
 } from '../../src/vault/frontmatter.ts';
 import { MAX_EXCERPT_LENGTH } from '../../src/domain/repo.ts';
+import { closeDb, openDb } from '../../src/db/connection.ts';
+import { runMigrations } from '../../src/db/migrate.ts';
+import { insertItem, type Beat, type NewItem } from '../../src/domain/item.ts';
+import { saveItem } from '../../src/domain/itemState.ts';
 import { openVaultSession, VaultCapError } from '../../src/vault/session.ts';
 import { createFixtureVault, digestTree, EXISTING_SAVED_PATH } from './fixture.ts';
 import { REAL_ITEMS, WIN32K_GROUP, type CorpusRow } from './corpus.ts';
@@ -32,6 +39,17 @@ import { REAL_ITEMS, WIN32K_GROUP, type CorpusRow } from './corpus.ts';
  */
 
 const TZ = 'America/New_York';
+
+const openDbs: Array<ReturnType<typeof openDb>> = [];
+function migratedDb() {
+  const db = openDb(join(mkdtempSync(join(tmpdir(), 'wf-saved-')), 'wf.db'));
+  openDbs.push(db);
+  runMigrations(db, join(process.cwd(), 'db', 'migrations'));
+  return db;
+}
+afterEach(() => {
+  while (openDbs.length) closeDb(openDbs.pop()!);
+});
 
 function item(row: CorpusRow, savedAt = '2026-08-15T09:30:00.000Z') {
   return {
@@ -334,5 +352,164 @@ describe('promoteSavedItem — write-once, and nothing else touched', () => {
     const session = openVaultSession(root, { maxFilesPerRun: 1 });
     promoteSavedItem(session, item(WIN32K_GROUP[0]!), options);
     expect(() => promoteSavedItem(session, item(WIN32K_GROUP[1]!), options)).toThrow(VaultCapError);
+  });
+});
+
+/**
+ * M5 acceptance, the half that is a REFUSAL rather than a reproduction:
+ *
+ * > Delete the entire `watchfloor/` tree, re-run sync: `daily/`, `weekly/`,
+ * > `entities/` reproduce identically [...] `saved/` is never regenerated.
+ *
+ * The tree is moved aside rather than removed — CLAUDE.md's never-delete rule
+ * has no exception for a test fixture, and `git mv` to `attic/` is the pattern
+ * it prescribes. The result on disk is the same absence a delete produces, and
+ * the moved tree is still readable, which lets the second assertion below be
+ * made at all.
+ */
+describe('a re-sync after the tree is gone does NOT bring saved/ back', () => {
+  const options = { tz: TZ, generatedAt: '2026-08-15T09:30:05.000Z' };
+
+  it('rebuilds daily/ and entities/ and leaves saved/ absent', () => {
+    const { root } = createFixtureVault();
+    const first = openVaultSession(root);
+    const promoted = WIN32K_GROUP.slice(0, 3).map((row) =>
+      promoteSavedItem(first, item(row), options),
+    );
+    expect(promoted.every((r) => r.status === 'written')).toBe(true);
+
+    const movedAside = `${root}.deleted-2026-08-15`;
+    renameSync(root, movedAside);
+    expect(existsSync(root)).toBe(false);
+
+    // The sync pass, as the session sees it: the fully-managed and
+    // managed-block tiers, written through the same door tasks 5-7 use.
+    const resync = openVaultSession(root);
+    resync.writeManagedNote(
+      'daily/2026-08-15.md',
+      renderManagedNote({ tier: 'fully-managed', generatedAt: options.generatedAt, body: '# Daily' }),
+    );
+    resync.writeEntityNote('entities/Microsoft.md', 'Three CVEs today.', {
+      generatedAt: options.generatedAt,
+      title: 'Microsoft',
+    });
+
+    expect(existsSync(join(root, 'daily', '2026-08-15.md'))).toBe(true);
+    expect(existsSync(join(root, 'entities', 'Microsoft.md'))).toBe(true);
+    // The whole point. Not "empty" -- the directory is not even created,
+    // because nothing in a sync has a reason to name it.
+    expect(existsSync(join(root, 'saved'))).toBe(false);
+
+    // And the notes that were there are still there, in the moved tree,
+    // untouched -- which is why the tree was moved rather than deleted.
+    for (const result of promoted) {
+      expect(existsSync(join(movedAside, result.relPath))).toBe(true);
+    }
+  });
+
+  /**
+   * The property behind that test, so it cannot quietly stop being true when
+   * tasks 5-7 land: `writeSavedNote` is the only way into the write-once tier,
+   * and only this module calls it. A sync module that acquired a `saved/` code
+   * path would turn this red.
+   *
+   * Non-vacuity is checked first, because M4a's post-mortem is about exactly
+   * this shape of test passing for a milestone while reading nothing.
+   */
+  it('is called by nothing but this module', () => {
+    const callers: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.ts') && readFileSync(full, 'utf8').includes('writeSavedNote'))
+          callers.push(full);
+      }
+    };
+    walk('src');
+
+    expect(callers).toContain(join('src', 'vault', 'session.ts'));
+    expect(callers.sort()).toEqual([join('src', 'vault', 'saved.ts'), join('src', 'vault', 'session.ts')]);
+  });
+});
+
+describe('readSavedItem — the three-function read path, not the current version', () => {
+  const arxivUrl = 'https://arxiv.org/abs/2608.11274';
+  const NOW = '2026-08-15T09:30:00.000Z';
+
+  function version(beats: Beat[], fetchedAt: string, title: string): NewItem {
+    return {
+      url: arxivUrl,
+      canonicalUrl: arxivUrl,
+      title,
+      sourceId: beats[0] === 'ai' ? 'arxiv-cs-ai' : 'arxiv-cs-cr',
+      itemType: 'analysis',
+      beats,
+      entities: [],
+      publishedAt: null,
+      fetchedAt,
+      summaryRaw: 'An abstract.',
+      rawJson: '{}',
+    };
+  }
+
+  it('returns null for an item that is not saved', () => {
+    const db = migratedDb();
+    const inserted = insertItem(db, version(['ai'], '2026-08-14T10:00:00.000Z', 'A paper'));
+    expect(readSavedItem(db, inserted.item_key)).toBeNull();
+  });
+
+  it('returns null for a key with no item at all', () => {
+    const db = migratedDb();
+    saveItem(db, 'a'.repeat(64), NOW);
+    expect(readSavedItem(db, 'a'.repeat(64))).toBeNull();
+  });
+
+  /**
+   * The cross-listing that has bitten four times: one arXiv paper announced in
+   * `cs.AI` and `cs.CR` is two rows sharing one `item_key`, and the
+   * current-version read returns only the tie-break winner's beat.
+   */
+  it('unions the beats of every version', () => {
+    const db = migratedDb();
+    insertItem(db, version(['ai'], '2026-08-14T10:00:00.000Z', 'A paper'));
+    const second = insertItem(db, version(['aisec'], '2026-08-14T11:00:00.000Z', 'A paper'));
+    saveItem(db, second.item_key, NOW);
+
+    const saved = readSavedItem(db, second.item_key)!;
+    expect([...saved.beats].sort()).toEqual(['ai', 'aisec']);
+  });
+
+  // An undated item's baseline is the FIRST fetch, never the newest version's
+  // -- the same read path M2 needed for decay.
+  it('dates an undated item by first-seen, not by the current version', () => {
+    const db = migratedDb();
+    insertItem(db, version(['ai'], '2026-08-14T10:00:00.000Z', 'A paper'));
+    const second = insertItem(db, version(['ai'], '2026-08-15T08:00:00.000Z', 'A paper, revised'));
+    saveItem(db, second.item_key, NOW);
+
+    const saved = readSavedItem(db, second.item_key)!;
+    expect(saved.firstSeenAt).toBe('2026-08-14T10:00:00.000Z');
+    expect(saved.publishedAt).toBeNull();
+    expect(saved.title).toBe('A paper, revised');
+    expect(saved.savedAt).toBe(NOW);
+  });
+
+  it('promotes what it read, into a real vault', () => {
+    const db = migratedDb();
+    const inserted = insertItem(db, version(['ai'], '2026-08-14T10:00:00.000Z', 'A paper'));
+    saveItem(db, inserted.item_key, NOW);
+
+    const { root } = createFixtureVault();
+    const session = openVaultSession(root);
+    const result = promoteSavedItem(session, readSavedItem(db, inserted.item_key)!, {
+      tz: TZ,
+      generatedAt: '2026-08-15T09:30:05.000Z',
+    });
+
+    expect(result.status).toBe('written');
+    expect(readFileSync(join(root, result.relPath), 'utf8')).toContain(
+      `item_key: ${inserted.item_key}`,
+    );
   });
 });

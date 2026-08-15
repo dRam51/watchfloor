@@ -84,8 +84,13 @@
  * file.
  */
 
+import type { Db } from '../db/connection.ts';
 import { localDay } from '../db/repoSnapshots.ts';
-import { assertCanonicalTimestamp, type Beat } from '../domain/item.ts';
+import { assertCanonicalTimestamp, getCurrentItem, type Beat } from '../domain/item.ts';
+import { getItemBeats } from '../domain/itemBeats.ts';
+import { getItemEntities } from '../domain/itemEntities.ts';
+import { getItemFirstFetchedAt } from '../domain/itemFirstFetchedAt.ts';
+import { getItemState } from '../domain/itemState.ts';
 import { toExcerpt } from '../domain/repo.ts';
 import { renderManagedNote, VaultContentError, type ManagedContent } from './frontmatter.ts';
 import { VaultWriteError, type VaultSession, type VaultWriteResult } from './session.ts';
@@ -326,4 +331,56 @@ export function promoteSavedItem(
     if (isGuard || isSyscall) return { status: 'exists', relPath };
     throw err;
   }
+}
+
+/**
+ * Assembles one {@link SavedItem} from the database, or `null` when the item
+ * is not saved (or does not exist).
+ *
+ * **Four reads, not one, and that is the whole reason this function exists.**
+ * CLAUDE.md: *"The scoring read path is three functions, not one."*
+ * `getCurrentItem` returns a single stored VERSION, and three facts are wrong
+ * if taken from it:
+ *
+ * - `beats` — an arXiv paper cross-listed in `cs.AI` and `cs.CR` is two rows
+ *   sharing one key, and the current-version read returns only the tie-break
+ *   winner's beat. {@link getItemBeats} unions them.
+ * - `entities` — same shape, same fix ({@link getItemEntities}).
+ * - the first-seen instant — {@link getItemFirstFetchedAt}, not
+ *   `current.fetchedAt`. For the 1,715 items with no `published_at` this is
+ *   the only date the note can honestly show, and the current version's
+ *   `fetched_at` moves every time a source re-delivers the entry (`cisa-kev`
+ *   does exactly that on every poll).
+ *
+ * `title`, `summary_raw` and `canonical_url` DO come from the current version,
+ * deliberately: those are the newest known facts about the item, and task 3
+ * found ten real keys whose title or summary changed under an unchanged URL —
+ * *"Wall Street holds near its record"* became *"Wall Street slips back from
+ * its record"*. A note written today should quote today's version.
+ */
+export function readSavedItem(db: Db, itemKey: string): SavedItem | null {
+  const state = getItemState(db, itemKey);
+  if (state === null || state.savedAt === null) return null;
+
+  const current = getCurrentItem(db, itemKey);
+  if (current === null) return null;
+
+  const firstSeenAt = getItemFirstFetchedAt(db, itemKey);
+  // Unreachable while `current` is non-null -- both read the same table --
+  // and asserted rather than defaulted, because a fabricated timestamp here
+  // would be written once into a note that can never be corrected.
+  if (firstSeenAt === null) return null;
+
+  return {
+    itemKey,
+    title: current.title,
+    canonicalUrl: current.canonicalUrl,
+    sourceId: current.sourceId,
+    beats: getItemBeats(db, itemKey),
+    entities: getItemEntities(db, itemKey),
+    publishedAt: current.publishedAt,
+    firstSeenAt,
+    savedAt: state.savedAt,
+    summaryRaw: current.summaryRaw,
+  };
 }
