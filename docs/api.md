@@ -110,7 +110,9 @@ Live response, abridged only where marked:
   "description": "…", "language": "Rust", "licenseSpdxId": "MIT",
   "stars": 400, "openIssuesAndPullRequests": 7,
   "lastCommitAt": "2026-08-13T09:15:00.000Z",
-  "isFork": false, "isArchived": false, "readmeExcerpt": null,
+  "isFork": false, "isArchived": false,
+  "readmeExcerpt": "RustDesk is a full-featured open source remote control alternative…",
+  "readmeKnown": true,
   "velocity": {
     "status": "ok", "repoId": 101,
     "fromDay": "2026-08-08", "throughDay": "2026-08-14",
@@ -183,17 +185,29 @@ that names the repo — including a deep link into it, or a `*.github.io` Pages 
 `"title"` for a headline that names the project while linking somewhere else entirely. The
 mentions are shipped, not just the flag, so a UI can show *why* a row sank.
 
-**`readmeExcerpt: null` does NOT mean "this repo has no README."** An unread README is
-indistinguishable from a missing one. Do not render the absence as a claim.
+**`readmeExcerpt: null` does NOT mean "this repo has no README" — check `readmeKnown`.**
+The two nulls are different facts and only that flag separates them:
+
+| `readmeExcerpt` | `readmeKnown` | What it means | May §4 suppress? |
+| --- | --- | --- | --- |
+| a string | `true` | read, and this is its first paragraph | no |
+| `null` | `true` | asked and answered: no README, or one with no prose in it | **yes** |
+| `null` | `false` | never read — the enrichment budget has not reached it, or the fetch failed | **no** |
+
+Render the third row as "not yet read", never as "no README". A repo is enriched at most 8
+times an hour unauthenticated (Core is 60/hour, per IP), so on a fresh database most repos sit
+in the third row for a while and the count falls with every poll.
 
 **`openIssuesAndPullRequests` counts open pull requests too**, because GitHub's
 `open_issues_count` does — 3 issues plus 90 PRs reports 93. Do not label it "issues".
 
 **Metadata can be `null` while the signal is not.** `description`, `language`,
-`licenseSpdxId`, `stars`, `openIssuesAndPullRequests`, `lastCommitAt`, `isFork`, `isArchived`
-and `readmeExcerpt` all come from the stored `raw_json`; if that cannot be read back they are
-`null` while `velocity` and `hn` remain fully populated. `owner`/`name`/`fullName` come from
-the item's own URL and are always present.
+`licenseSpdxId`, `stars`, `openIssuesAndPullRequests`, `lastCommitAt`, `isFork` and
+`isArchived` all come from the stored `raw_json`; if that cannot be read back they are `null`
+while `velocity` and `hn` remain fully populated. `owner`/`name`/`fullName` come from the
+item's own URL and are always present. `readmeExcerpt`/`readmeKnown` come from their own
+table, keyed on GitHub's numeric repo id, so they survive both a defective `raw_json` and a
+repo rename.
 
 ### `GET /api/search`
 

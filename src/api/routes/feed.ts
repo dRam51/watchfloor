@@ -184,6 +184,7 @@ import { evaluateOverrides, type OverrideResult, type OverridesConfig } from '..
 import { DEFAULT_REPO_SCORING_CONFIG, resolveRepoSignal, type RepoScoringConfig, type RepoSignal } from '../../score/repoSignal.ts';
 import type { VelocityResult } from '../../score/velocity.ts';
 import { repoFromSearchItem } from '../../adapters/github.ts';
+import { getRepoReadme, isReadmeAnswered, type RepoReadmeRecord } from '../../db/repoReadmes.ts';
 import type { Repo } from '../../domain/repo.ts';
 import { KINDS, type Kind, type Source } from '../../sources/load.ts';
 
@@ -443,8 +444,21 @@ interface FeedRepo {
    * module documents and tests. `null` when the stored JSON is defective, in
    * which case the velocity and HN facts are still perfectly good and are still
    * shipped: a bad raw_json costs the metadata, never the ranking evidence.
+   *
+   * **The README is NOT in here.** A search response carries none, so
+   * `meta.readmeExcerpt` is null for every repo this path can build -- which is
+   * exactly why the route used to ship a hardcoded null. See `readme` below.
    */
   meta: Repo | null;
+  /**
+   * The stored answer to the README question (M4a task 11,
+   * `src/db/repoReadmes.ts`), or `null` when this repo has never been
+   * attempted. Kept as its own field rather than folded into `meta` because
+   * it survives a defective `raw_json` -- and because §4's `no_readme`
+   * suppression turns on it, so it must not be reachable only through a
+   * nullable metadata object.
+   */
+  readme: RepoReadmeRecord | null;
 }
 
 interface BestBeatScore {
@@ -548,7 +562,16 @@ function resolveFeedRepo(
     meta = null;
   }
 
-  return { signal, meta };
+  // Keyed on GitHub's NUMERIC id, never on item_key: item_key follows the URL,
+  // so a rename would otherwise orphan a README this system already paid a
+  // rate-limited request for -- and would silently re-suppress the repo until
+  // the enrichment pass got round to reading it again. `signal.repoId` is the
+  // fallback because it resolves through 0007's github_repo_names, which
+  // survives a raw_json this route could not parse.
+  const githubId = meta?.githubId ?? signal.repoId;
+  const readme = githubId === null ? null : getRepoReadme(db, githubId);
+
+  return { signal, meta, readme };
 }
 
 function buildCandidateRows(
@@ -699,7 +722,7 @@ function toVelocityJson(velocity: VelocityResult) {
 
 /** §7's repo row, plus the evidence behind its two derived numbers. Named field by field, never spread. */
 function toRepoJson(repo: FeedRepo) {
-  const { signal, meta } = repo;
+  const { signal, meta, readme } = repo;
   return {
     owner: signal.ref.owner,
     name: signal.ref.name,
@@ -722,12 +745,25 @@ function toRepoJson(repo: FeedRepo) {
     isFork: meta?.isFork ?? null,
     isArchived: meta?.isArchived ?? null,
     /**
-     * The README's first paragraph, capped at ~300 characters. `null` here is
-     * "no excerpt stored", which is NOT the same as "this repo has no README" --
-     * an unread README is indistinguishable from a missing one, so §7 must not
-     * render this absence as "no README".
+     * The README's first paragraph, capped at ~300 characters, read from
+     * `github_repo_readmes` (M4a task 11) -- NOT from `meta`, whose
+     * `readmeExcerpt` is null for every repo because a search response carries
+     * no README.
+     *
+     * `null` here is ambiguous ON ITS OWN and must never be rendered as "no
+     * README": it covers both a repo that genuinely has none and one whose
+     * README the enrichment budget has not reached yet. `readmeKnown`
+     * immediately below is the only thing that separates them.
      */
-    readmeExcerpt: meta?.readmeExcerpt ?? null,
+    readmeExcerpt: readme?.firstParagraph ?? null,
+    /**
+     * Whether the README question was actually ANSWERED. §4's fourth
+     * suppression rule ("repos with no README") may only be honoured when this
+     * is true -- task 6's carry-forward, upheld here at the layer that renders
+     * a claim to a human. A failed fetch and a repo never reached both report
+     * `false`, so one flaky response can never suppress a good repo.
+     */
+    readmeKnown: isReadmeAnswered(readme),
     velocity: toVelocityJson(signal.velocity),
     /** The bounded [-1, 1] number the scorer actually added. 0 also means "no history". */
     velocityComponent: signal.velocityComponent,

@@ -32,6 +32,7 @@ import { loadDecayConfig } from '../../src/score/decay.ts';
 import { loadOverridesConfig, type OverridesConfig, type OverrideRule } from '../../src/score/overrides.ts';
 import { loadMechanicalScoreConfig } from '../../src/score/mechanical.ts';
 import { recordStarSnapshot } from '../../src/db/repoSnapshots.ts';
+import { recordRepoReadme } from '../../src/db/repoReadmes.ts';
 import type { Source } from '../../src/sources/load.ts';
 
 const TOKEN = 'a-real-token-that-is-long-enough';
@@ -1037,5 +1038,124 @@ describe('GET /feed -- the repo block', () => {
     expect(repo.language).toBeNull();
     expect(repo.stars).toBeNull();
     expect(repo.velocity.status).toBe('insufficient_history');
+  });
+
+  // -------------------------------------------------------------------------
+  // M4a task 11 -- the README, served from storage rather than hardcoded null
+  //
+  // §7's row renders three DIFFERENT things here, and the wire has to be able
+  // to say all three: a paragraph, "this repository has no README", and
+  // "README not yet read". Before this the route shipped `readmeExcerpt` off
+  // `repoFromSearchItem`, which sets it to null for every repo because a
+  // SEARCH response carries no README -- so the two null cases were
+  // indistinguishable and `readmeKnown` was absent from the payload entirely.
+  // -------------------------------------------------------------------------
+
+  it('serves the stored README paragraph, and says the question was answered', async () => {
+    const db = migratedDb();
+    const item = repoItem(db);
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+    recordRepoReadme(db, {
+      repoId: 991,
+      fullName: 'StamManif/mcp-stama',
+      observedAt: '2026-08-14T00:30:00.000Z',
+      outcome: 'present',
+      firstParagraph: 'mcp-stama is an ultra-fast Rust MCP server with no dependencies.',
+    });
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const repo = res.json().items[0].repo;
+
+    expect(repo.readmeExcerpt).toBe('mcp-stama is an ultra-fast Rust MCP server with no dependencies.');
+    expect(repo.readmeKnown).toBe(true);
+  });
+
+  it('DISTINGUISHES a repo with no README from one whose README was never read', async () => {
+    // The distinction §4's fourth suppression rule turns on. Both produce
+    // `readmeExcerpt: null`; only `readmeKnown` separates them, and only the
+    // answered one may be suppressed.
+    const db = migratedDb();
+    const noReadme = repoItem(db, { owner: 'octocat', name: 'octocat.github.io', raw: repoRawJson({ id: 992, name: 'octocat.github.io', owner: { login: 'octocat' }, full_name: 'octocat/octocat.github.io' }) });
+    const unread = repoItem(db, { owner: 'acme', name: 'unread', raw: repoRawJson({ id: 993, name: 'unread', owner: { login: 'acme' }, full_name: 'acme/unread' }) });
+    insertScoreRow(db, noReadme.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+    insertScoreRow(db, unread.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+    // 992 was asked and answered "no README". 993 was never asked at all.
+    recordRepoReadme(db, { repoId: 992, fullName: 'octocat/octocat.github.io', observedAt: '2026-08-14T00:30:00.000Z', outcome: 'absent' });
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const byName = new Map<string, { readmeExcerpt: string | null; readmeKnown: boolean }>(
+      res.json().items.map((i: { repo: { fullName: string } & { readmeExcerpt: string | null; readmeKnown: boolean } }) => [i.repo.fullName, i.repo]),
+    );
+
+    expect(byName.get('octocat/octocat.github.io')).toMatchObject({ readmeExcerpt: null, readmeKnown: true });
+    expect(byName.get('acme/unread')).toMatchObject({ readmeExcerpt: null, readmeKnown: false });
+  });
+
+  it('does NOT call a repo README-less on the strength of a failed fetch', async () => {
+    // A 503 must not read as an answer. If this ever reported readmeKnown:
+    // true, one flaky response would suppress a good repo.
+    const db = migratedDb();
+    const item = repoItem(db);
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+    recordRepoReadme(db, {
+      repoId: 991,
+      fullName: 'StamManif/mcp-stama',
+      observedAt: '2026-08-14T00:30:00.000Z',
+      outcome: 'failed',
+      failure: 'error',
+      detail: 'HTTP 503: Server Error',
+    });
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    expect(res.json().items[0].repo).toMatchObject({ readmeExcerpt: null, readmeKnown: false });
+  });
+
+  it('reports readmeKnown: false, never an omitted field, for a repo with no record at all', async () => {
+    // Nulls stay null and booleans stay present -- the wire convention. An
+    // omitted field would read as `undefined`, which is falsy in the client and
+    // would happen to render correctly today while being unstated.
+    const db = migratedDb();
+    const item = repoItem(db);
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const repo = res.json().items[0].repo;
+    expect(Object.keys(repo)).toContain('readmeKnown');
+    expect(repo.readmeKnown).toBe(false);
+  });
+
+  it('reads the README by GitHub id, so a renamed repo keeps the paragraph it already paid for', async () => {
+    // item_key follows the URL; the numeric id does not. Keying this read on
+    // item_key would silently re-suppress a repo the moment it was renamed.
+    const db = migratedDb();
+    // NOT owner `new`: github.com/new is the create-repo page, and
+    // parseGithubRepoRef correctly refuses it as a reserved path.
+    const item = repoItem(db, { owner: 'renamed-org', name: 'mcp-stama', raw: repoRawJson({ owner: { login: 'renamed-org' }, full_name: 'renamed-org/mcp-stama' }) });
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+    recordRepoReadme(db, {
+      repoId: 991,
+      fullName: 'old/name',
+      observedAt: '2026-08-13T00:30:00.000Z',
+      outcome: 'present',
+      firstParagraph: 'Read under the old name, and still true.',
+    });
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    expect(res.json().items[0].repo.readmeExcerpt).toBe('Read under the old name, and still true.');
+  });
+
+  it('still answers the README question when raw_json is defective', async () => {
+    // `meta` is null there, and the README lives in its own table -- so the
+    // one fact §4 suppresses on survives a bad stored blob.
+    const db = migratedDb();
+    const item = repoItem(db, { raw: '{"nope": true}' });
+    insertScoreRow(db, item.item_id, 'repos', 5, 5, '2026-08-14T00:00:00.000Z');
+    recordStarSnapshot(db, { repoId: 991, itemKey: item.item_key, fullName: 'StamManif/mcp-stama', stars: 40, observedAt: '2026-08-13T10:00:00.000Z', tz: 'UTC' });
+    recordRepoReadme(db, { repoId: 991, fullName: 'StamManif/mcp-stama', observedAt: '2026-08-14T00:30:00.000Z', outcome: 'absent' });
+
+    const res = await buildTestServer(db, { sources: [REPO_SOURCE] }).inject(authed('/feed?now=2026-08-14T01:00:00.000Z'));
+    const repo = res.json().items[0].repo;
+    expect(repo.stars).toBeNull(); // metadata is gone...
+    expect(repo.readmeKnown).toBe(true); // ...the README answer is not
   });
 });
