@@ -251,6 +251,35 @@ describe('writeSavedNote — write once, then never touched again by any job', (
     expect(readFileSync(join(root, 'saved', '2026-08-15-kept.md'), 'utf8')).toBe(content);
   });
 
+  // A KNOWN, ACCEPTED COST, pinned here so task 9 inherits it as a fact rather
+  // than a surprise. `saved/` writes commit with `link`, not `rename`, because
+  // link fails EEXIST and that is what makes write-once structural. Link does
+  // not consume the temp name the way rename does, and CLAUDE.md forbids
+  // unlinking it — so every saved note leaves one dot-prefixed sibling that is
+  // a second hard link to the same inode: a directory entry, not a second copy
+  // of the bytes. `vault prune` is the job that clears them.
+  //
+  // The alternative — writing straight to the target with 'wx' — trades this
+  // for a crash leaving a permanently partial saved note that no job is ever
+  // allowed to rewrite. That is strictly worse, which is why this cost was
+  // taken deliberately.
+  it('leaves exactly one prefixed temp hard link per saved note, for prune to clear', () => {
+    const { root } = createFixtureVault();
+    const session = openVaultSession(root);
+    session.writeSavedNote('saved/2026-08-15-kept.md', note('# Kept\n'));
+
+    const leftovers = readdirSync(join(root, 'saved')).filter((n) =>
+      n.startsWith(VAULT_TEMP_PREFIX),
+    );
+    expect(leftovers).toHaveLength(1);
+    // Same inode: a directory entry, not a duplicated note.
+    expect(statSync(join(root, 'saved', leftovers[0]!)).ino).toBe(
+      statSync(join(root, 'saved', '2026-08-15-kept.md')).ino,
+    );
+    // And it is hidden from Obsidian, which ignores dot-prefixed entries.
+    expect(leftovers[0]!.startsWith('.')).toBe(true);
+  });
+
   it('refuses a second write to the same path, even with identical content', () => {
     const { root } = createFixtureVault();
     const session = openVaultSession(root);
