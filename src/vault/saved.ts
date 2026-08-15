@@ -88,6 +88,7 @@ import { localDay } from '../db/repoSnapshots.ts';
 import { assertCanonicalTimestamp, type Beat } from '../domain/item.ts';
 import { toExcerpt } from '../domain/repo.ts';
 import { renderManagedNote, VaultContentError, type ManagedContent } from './frontmatter.ts';
+import { VaultWriteError, type VaultSession, type VaultWriteResult } from './session.ts';
 
 /**
  * How much of the slug survives. The longest real title is 288 characters;
@@ -273,4 +274,56 @@ export function renderSavedNote(item: SavedItem, generatedAt: string): ManagedCo
       saved_at: item.savedAt,
     },
   });
+}
+
+/**
+ * What happened to one item's saved note.
+ *
+ * `exists` is deliberately not called `already_promoted`: what the write
+ * actually established is that **the path was occupied**, which is normally
+ * this item's own note from an earlier promotion and is occasionally something
+ * the owner put there. Either way §8.1's answer is the same — nothing is
+ * written — and claiming to know which would be a claim this module has not
+ * checked.
+ */
+export type SavedPromotion =
+  | { readonly status: 'written'; readonly relPath: string; readonly bytes: number }
+  | { readonly status: 'exists'; readonly relPath: string };
+
+/**
+ * Promotes one saved item into `saved/`, once.
+ *
+ * Idempotent with no probe and no state: the write is attempted, and a refusal
+ * because the path is occupied *is* the "already there" answer. Both shapes of
+ * that refusal are handled, and the second one is the point:
+ *
+ * - `VaultWriteError('saved_exists')` — the session's `existsSync` guard, which
+ *   exists for the error message.
+ * - a raw `EEXIST` from `link(2)` — the actual enforcement. It is reachable
+ *   whenever the guard cannot see the entry (a dangling symlink at the target,
+ *   or a second process winning the race between the check and the link), and
+ *   task 4's report records that deleting the guard leaves this path refusing
+ *   correctly with only a worse message. Catching only the first would make
+ *   this function depend on the guard rather than on the syscall.
+ *
+ * Every other refusal — a cap, an unmounted vault, a wrong tier — propagates.
+ * Reporting a truncated run as a complete one is how a missing note becomes
+ * invisible.
+ */
+export function promoteSavedItem(
+  session: VaultSession,
+  item: SavedItem,
+  options: { readonly tz: string; readonly generatedAt: string },
+): SavedPromotion {
+  const relPath = savedNotePath(item, options.tz);
+  const content = renderSavedNote(item, options.generatedAt);
+  try {
+    const written: VaultWriteResult = session.writeSavedNote(relPath, content);
+    return { status: 'written', relPath: written.relPath, bytes: written.bytes };
+  } catch (err) {
+    const isGuard = err instanceof VaultWriteError && err.reason === 'saved_exists';
+    const isSyscall = err instanceof Error && (err as NodeJS.ErrnoException).code === 'EEXIST';
+    if (isGuard || isSyscall) return { status: 'exists', relPath };
+    throw err;
+  }
 }

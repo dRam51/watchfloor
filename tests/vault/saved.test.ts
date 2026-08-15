@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { existsSync, readFileSync, statSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   SAVED_KEY_SUFFIX_LENGTH,
   SAVED_SLUG_MAX_LENGTH,
+  promoteSavedItem,
   renderSavedNote,
   savedNotePath,
   savedTitleSlug,
@@ -13,7 +16,8 @@ import {
   WATCHFLOOR_BEGIN_MARKER,
 } from '../../src/vault/frontmatter.ts';
 import { MAX_EXCERPT_LENGTH } from '../../src/domain/repo.ts';
-import { createFixtureVault } from './fixture.ts';
+import { openVaultSession, VaultCapError } from '../../src/vault/session.ts';
+import { createFixtureVault, digestTree, EXISTING_SAVED_PATH } from './fixture.ts';
 import { REAL_ITEMS, WIN32K_GROUP, type CorpusRow } from './corpus.ts';
 
 /**
@@ -234,5 +238,101 @@ describe('renderSavedNote — a durable pointer, never a copy of the article', (
     expect(() =>
       renderSavedNote({ ...item(paperCut), canonicalUrl: 'https://x.test/<a>' }, GENERATED_AT),
     ).toThrow(VaultContentError);
+  });
+});
+
+describe('promoteSavedItem — write-once, and nothing else touched', () => {
+  const paperCut = REAL_ITEMS.find((r) => r.title.startsWith('PaperCut'))!;
+  const options = { tz: TZ, generatedAt: '2026-08-15T09:30:05.000Z' };
+
+  it('writes the note at the §8.1 path', () => {
+    const { root } = createFixtureVault();
+    const session = openVaultSession(root);
+    const result = promoteSavedItem(session, item(paperCut), options);
+
+    expect(result.status).toBe('written');
+    expect(result.relPath).toBe(savedNotePath(item(paperCut), TZ));
+    expect(readFileSync(join(root, result.relPath), 'utf8')).toContain(paperCut.canonicalUrl);
+  });
+
+  /**
+   * Idempotence, asserted the strong way. Byte-identical content proves
+   * nothing about whether the file was REWRITTEN — the note is a pure function
+   * of its input, so a rewrite would produce the same bytes. The inode and
+   * mtime prove the file was not replaced at all.
+   */
+  it('does not rewrite an existing note, and does not spend a write to find out', () => {
+    const { root } = createFixtureVault();
+    const session = openVaultSession(root);
+    const first = promoteSavedItem(session, item(paperCut), options);
+    const before = statSync(join(root, first.relPath));
+
+    const second = promoteSavedItem(session, item(paperCut), {
+      ...options,
+      generatedAt: '2026-09-01T00:00:00.000Z',
+    });
+
+    expect(second).toEqual({ status: 'exists', relPath: first.relPath });
+    const after = statSync(join(root, first.relPath));
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    // The second call consumed no part of the run's file budget either.
+    expect(session.filesWritten).toBe(1);
+  });
+
+  it('promotes all 24 identically-titled CVEs without losing one', () => {
+    const { root } = createFixtureVault();
+    const session = openVaultSession(root);
+    const written = WIN32K_GROUP.map((row) => promoteSavedItem(session, item(row), options));
+
+    expect(written.every((r) => r.status === 'written')).toBe(true);
+    expect(new Set(written.map((r) => r.relPath)).size).toBe(24);
+    for (const result of written) {
+      expect(readFileSync(join(root, result.relPath), 'utf8')).toContain(`item_key: `);
+    }
+  });
+
+  it('leaves every hand-authored note in the fixture vault byte-identical', () => {
+    const { anchor, root } = createFixtureVault();
+    const before = digestTree(anchor);
+    const session = openVaultSession(root);
+    for (const row of WIN32K_GROUP.slice(0, 5)) promoteSavedItem(session, item(row), options);
+
+    const after = digestTree(anchor);
+    for (const [path, digest] of before) expect(after.get(path)).toBe(digest);
+    // Including the saved/ note that was already there, which §8.1 forbids any
+    // job from touching ever again.
+    expect(after.get(join('Watchfloor', EXISTING_SAVED_PATH))).toBe(
+      before.get(join('Watchfloor', EXISTING_SAVED_PATH)),
+    );
+  });
+
+  /**
+   * Write-once is the SYSCALL, not the guard. A dangling symlink is invisible
+   * to `existsSync` (which follows links) and fatal to `link(2)` (which sees
+   * the directory entry), so this reaches the raw `EEXIST` path that task 4's
+   * report identified as the real enforcement — the one that survives the
+   * `existsSync` check being deleted.
+   */
+  it('refuses through the syscall when the existence check cannot see the entry', () => {
+    const { root } = createFixtureVault();
+    const relPath = savedNotePath(item(paperCut), TZ);
+    symlinkSync(join(root, 'nothing-here.md'), join(root, relPath));
+    expect(existsSync(join(root, relPath))).toBe(false);
+
+    const session = openVaultSession(root);
+    expect(promoteSavedItem(session, item(paperCut), options)).toEqual({
+      status: 'exists',
+      relPath,
+    });
+  });
+
+  // A cap refusal is not an "already promoted" answer, and collapsing them
+  // would turn a truncated run into a silently complete-looking one.
+  it('lets a cap refusal through rather than reporting it as already present', () => {
+    const { root } = createFixtureVault();
+    const session = openVaultSession(root, { maxFilesPerRun: 1 });
+    promoteSavedItem(session, item(WIN32K_GROUP[0]!), options);
+    expect(() => promoteSavedItem(session, item(WIN32K_GROUP[1]!), options)).toThrow(VaultCapError);
   });
 });
