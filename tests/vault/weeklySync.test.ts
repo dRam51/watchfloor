@@ -250,7 +250,7 @@ describe('syncWeeklyNote — the artifact', () => {
     // 1. What it argues -- verbatim from the live capture.
     expect(text).toContain('DecryptAds is a free service that aggregates');
     // 2. Why it is worth the time -- a different sentence, from a second call.
-    expect(text).toContain('For anyone running a website or app that serves ads');
+    expect(text).toContain('For security professionals and privacy advocates');
     // 3. An estimated read time, with what it was counted from.
     expect(text).toMatch(/12 min/);
     expect(text).toMatch(/2444 words of article text this feed carries, at 200 wpm/);

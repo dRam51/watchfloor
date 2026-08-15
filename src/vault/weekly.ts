@@ -474,14 +474,64 @@ export const BLURB_TASK_ID: Readonly<Record<BlurbQuestion, string>> = {
  * these retires exactly its own answers and nothing else — no
  * `config/enrichment.yaml` version bump needed.
  *
- * `worth`'s wording is the second draft and the difference is visible in the
- * output. The first asked "why is it worth this reader's time"; both models
- * answered with a formula — *"This piece is worth a technical reader's time
- * because..."* — followed by a second summary of the piece. Naming the reader
- * first and banning the opening phrase produced *"For anyone responsible for
- * protecting payment platforms from phishing attacks, this piece provides a
- * detailed technical analysis of the JWR framework's architecture"* from the
- * same model on the same item.
+ * `worth` is the FOURTH draft, and each earlier one failed differently against
+ * the live daemon. The wording matters more than it looks like it should on a
+ * 3B model, so the discarded drafts are recorded rather than lost:
+ *
+ *  1. *"Why is it worth this reader's time?"* — both models answered with a
+ *     formula, *"This piece is worth a technical reader's time because..."*,
+ *     followed by a second summary of the piece.
+ *  2. Adding the example *`e.g. "For anyone running ..."`* fixed the formula
+ *     and introduced a worse one: the models copied the VERB, not the shape.
+ *     **Nine of twelve blurbs in the first live run over the real corpus began
+ *     "For anyone running"**, including *"For anyone running Apache helicopter
+ *     training missions"* and *"For anyone running for public office"*.
+ *  3. Removing the example entirely was far worse still — with nothing to
+ *     anchor "name the reader", both models invented a *person*: "Alex Chen, a
+ *     28-year-old software engineer", "Samantha, a military family member",
+ *     "Alexandria Mangione". A second attempt with three examples instead of
+ *     one merely moved the copying: llama3.2 opened four of five with "For a
+ *     security team that ...", including for a helicopter crash.
+ *
+ * What works is a SHAPE with no content to copy — begin with "For", then the
+ * kind of reader — plus an explicit ban on naming an individual, which is
+ * draft 3's failure closed directly. On the same five items that produced the
+ * copied openings, it gives "For prosecutors and law enforcement officials",
+ * "For military personnel and their families", "For security professionals
+ * responsible for enterprise software patch management" and "For policymakers
+ * and regulators".
+ *
+ * The general lesson, which will outlast this prompt: **a small local model
+ * copies any concrete example it is given, so an example must carry form and
+ * no content.**
+ *
+ * ## The third failure class, which is OPEN — and the fix that was measured and rejected
+ *
+ * PBS's excerpt for *"France's top court **blocks** under-15 social media
+ * ban"* is background that predates the ruling — *"France last month became
+ * the first country in the European Union to pass a blanket ban"*. A faithful
+ * summary of that excerpt says the ban is in force, which the headline
+ * directly above it in the note contradicts. `llama3.1:8b` wrote exactly that
+ * in the live run.
+ *
+ * **Neither guard sees it.** It is not a fabrication — every word traces to
+ * text we hold — and not a restatement — it says something the headline does
+ * not. It is a *faithful summary of the wrong text*.
+ *
+ * The obvious mitigation was tried and **rejected on measurement**. Adding
+ * *"THE HEADLINE IS THE NEWS. The text under it may be background that
+ * predates the headline"* fixed the France item on `llama3.2` and did **not**
+ * fix `llama3.1:8b`, which still wrote "France has passed a blanket ban" — and
+ * it degraded three of the four fixture items on `llama3.2`, which is the
+ * configured model: the arXiv blurb collapsed to the fragment *"Relevance,
+ * however, is not sufficient for generating coherent text"*, and the MCP one
+ * gained an invented expansion, *"MCP (Microsoft Component Platform)"*. A
+ * fifth instruction costs a 3B model more than the one case it buys.
+ *
+ * So the class stays open and reported rather than papered over. What limits
+ * the damage is structural rather than textual: the note renders the headline
+ * immediately above the blurb, so a reader meets the contradiction rather than
+ * only the blurb.
  */
 export const BLURB_SYSTEM: Readonly<Record<BlurbQuestion, string>> = {
   argues: [
@@ -493,8 +543,8 @@ export const BLURB_SYSTEM: Readonly<Record<BlurbQuestion, string>> = {
   worth: [
     'You write one entry of a weekly reading list for a single technical reader.',
     'Answer only this: who does this piece pay off for, and what do they get out of it that they would not get from the headline?',
-    'One sentence, at most 30 words. Start with the reader it serves, e.g. "For anyone running ...".',
-    'Never begin with "This piece" or "This article". Do not summarise the piece. No markdown.',
+    'One sentence, at most 30 words. Begin with the word "For", then the KIND of reader it serves, then what they get.',
+    'The reader is a kind of person or role, never a named individual and never invented. Never begin with "This piece" or "This article". Do not summarise the piece. No markdown.',
   ].join('\n'),
 };
 
