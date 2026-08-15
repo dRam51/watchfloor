@@ -162,3 +162,35 @@ describe('WF_GITHUB_TOKEN', () => {
     expect(loadEnv({ ...valid, WF_GITHUB_TOKEN: 'github_pat_11ABCDEFG' }).WF_GITHUB_TOKEN).toBe('github_pat_11ABCDEFG');
   });
 });
+
+describe('WF_ANTHROPIC_API_KEY', () => {
+  // M5 task 2. Optional by design and for a stronger reason than
+  // WF_GITHUB_TOKEN's: absent is not a degraded mode, it is the SHIPPED mode.
+  // RULING 2 has the Anthropic backend built and hard-disabled, so a machine
+  // with no credential at all is the normal, expected configuration.
+  it('is not required — the paid backend ships hard-disabled', () => {
+    expect(loadEnv(valid).WF_ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it('is returned verbatim when set', () => {
+    expect(loadEnv({ ...valid, WF_ANTHROPIC_API_KEY: 'sk-ant-example' }).WF_ANTHROPIC_API_KEY).toBe(
+      'sk-ant-example',
+    );
+  });
+
+  it('accepts a blank value rather than hard-failing boot on an empty .env line', () => {
+    // Same reasoning as WF_GITHUB_TOKEN: `WF_ANTHROPIC_API_KEY=` reads as ''.
+    // createAnthropicBackend trims and treats '' as absent, which is a refusal
+    // to construct only when the paid flag is ALSO set -- never a boot failure
+    // on a machine that never asked to spend.
+    expect(loadEnv({ ...valid, WF_ANTHROPIC_API_KEY: '' }).WF_ANTHROPIC_API_KEY).toBe('');
+  });
+
+  it('does not read a machine-wide ANTHROPIC_API_KEY into the environment it validates', () => {
+    // The variable a dev box with Claude Code installed plausibly exports. It
+    // must not become this project's credential by proximity.
+    const env = loadEnv({ ...valid, ANTHROPIC_API_KEY: 'sk-ant-someone-elses-key' });
+    expect(env.WF_ANTHROPIC_API_KEY).toBeUndefined();
+    expect(JSON.stringify(env)).not.toContain('someone-elses-key');
+  });
+});

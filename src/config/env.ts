@@ -96,6 +96,34 @@ const EnvSchema = z.object({
   // or committed — see src/fetch/github.ts for how that is enforced and
   // tests/fetch/github.test.ts for the guards that pin it.
   WF_GITHUB_TOKEN: z.string().optional(),
+  // M5 task 2. The Anthropic API credential, consumed by
+  // src/enrich/llm/anthropic.ts.
+  //
+  // OPTIONAL, and for a stronger reason than WF_GITHUB_TOKEN's: absent is not
+  // a degraded mode, it is the SHIPPED mode. RULING 2 has the paid backend
+  // built and hard-disabled, so a machine with no Anthropic credential at all
+  // is the normal configuration, and `config/llm.yaml` selects `ollama`.
+  //
+  // A KEY ALONE CANNOT SPEND. Two things must both be true before a single
+  // request is possible: WF_ALLOW_PAID_ANTHROPIC=1 (the §15 gate) and this
+  // value. With the flag set and this blank, createAnthropicBackend refuses to
+  // construct at all rather than running degraded.
+  //
+  // Note the WF_ prefix. A development machine with Claude Code installed very
+  // plausibly exports ANTHROPIC_API_KEY; that variable is deliberately ignored,
+  // because honouring it would let this project bill a credential nobody handed
+  // it, on nothing more than a flag flip.
+  //
+  // Blank is accepted for the same reason as WF_GITHUB_TOKEN — an optional
+  // variable must not be able to stop the process booting — and, like it, is
+  // read directly from the environment at its point of use rather than through
+  // this schema: the cost gate has to be exercisable on both sides with an
+  // injected env. Registered here for discoverability and to keep every WF_*
+  // credential in one visible list. Unvalidated in shape, same reasoning.
+  //
+  // This is a live billable credential and this repository is PUBLIC. It must
+  // never be logged, echoed into an error, or committed.
+  WF_ANTHROPIC_API_KEY: z.string().optional(),
   // How often src/bin/scheduler.ts's tick loop checks which sources are due
   // (self-rescheduling setTimeout, not setInterval -- see that file). M1
   // task 10 fix round 1, minor: this used to be a hardcoded literal in
