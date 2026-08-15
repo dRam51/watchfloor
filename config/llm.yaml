@@ -1,0 +1,69 @@
+# Watchfloor -- LLM enrichment backend (M5).
+#
+# Loaded by src/enrich/llm/config.ts. Edit this file, never code: the model
+# name, the daemon's address, and every bound live here for the same reason a
+# feed source lives in config/sources.yaml. CLAUDE.md's portability debt is
+# what forces it -- "Ollama on Apple Silicon uses Metal; a mini PC without a
+# capable GPU may not run the same model at all" -- so moving to another host
+# is a `model:` edit, and moving to another backend is the `backend:` line.
+#
+# A malformed value fails at config load, not at generation time. See the
+# schema in src/enrich/llm/config.ts for what each bound rejects and why.
+
+# Which backend runs. `ollama` is the only ENABLED one (M5 plan, RULING 2):
+# Anthropic ships built and hard-disabled behind WF_ALLOW_PAID_ANTHROPIC in
+# task 2, for the owner to enable deliberately later.
+backend: ollama
+
+# Bounds every backend enforces, whichever one is selected. A local model can
+# hang or emit unbounded output; both are bounded here rather than in code.
+limits:
+  # Whole-call deadline. Generous compared with src/fetch/http.ts's 10s
+  # because local inference is not a feed fetch: a COLD model load measured
+  # 13.1s on this machine before a single token was generated (Ollama's own
+  # `load_duration`, 2026-08-15), and a longer prompt on a bigger model is
+  # slower still. Too short a deadline here does not fail safely -- it aborts
+  # good work repeatedly and looks like an unreliable daemon.
+  timeout_ms: 120000
+  # Rejection threshold for prompt + system, in characters. Roughly 6k tokens
+  # at ~4 chars/token, comfortably inside llama3.2's context while still
+  # refusing a whole article pasted in by accident. Over this, the backend
+  # THROWS rather than truncating: cutting the middle out of a document and
+  # summarising the remainder yields a confident, wrong blurb, and §8.1's
+  # weekly reading note is the one artifact that must not contain one.
+  max_prompt_chars: 24000
+  # Streaming byte ceiling on the response body. Defence in depth only --
+  # max_output_tokens below is the real bound on generation -- so this exists
+  # to stop a pathological or non-Ollama response being buffered whole. 1 MiB
+  # is ~250x a 512-token completion.
+  max_response_bytes: 1048576
+  # Server-side generation cap (Ollama's `num_predict`). Hitting it is a
+  # normal, successful outcome reported as finish: 'length', not a failure.
+  # 512 tokens is ~2,000 characters: long enough for §8.1's "what the piece
+  # argues, why it is worth the time" blurb, short enough that a runaway
+  # generation cannot burn minutes of a scheduled pass.
+  max_output_tokens: 512
+
+ollama:
+  # Loopback by design. Ollama is local and free-forever (docs/costs.md,
+  # `ollama-local`); it needs no WF_ALLOW_PAID_* flag precisely because there
+  # is no account and no billing relationship to have. Point this elsewhere
+  # only at another machine you own.
+  base_url: http://127.0.0.1:11434
+  # The model. Verified present on this host 2026-08-15 via /api/tags, and
+  # exercised live: 27 output tokens in 0.78s warm.
+  #
+  # llama3.2 (3.2B, Q4_K_M) rather than the llama3.1:8b also installed here:
+  # the enrichment prompts in this milestone are short summarisation tasks
+  # where the 8B model's extra latency buys little, and the smaller model
+  # keeps a whole-corpus pass tractable. If §8.1's weekly blurbs read badly,
+  # this line -- not code -- is what changes.
+  model: llama3.2:latest
+  # Deterministic-as-possible. Enrichment is re-run over an append-only
+  # corpus, so a sampled answer that differs every pass would make the cache
+  # in task 3 much less useful and diffs in the vault much noisier.
+  temperature: 0
+  # Keep the model resident between calls. A cold load cost 13.1s on this
+  # machine against 0.19s warm, and a scheduled pass over many items would
+  # otherwise pay that repeatedly.
+  keep_alive: 5m
