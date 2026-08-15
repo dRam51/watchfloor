@@ -187,6 +187,55 @@ describe('nothing outside src/vault/ may write to the vault directly', () => {
       .sort();
     expect(layer).toEqual(['mount.ts', 'paths.ts', 'session.ts']);
   });
+
+  // ---------------------------------------------------------------------
+  // The remaining per-module check, generalised.
+  //
+  // "Does not import fs" is necessary but not sufficient: a note writer could
+  // reach the filesystem indirectly by importing `paths.ts` or `mount.ts` and
+  // using their primitives, or import the `index.ts` barrel and pull in
+  // everything transitively. The property that actually holds today is
+  // narrower and worth pinning -- a note writer talks to exactly two modules,
+  // the frontmatter producer and the write session.
+  //
+  // tests/vault/weeklySourceRules.test.ts (M5 task 6) asserted this for
+  // weekly.ts alone, when it was the only writer whose exemption had been
+  // closed. Generalised here so a fifth note writer is covered on the day it
+  // is added rather than on the day someone remembers to add a test file for
+  // it. That file's other three assertions are now duplicated by the block
+  // above; it is left in place rather than removed (CLAUDE.md: nothing is
+  // deleted) and is harmless.
+  // ---------------------------------------------------------------------
+  const NOTE_WRITERS = ['daily.ts', 'weekly.ts', 'entities.ts', 'saved.ts'];
+  const ALLOWED_SIBLINGS = ['frontmatter', 'session'];
+
+  function siblingVaultImports(text: string): string[] {
+    const names: string[] = [];
+    // `m[1]` is `string | undefined` to tsc even though a match guarantees the
+    // group -- filtered explicitly rather than asserted with `!`, so a regex
+    // edit that drops the capture group fails loudly here instead of pushing
+    // `undefined` into the comparison and quietly changing what is asserted.
+    for (const m of text.matchAll(/from '\.\/([A-Za-z]+)\.ts'/g)) {
+      const name = m[1];
+      if (name !== undefined) names.push(name);
+    }
+    return [...new Set(names)].sort();
+  }
+
+  it('detects a writer reaching past the session, so the rule below is not vacuous', () => {
+    expect(siblingVaultImports("import { x } from './paths.ts';\nimport { y } from './session.ts';")).toEqual([
+      'paths',
+      'session',
+    ]);
+  });
+
+  it.each(NOTE_WRITERS)('%s reaches the vault only through frontmatter + session', (name) => {
+    const file = ALL_SOURCES.find((f) => f.path === join(VAULT_DIR, name));
+    // Non-vacuity: a typo in the name would otherwise make this pass on
+    // `undefined` forever -- the exact shape of the M4a defect this file cites.
+    expect(file, `${name} must exist to be checked`).toBeDefined();
+    expect(siblingVaultImports(file!.text)).toEqual(ALLOWED_SIBLINGS);
+  });
 });
 
 describe('the vault package deletes nothing and never creates a directory chain', () => {
