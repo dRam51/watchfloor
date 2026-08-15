@@ -222,6 +222,24 @@ export interface EntityNotePlan {
   /** The NFC display name, which is also the note's filename stem. */
   readonly entity: string;
   readonly relPath: string;
+  /**
+   * The instant this note is a view of: the newest `fetched_at` across every
+   * version of every item carrying the entity.
+   *
+   * **A corpus fact, never a clock reading** (controller ruling, 2026-08-15).
+   * `applyManagedBlock` stamps `watchfloor_generated_at` into the frontmatter
+   * when it creates a file, so a wall clock there would make every note's
+   * bytes differ on a rebuild while looking perfectly correct in any ordinary
+   * test -- and M5 acceptance deletes the whole tree and demands the rebuild
+   * be identical. Deriving it from `fetched_at` means the same corpus always
+   * produces the same stamp, and that the stamp advances exactly when the
+   * corpus gained something that could change the note.
+   *
+   * `fetched_at` rather than `published_at`: it is the ingestion fact, it is
+   * never null (1,715 archived items have no `published_at`), and a feed
+   * cannot move it by back- or future-dating an entry.
+   */
+  readonly asOf: string;
   /** Every item carrying this entity, before {@link EntityPlanOptions.maxItems}. */
   readonly totalItems: number;
   readonly items: readonly EntityItemRef[];
@@ -296,6 +314,34 @@ function itemKeysForEntities(db: Db, spellings: readonly string[]): string[] {
     )
     .all(...spellings) as Array<{ item_key: string }>;
   return rows.map((r) => r.item_key);
+}
+
+/**
+ * The newest `fetched_at` across every version of every item carrying any of
+ * these spellings.
+ *
+ * Scoped to the whole `item_key`, not only to the versions that attributed the
+ * entity: the block's title and URL come from the item's CURRENT version, so
+ * any new version can change what the note says, and an as-of that ignored
+ * them would claim to be current while showing an older title.
+ *
+ * Keyed on the spellings (one to three strings) rather than on the item keys,
+ * which can run to thousands and would risk SQLite's bound-parameter limit.
+ */
+function newestFetchedAtFor(db: Db, spellings: readonly string[]): string | null {
+  const placeholders = spellings.map(() => '?').join(', ');
+  const rows = db
+    .prepare(
+      `select max(fetched_at) as at
+       from items
+       where item_key in (
+         select i.item_key from items i
+         join item_entities e on e.item_id = i.item_id
+         where e.entity in (${placeholders})
+       )`,
+    )
+    .all(...spellings) as Array<{ at: string | null }>;
+  return rows[0]?.at ?? null;
 }
 
 function sourceIdsFor(db: Db, itemKey: string): string[] {
@@ -435,9 +481,18 @@ export function planEntityNotes(db: Db, options: EntityPlanOptions = {}): Entity
       .sort((a, b) => b.sharedItems - a.sharedItems || byCodePoint(a.entity, b.entity))
       .slice(0, maxRelated);
 
+    const asOf = newestFetchedAtFor(db, spellings);
+    if (asOf === null) {
+      // Unreachable: an entity exists only because some row attributed it, and
+      // `items` is append-only. Thrown rather than defaulted, because every
+      // default available here is a clock reading or a lie.
+      throw new Error(`entity ${JSON.stringify(entity)} has no ingested item to date it by`);
+    }
+
     notes.push({
       entity,
       relPath: entityNoteRelPath(entity),
+      asOf,
       totalItems: refs.length,
       items: refs.slice(0, maxItems),
       related,
@@ -590,10 +645,16 @@ export function renderEntityBlock(note: EntityNotePlan): string {
 // Writing
 // ---------------------------------------------------------------------------
 
-export interface EntitySyncOptions extends EntityPlanOptions {
-  /** Canonical UTC timestamp, injected. This module reads no clock. */
-  readonly generatedAt: string;
-}
+/**
+ * Deliberately carries **no** `generatedAt`.
+ *
+ * `writeEntityNote` requires one, and a caller reaching for `new Date()` is the
+ * failure the controller ruled on: it does not fail loudly, it produces a note
+ * whose bytes differ on every rebuild over an identical corpus. Rather than
+ * document that hazard, the parameter is removed -- there is no way to express
+ * the mistake. Each note is stamped with its own {@link EntityNotePlan.asOf}.
+ */
+export type EntitySyncOptions = EntityPlanOptions;
 
 export interface EntitySyncResult {
   readonly written: readonly VaultWriteResult[];
@@ -630,7 +691,7 @@ export interface EntitySyncResult {
 export function syncEntityNotes(
   session: VaultSession,
   db: Db,
-  options: EntitySyncOptions,
+  options: EntitySyncOptions = {},
 ): EntitySyncResult {
   const plan = planEntityNotes(db, options);
   const written: VaultWriteResult[] = [];
@@ -641,7 +702,7 @@ export function syncEntityNotes(
     try {
       written.push(
         session.writeEntityNote(note.relPath, renderEntityBlock(note), {
-          generatedAt: options.generatedAt,
+          generatedAt: note.asOf,
           title: note.entity,
         }),
       );

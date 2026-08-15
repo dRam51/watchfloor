@@ -640,12 +640,10 @@ describe('renderEntityBlock', () => {
 // me stop trusting the integration"
 // ---------------------------------------------------------------------------
 
-const AT = '2026-08-15T12:00:00.000Z';
-
 function syncedVault(db: ReturnType<typeof openDb>, options = {}) {
   const { anchor, root } = createFixtureVault();
   const session = openVaultSession(root, options);
-  const result = syncEntityNotes(session, db, { generatedAt: AT, ...options });
+  const result = syncEntityNotes(session, db, options);
   return { anchor, root, result };
 }
 
@@ -676,7 +674,7 @@ describe('syncEntityNotes — writes only where §8.1 allows', () => {
     const { anchor, root } = createFixtureVault();
     const before = digestTree(anchor);
     const session = openVaultSession(root);
-    syncEntityNotes(session, db, { generatedAt: AT });
+    syncEntityNotes(session, db);
     const after = digestTree(anchor);
 
     for (const [name] of HAND_AUTHORED_NOTES) {
@@ -740,7 +738,7 @@ describe('syncEntityNotes — the hand-edited note survives, which is the whole 
       }),
     );
     const session = openVaultSession(root);
-    syncEntityNotes(session, db, { generatedAt: AT });
+    syncEntityNotes(session, db);
 
     const after = readFileSync(path, 'utf8');
     expect(after.startsWith(prologue)).toBe(true);
@@ -758,7 +756,7 @@ describe('syncEntityNotes — the hand-edited note survives, which is the whole 
     writeFileSync(path, malformed);
 
     const session = openVaultSession(root);
-    const result = syncEntityNotes(session, db, { generatedAt: AT });
+    const result = syncEntityNotes(session, db);
 
     expect(readFileSync(path, 'utf8')).toBe(malformed);
     expect(result.skipped).toEqual([
@@ -778,7 +776,7 @@ describe('syncEntityNotes — the hand-edited note survives, which is the whole 
     writeFileSync(join(root, HAND_AUTHORED_ENTITY_PATH), 'x'.repeat(300 * 1024));
 
     const session = openVaultSession(root);
-    const result = syncEntityNotes(session, db, { generatedAt: AT });
+    const result = syncEntityNotes(session, db);
 
     expect(result.written.map((w) => w.relPath)).toEqual(['entities/Microsoft.md']);
     expect(result.skipped).toEqual([
@@ -799,7 +797,7 @@ describe('syncEntityNotes — idempotence, which is what M5 acceptance measures'
     const first = digestTree(join(root, 'entities'));
 
     const session = openVaultSession(root);
-    syncEntityNotes(session, db, { generatedAt: AT });
+    syncEntityNotes(session, db);
 
     expect(digestTree(join(root, 'entities'))).toEqual(first);
   });
@@ -846,5 +844,73 @@ describe('syncEntityNotes — the files-per-run cap', () => {
     const { result } = syncedVault(db, { maxFilesPerRun: 2 });
     expect(result.written).toHaveLength(2);
     expect(result.stopped).toBe('files_per_run');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The as-of instant — CONTROLLER RULING, 2026-08-15
+// ---------------------------------------------------------------------------
+
+/** The canonical shape `assertCanonicalTimestamp` enforces, matched anywhere. */
+const CANONICAL_TIMESTAMP_ANYWHERE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g;
+
+describe('the note as-of instant is derived from the corpus, not from a clock', () => {
+  it('is the newest fetched_at across every version of every item carrying the entity', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+    insertItem(db, arxivAiVersion());
+
+    // arsAnthropic was fetched at 23:40 on the 14th, the arXiv pair at 18:38.
+    expect(noteFor(db, AI_ONLY_ENTITY).asOf).toBe('2026-08-14T23:40:53.122Z');
+  });
+
+  it('advances when a re-poll appends a version, so it tracks the corpus and nothing else', () => {
+    const db = migratedDb();
+    insertItem(db, kevUndated());
+    expect(noteFor(db, 'Microsoft').asOf).toBe(KEV_FIRST_FETCHED_AT);
+
+    insertItem(db, kevUndated({ fetchedAt: KEV_REPOLL_FETCHED_AT }));
+    expect(noteFor(db, 'Microsoft').asOf).toBe(KEV_REPOLL_FETCHED_AT);
+  });
+
+  it('is a canonical timestamp, and the same one for the same corpus read twice', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+
+    const asOf = noteFor(db, AI_ONLY_ENTITY).asOf;
+    // Asserted against the shape as well as against itself: `undefined ===
+    // undefined` would satisfy the second half on its own.
+    expect(asOf).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(noteFor(db, AI_ONLY_ENTITY).asOf).toBe(asOf);
+  });
+
+  it('every canonical timestamp inside the block equals the block own as-of instant', () => {
+    // The controller's test, mirrored from task 5. It catches a stray
+    // `new Date()` anywhere in the render path, including one added later by
+    // somebody else. This block renders date slices rather than instants, so
+    // the match set is empty today -- which is exactly the shape of assertion
+    // M4a's post-mortem warns about, hence the non-vacuity check below.
+    const db = migratedDb();
+    insertItem(db, arxivCrVersion());
+    insertItem(db, arxivAiVersion());
+    insertItem(db, kevUndated());
+
+    const note = noteFor(db, AI_ONLY_ENTITY);
+    for (const found of renderEntityBlock(note).match(CANONICAL_TIMESTAMP_ANYWHERE) ?? []) {
+      expect(found).toBe(note.asOf);
+    }
+
+    // The matcher itself works: it finds the instant this corpus really holds.
+    expect(`generated ${note.asOf} ok`.match(CANONICAL_TIMESTAMP_ANYWHERE)).toEqual([note.asOf]);
+  });
+
+  it('stamps the created note with the corpus instant, not with the hour the sync ran', () => {
+    const db = migratedDb();
+    insertItem(db, kevUndated());
+
+    const { root } = syncedVault(db);
+    expect(readNote(root, 'entities/Microsoft.md')).toContain(
+      `watchfloor_generated_at: ${KEV_FIRST_FETCHED_AT}`,
+    );
   });
 });
