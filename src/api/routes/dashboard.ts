@@ -106,7 +106,18 @@ export function registerDashboard(server: FastifyInstance, deps: DashboardDeps):
       // ./sources.ts for how that surfaced (a suite that went red 12 hours
       // after it was written, with no code change).
       failingSources: countFailingSources(deps.db, deps.sources, at),
-      enrichmentSpend: getEnrichmentSpendToday(env, at),
+      // M5 task 3: the third argument is what turns `enrichmentSpend` from a
+      // structural zero into a measured figure. The field's SHAPE is
+      // unchanged -- its M3 report promised real numbers at M5 without a
+      // change to what it publishes, and this is that, one parameter wide.
+      //
+      // `WF_TZ` is read out of the same `env` the cost gate is read from,
+      // rather than plumbed through `ServerDeps`: the API process always has
+      // it (loadEnv requires it) and adding it here would mean editing
+      // src/api/server.ts, which a concurrent sibling owns this wave.
+      // getEnrichmentSpendToday falls back, loudly and in its own note, if it
+      // is missing or is not a valid IANA zone.
+      enrichmentSpend: getEnrichmentSpendToday(env, at, { db: deps.db }),
     };
   });
 

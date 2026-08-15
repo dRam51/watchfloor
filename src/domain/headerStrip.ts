@@ -1,5 +1,7 @@
 import type { Db } from '../db/connection.ts';
 import { getFetchState } from '../db/fetchState.ts';
+import { getDailyLlmUsage } from '../db/llmCallLog.ts';
+import { localDay } from '../db/repoSnapshots.ts';
 import { isPaidAllowed } from '../cost/gate.ts';
 import { BEATS, type Beat } from './item.ts';
 import type { Source } from '../sources/load.ts';
@@ -136,13 +138,15 @@ export interface EnrichmentSpendStatus {
   amountUsd: number | null;
   /**
    * `true` when `amountUsd` is a real guarantee. `false` means "unknown",
-   * not "zero": there is no spend-metering pipeline in this codebase yet
-   * (enrichment itself does not exist before M5), so once
-   * WF_ALLOW_PAID_ANTHROPIC is set, this function has no way to measure
-   * what, if anything, was actually spent. Reporting `0` in that case would
-   * be a hardcoded placeholder masquerading as a measurement -- exactly
-   * what this task exists to avoid -- so it reports `null` / unmeasured
-   * instead, honestly, until a real metering pipeline lands with M5.
+   * not "zero".
+   *
+   * M3 shipped this reporting unmeasured whenever the paid gate was open,
+   * for want of a metering pipeline. M5 built one (`llm_call_log`), so the
+   * unmeasured branch now fires for a REASON rather than for want of data:
+   * a call whose backend reported no token counts has an unknown cost, and
+   * a day containing one has an unknown total -- zero plus unknown is
+   * unknown. Reporting `0` there would be a placeholder masquerading as a
+   * measurement, which is exactly what this field exists to avoid.
    */
   measured: boolean;
   asOf: string;
@@ -150,32 +154,153 @@ export interface EnrichmentSpendStatus {
 }
 
 /**
- * Today's enrichment spend, derived from `src/cost/gate.ts`'s chokepoint
- * rather than a second, independently-maintained notion of "is paid
- * enrichment on". `env` and `now` are both required (no wall-clock or
- * `process.env` default read inside this module), matching this project's
- * "`now` is always injected" convention (src/domain/itemState.ts) and
- * keeping this function trivially deterministic to test.
+ * How the ledger is reached. Optional, and that is deliberate rather than
+ * lazy: without it this function reports exactly what it reported before M5,
+ * so a caller that has no database (or no enrichment) still gets the
+ * structural guarantee it always got.
  */
-export function getEnrichmentSpendToday(env: NodeJS.ProcessEnv, now: string): EnrichmentSpendStatus {
-  if (!isPaidAllowed('anthropic', env)) {
+export interface EnrichmentSpendSources {
+  /** The database holding `llm_call_log` (db/migrations/0009). */
+  db: Db;
+}
+
+/** `WF_TZ` is read from `env`; anything unusable falls back, loudly. */
+function usableTimeZone(env: NodeJS.ProcessEnv): string | null {
+  const tz = env.WF_TZ;
+  if (tz === undefined || tz === '') return null;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return tz;
+  } catch {
+    return null;
+  }
+}
+
+const GATE_SHUT =
+  'WF_ALLOW_PAID_ANTHROPIC is unset, so src/cost/gate.ts hard-disables every paid enrichment path';
+const GATE_OPEN = 'WF_ALLOW_PAID_ANTHROPIC is set';
+
+/**
+ * Today's enrichment spend.
+ *
+ * ## What changed at M5, and what deliberately did not
+ *
+ * The M3 task that shipped this reported that it "starts reporting real
+ * numbers at M5 without a code change". The **shape** is what that promise
+ * was about, and it is unchanged: still `{ amountUsd, measured, asOf, note }`,
+ * still `measured: false` meaning UNKNOWN rather than zero, still a `0` only
+ * when it is a real guarantee. What it needed was a way to reach the ledger,
+ * which is the optional third argument -- the API's own wiring is one extra
+ * parameter in `src/api/routes/dashboard.ts` and nothing else.
+ *
+ * ## Where the numbers come from
+ *
+ * `llm_call_log` (src/db/llmCallLog.ts), summed over the calendar day `now`
+ * falls on **in `WF_TZ`**. Not a UTC day: an America/New_York operator's
+ * 20:00 enrichment is already tomorrow in UTC, so a UTC bucket would show
+ * their evening's spend under tomorrow's header. Same argument
+ * db/migrations/0007 makes for a snapshot day.
+ *
+ * **A cache hit is not in these numbers**, by construction: it writes no
+ * ledger row, because it consumed nothing and cost nothing. So this reports
+ * consumption, not activity -- which is what makes a falling number after a
+ * cold start a good sign rather than a suspicious one.
+ *
+ * ## Three zeros that are not the same sentence
+ *
+ * The note distinguishes them, because §7's whole framing is that silent
+ * failure is the main failure mode:
+ *
+ *   * nothing ran today (enrichment may be broken, or simply idle);
+ *   * calls ran and every one of them was free (Ollama is free-forever, and
+ *     `computeCost` prices that as MEASURED $0, not as an assumption);
+ *   * the paid gate is shut, so no billable call was possible at all.
+ *
+ * `env` and `now` are both required -- no wall-clock or `process.env` default
+ * is read inside this module, matching the project's "`now` is always
+ * injected" convention.
+ */
+export function getEnrichmentSpendToday(
+  env: NodeJS.ProcessEnv,
+  now: string,
+  sources?: EnrichmentSpendSources,
+): EnrichmentSpendStatus {
+  const gateOpen = isPaidAllowed('anthropic', env);
+  const gateNote = gateOpen ? GATE_OPEN : GATE_SHUT;
+
+  // No ledger to read: the pre-M5 answer, unchanged.
+  if (sources === undefined) {
+    return gateOpen
+      ? {
+          amountUsd: null,
+          measured: false,
+          asOf: now,
+          note: `${GATE_OPEN}, and this caller supplied no call ledger to measure against. Reporting a $0 here would be a placeholder, not a measurement -- reporting unmeasured instead.`,
+        }
+      : {
+          amountUsd: 0,
+          measured: true,
+          asOf: now,
+          note: `${GATE_SHUT}, so spend is structurally zero, not merely unreported.`,
+        };
+  }
+
+  const tz = usableTimeZone(env);
+  if (tz === null) {
+    // "Today" is not answerable without a zone, and neither summing the whole
+    // table nor quietly assuming UTC would be an honest substitute -- both
+    // produce a wrong number presented as a right one.
+    return gateOpen
+      ? {
+          amountUsd: null,
+          measured: false,
+          asOf: now,
+          note: `${GATE_OPEN}, but WF_TZ is missing or is not a valid IANA timezone, so today's calls cannot be scoped to a day. Reporting unmeasured rather than a figure over the wrong span.`,
+        }
+      : {
+          amountUsd: 0,
+          measured: true,
+          asOf: now,
+          note: `${GATE_SHUT}, so spend is structurally zero. (WF_TZ is missing or invalid, so the call ledger could not be scoped to a day -- fix it for a per-day figure once a paid backend is enabled.)`,
+        };
+  }
+
+  const day = localDay(now, tz);
+  const usage = getDailyLlmUsage(sources.db, day);
+
+  const suffix =
+    (usage.unavailableCalls > 0
+      ? ` ${usage.unavailableCalls} could not reach a backend at all and consumed nothing.`
+      : '') +
+    (usage.mixedTimezone
+      ? ' NOTE: this day contains calls bucketed under more than one timezone, so it spans a WF_TZ change and does not describe one clean span of hours.'
+      : '');
+
+  if (usage.calls === 0) {
     return {
       amountUsd: 0,
       measured: true,
       asOf: now,
-      note:
-        'WF_ALLOW_PAID_ANTHROPIC is unset; src/cost/gate.ts hard-disables every paid enrichment ' +
-        'path, so spend is structurally zero, not merely unreported.',
+      note: `no enrichment calls were made on ${day} (${tz}), so nothing was spent. ${gateNote}. Note that a cache hit makes no call and is therefore not counted here.${suffix}`,
+    };
+  }
+
+  if (!usage.costMeasured) {
+    const contradiction = gateOpen
+      ? ''
+      : ' This SHOULD NOT BE POSSIBLE with the gate shut -- src/cost/gate.ts is meant to make a billable call unreachable, so an unmeasured cost here indicates a path that bypasses it.';
+    return {
+      amountUsd: null,
+      measured: false,
+      asOf: now,
+      note: `${usage.unmeasuredCostCalls} of ${usage.calls} enrichment calls on ${day} (${tz}) reported no cost, so the day's total is unknown -- reporting unmeasured rather than a partial sum presented as a total. ${gateNote}.${contradiction}${suffix}`,
     };
   }
 
   return {
-    amountUsd: null,
-    measured: false,
+    amountUsd: usage.amountUsd,
+    measured: true,
     asOf: now,
-    note:
-      'WF_ALLOW_PAID_ANTHROPIC is set, but no enrichment spend-metering pipeline exists yet ' +
-      '(enrichment itself ships in M5). Reporting a $0 here would be a placeholder, not a ' +
-      'measurement -- reporting unmeasured instead.',
+    note: `${usage.calls} enrichment call(s) on ${day} (${tz}), ${usage.countedTokens} tokens counted, every cost measured. ${gateNote}.${suffix}`,
   };
 }
