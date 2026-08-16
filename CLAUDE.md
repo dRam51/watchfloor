@@ -334,9 +334,27 @@ bundle, with `/api` reached via `tailscale serve`'s path routing or `@fastify/ht
 two more dependencies, which is why it was not done pre-emptively.
 
 **The Obsidian vault is on iCloud Drive** — `~/Library/Mobile Documents/iCloud~md~obsidian/
-Documents/Obsidian-Vault`, with Watchfloor owning `01 Tech Projects/Watchfloor/`. iCloud does
-not exist on Linux, so if the always-on host is Linux the §8.1 integration cannot run there.
-Decide before M5: Mac host, move the vault to Syncthing/git, or split ingest from vault-sync.
+Documents/Obsidian-Vault`. iCloud does not exist on Linux, so if the always-on host is Linux the
+§8.1 integration cannot run there. Still undecided: Mac host, move the vault to Syncthing/git, or
+split ingest from vault-sync. **Note the vault is itself a git repo** (with `.gitleaks.toml`),
+which is a real safety net and makes the third option cheaper than it sounds.
+
+> [!important] The sync root is `Watchfloor Feed/`, and it is NOT where the project notes live
+> Set 2026-08-16 on the owner's instruction: a **top-level** folder, a sibling of `00 Inbox` /
+> `01 Tech Projects` / etc. Deliberately **not** `01 Tech Projects/Watchfloor/`, which holds
+> twelve **hand-authored** project notes — because `daily/` and `weekly/` are rewritten on every
+> run and `vault prune` is the one job in this system permitted to delete.
+>
+> The safety layer would refuse to touch those notes anyway (a path's first segment must be
+> `daily`/`weekly`/`entities`/`saved`, so a bare filename is not an expressible request, and
+> nothing without Watchfloor frontmatter is ever modified) — but two independent reasons to be
+> safe is the right number here. `WF_VAULT_ROOT` lives in the gitignored `.env`.
+>
+> **Go-live, 2026-08-16:** 178 files — 1 daily, 1 weekly, **176 entity notes, 3,298 skipped by
+> the note floor**. All twelve hand-authored notes verified **byte-identical** by checksum before
+> and after. A second sync left all 178 files byte-identical, with blurbs going
+> `23 generated / 0 cached` → `0 generated / 23 cached`: M5's destructive acceptance criterion
+> holding against a real iCloud vault rather than a fixture.
 
 ~~**`WF_VAULT_ROOT` cannot point at that vault.**~~ **Fixed** (`74ae45d`). It now accepts an
 absolute path while `WF_DB_PATH`, `WF_DATA_DIR`, and `WF_LOG_DIR` remain relative-only. The
