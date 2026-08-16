@@ -52,13 +52,21 @@ export type SqlRefusalReason =
   | 'star_result_column'
   | 'forbidden_identifier';
 
+// Fields are DECLARED and assigned, never a TypeScript parameter property
+// (`constructor(readonly reason: ...)`). Node 26 runs `src/bin/*.ts` through
+// strip-only type removal, which rejects parameter properties outright with
+// ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX -- while vitest's esbuild transpiles them
+// happily. So the first draft of this file passed every unit test and killed
+// the real process on its first line of work. Found by tests/mcp/bin.test.ts,
+// pinned by tests/mcp/sourceProperties.test.ts, and it is why every other
+// error class in this repository (src/vault/session.ts and friends) is written
+// this way too.
 export class SqlRefusedError extends Error {
-  constructor(
-    readonly reason: SqlRefusalReason,
-    detail: string,
-  ) {
+  readonly reason: SqlRefusalReason;
+  constructor(reason: SqlRefusalReason, detail: string) {
     super(`read-only corpus refused this SQL (${reason}): ${detail}`);
     this.name = 'SqlRefusedError';
+    this.reason = reason;
   }
 }
 

@@ -54,6 +54,12 @@ const DESCRIPTIONS: Readonly<Record<string, string>> = {
   suggest: 'propose interest-profile terms from your dismissals (`--json` available)',
   api: 'serve the dashboard API on 127.0.0.1:$WF_API_PORT',
   scheduler: 'the unattended daemon: polls, scores, and writes the vault on cadence',
+  // Added by M5 task 10 in the session that landed src/bin/mcp.ts, which is
+  // exactly the prompt tests/cli/help.test.ts's completeness check exists to
+  // give. Worth stating that this one is not for a human at a terminal: an MCP
+  // client spawns it and speaks JSON-RPC over its stdin/stdout, so running it
+  // by hand gets a process that waits silently for a protocol message.
+  mcp: 'the read-only MCP server for the trading bot — spawned by an MCP client over stdio, not run by hand',
 };
 
 /**

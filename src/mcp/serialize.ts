@@ -35,12 +35,14 @@
 
 import { forbiddenPhraseFor } from './fields.ts';
 
+// Declared fields, not parameter properties -- see src/mcp/readonly.ts's
+// SqlRefusedError for the Node-26 strip-only reason, which cost a real process
+// crash that every unit test was blind to.
 export class ForbiddenFieldError extends Error {
-  constructor(
-    readonly path: string,
-    readonly field: string,
-    readonly phrase: string,
-  ) {
+  readonly path: string;
+  readonly field: string;
+  readonly phrase: string;
+  constructor(path: string, field: string, phrase: string) {
     // The VALUE is deliberately absent from this message. An error raised
     // because a field must not leave the process must not itself carry the
     // thing it stopped -- it is about to be logged and returned on the wire.
@@ -49,16 +51,20 @@ export class ForbiddenFieldError extends Error {
         `"${phrase}" (§8.2, src/mcp/fields.ts)`,
     );
     this.name = 'ForbiddenFieldError';
+    this.path = path;
+    this.field = field;
+    this.phrase = phrase;
   }
 }
 
 export class UnserializableValueError extends Error {
-  constructor(
-    readonly path: string,
-    readonly detail: string,
-  ) {
+  readonly path: string;
+  readonly detail: string;
+  constructor(path: string, detail: string) {
     super(`refused to serialize \`${path}\`: ${detail}`);
     this.name = 'UnserializableValueError';
+    this.path = path;
+    this.detail = detail;
   }
 }
 

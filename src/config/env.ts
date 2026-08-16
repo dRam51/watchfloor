@@ -25,7 +25,13 @@ const MAX_SETTIMEOUT_DELAY_MS = 2_147_483_647; // 2^31 - 1
 // An absolute path in config is the single most common reason a service fails
 // to come up on a new host (§12). Reject it here rather than at 3am on the
 // target machine.
-const relativePath = z
+// Exported so `src/mcp/env.ts` can apply the SAME rule rather than restate it.
+// The MCP server (M5 task 10) deliberately does not call `loadEnv` — that
+// would require WF_API_TOKEN in the bot's process environment, and §8.2's
+// "separate credential" is worth nothing if the isolated process has to hold
+// the dashboard's token to boot. It still has to honour this rule, so it
+// imports it instead of writing a second, drifting copy.
+export const relativePath = z
   .string()
   .min(1)
   .refine((p) => !p.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(p), {
@@ -124,6 +130,33 @@ const EnvSchema = z.object({
   // This is a live billable credential and this repository is PUBLIC. It must
   // never be logged, echoed into an error, or committed.
   WF_ANTHROPIC_API_KEY: z.string().optional(),
+  // M5 task 10. The MCP server's credential, consumed by src/mcp/auth.ts.
+  //
+  // §8.2: "Isolation that still holds: separate process, separate credential,
+  // separate DB user (read-only role). The bot gets no write path." This is
+  // the "separate credential" half, and the separation is enforced rather than
+  // documented: `resolveMcpToken` REFUSES TO BOOT if this value equals
+  // WF_API_TOKEN. Sharing one string means revoking the bot also revokes the
+  // dashboard, and a leaked bot credential opens the HTTP API — at which point
+  // "separate credential" is a naming convention.
+  //
+  // OPTIONAL HERE, REQUIRED THERE, and the asymmetry is deliberate. Every
+  // other entrypoint calls `loadEnv`, so making this required would stop `npm
+  // run api` and `npm run scheduler` booting on a machine that never runs an
+  // MCP server. `src/bin/mcp.ts` does NOT call `loadEnv` — see the exported
+  // `relativePath` above for why — and reads this directly through
+  // `resolveMcpToken`, which requires it, requires 16+ characters, and
+  // requires it to differ from WF_API_TOKEN.
+  //
+  // Registered here for the same reason WF_ANTHROPIC_API_KEY is: one visible
+  // list of every WF_* credential. Unvalidated in shape — a token's format is
+  // the operator's choice.
+  //
+  // This is a live credential and this repository is PUBLIC. It must never be
+  // logged, echoed into an error, or committed. src/mcp/auth.ts and
+  // src/mcp/log.ts each carry the guards that keep it out of a message, and
+  // tests/mcp/bin.test.ts greps the real process's stdout and stderr for it.
+  WF_MCP_TOKEN: z.string().optional(),
   // How often src/bin/scheduler.ts's tick loop checks which sources are due
   // (self-rescheduling setTimeout, not setInterval -- see that file). M1
   // task 10 fix round 1, minor: this used to be a hardcoded literal in

@@ -27,16 +27,19 @@
 
 import { z } from 'zod';
 
+// Declared fields, not parameter properties -- see src/mcp/readonly.ts's
+// SqlRefusedError for the Node-26 strip-only reason.
 export class UnsupportedSchemaError extends Error {
-  constructor(
-    readonly path: string,
-    readonly typeName: string,
-  ) {
+  readonly path: string;
+  readonly typeName: string;
+  constructor(path: string, typeName: string) {
     super(
       `cannot express \`${path}\` (zod ${typeName}) as JSON Schema. Use one of: ` +
         `object, string, number, boolean, enum, literal, array, optional, nullable, default.`,
     );
     this.name = 'UnsupportedSchemaError';
+    this.path = path;
+    this.typeName = typeName;
   }
 }
 
