@@ -33,6 +33,10 @@ function binSource(name: string): string {
 const POST_CYCLE_PASSES: ReadonlyArray<readonly [fn: string, module: string]> = [
   ['recordStarSnapshots', '../ingest/starSnapshots.ts'],
   ['enrichRepoReadmes', '../ingest/repoEnrichment.ts'],
+  // M5 task 16. The backfill over 7,267 stored item versions -- occurrence
+  // eight of this pattern if it were left unwired, and the first one caught
+  // before a live run rather than by it.
+  ['sweepEntities', '../entities/sweep.ts'],
 ];
 
 describe('every post-cycle pass is wired into BOTH composition roots', () => {
@@ -52,6 +56,18 @@ describe('every post-cycle pass is wired into BOTH composition roots', () => {
     // holds Core at the reserve floor -- see repoSourceWasDue.
     for (const bin of BINS) {
       expect(binSource(bin)).toMatch(/\brepoSourceWasDue\s*\(/);
+    }
+  });
+
+  it('hands the entity ruleset to runPollCycle in both, so NEW items get entities too', () => {
+    // The sweep alone would eventually cover new items, but only on the next
+    // cycle -- an item would exist with no entities for up to a poll interval,
+    // and `npm run ingest && npm run score` would score it without them.
+    for (const bin of BINS) {
+      const source = binSource(bin);
+      expect(source).toContain(`from '../entities/rules.ts'`);
+      expect(source).toMatch(/loadEntityRulesFile\s*\(/);
+      expect(source).toMatch(/runPollCycle\([^)]*\{\s*entityRules\s*\}/s);
     }
   });
 

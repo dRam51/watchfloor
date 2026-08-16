@@ -194,6 +194,7 @@ import {
 } from '../db/fetchState.ts';
 import { fetchRobots, isAllowed, PRODUCT_TOKEN, RobotsUnavailableError } from '../fetch/robots.ts';
 import { normalizeItem } from '../normalize/item.ts';
+import type { EntityRuleset } from '../entities/rules.ts';
 import { insertItem } from '../domain/item.ts';
 import { assertCanonicalTimestamp } from '../domain/item.ts';
 import type { Source } from '../sources/load.ts';
@@ -408,6 +409,7 @@ async function pollOneSource(
   source: Source,
   adapters: SchedulerAdapterRegistry,
   now: string,
+  entityRules: EntityRuleset | undefined,
 ): Promise<SourceOutcome> {
   const startedAtMs = Date.now();
   const elapsed = () => Date.now() - startedAtMs;
@@ -545,7 +547,7 @@ async function pollOneSource(
     // recordSuccess run normally below.
     for (const raw of result.items) {
       try {
-        const newItem = normalizeItem(raw, source, now);
+        const newItem = normalizeItem(raw, source, now, entityRules);
         insertItem(db, newItem);
         insertedCount++;
       } catch {
@@ -626,18 +628,35 @@ async function pollOneSource(
  * display around this cycle, which is `src/bin/scheduler.ts`'s
  * responsibility, not this pure-computation function's.
  */
+export interface PollCycleOptions {
+  /**
+   * Entity extraction rules (M5 task 16). Optional, and omitting it means
+   * items are stored with no entities -- exactly the pre-task-16 behaviour, so
+   * every existing caller and test is unaffected.
+   *
+   * Threaded from the composition root rather than loaded here, for the same
+   * reason `normalizeItem` takes it as a parameter: this module does no config
+   * I/O, and a hidden global would make the rules impossible to vary in a test.
+   * `src/bin/ingest.ts` and `src/bin/scheduler.ts` both pass it, and a test
+   * asserts BOTH do -- a component wired into only the one-shot entrypoint is
+   * a component that never runs in production.
+   */
+  entityRules?: EntityRuleset;
+}
+
 export async function runPollCycle(
   db: Db,
   sources: Source[],
   adapters: SchedulerAdapterRegistry,
   now: string,
+  options?: PollCycleOptions,
 ): Promise<PollReport> {
   assertCanonicalTimestamp('now', now);
 
   const startedAtMs = Date.now();
   const outcomes: SourceOutcome[] = [];
   for (const source of sources) {
-    outcomes.push(await pollOneSource(db, source, adapters, now));
+    outcomes.push(await pollOneSource(db, source, adapters, now, options?.entityRules));
   }
 
   return {

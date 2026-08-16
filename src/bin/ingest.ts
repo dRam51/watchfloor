@@ -28,6 +28,8 @@ import { googleNewsAdapter } from '../adapters/googleNews.ts';
 import { githubSearchAdapter } from '../adapters/github.ts';
 import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
+import { loadEntityRulesFile } from '../entities/rules.ts';
+import { sweepEntities } from '../entities/sweep.ts';
 
 // Resolved relative to this module, not the process cwd -- matches
 // src/bin/api.ts / src/bin/scheduler.ts exactly.
@@ -69,10 +71,16 @@ try {
     }
 
     const sources = loadSourcesFile(join(repoRoot, 'config', 'sources.yaml'));
-    console.log(`watchfloor one-shot ingest starting (TZ=${env.WF_TZ}, sources=${sources.length})`);
+    // M5 task 16. Loaded at boot, beside sources: a malformed entities.yaml
+    // should stop the run while someone is watching, not fail per-item later.
+    const entityRules = loadEntityRulesFile(join(repoRoot, 'config', 'entities.yaml'));
+    console.log(
+      `watchfloor one-shot ingest starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
+        `entity rules=${entityRules.entities.length}+${entityRules.patterns.length} patterns)`,
+    );
 
     const now = new Date().toISOString();
-    const report = await runPollCycle(db, sources, adapters, now);
+    const report = await runPollCycle(db, sources, adapters, now, { entityRules });
 
     // M4a task 9. Runs AFTER the cycle, over what was actually persisted --
     // `stargazers_count` rides along in items.raw_json, so a snapshot costs no
@@ -106,6 +114,33 @@ try {
           `answered=${readmes.answered} failed=${readmes.failed} cached=${r?.cached ?? 0} ` +
           `requested=${r?.requested ?? 0} unusable=${readmes.unusable} ` +
           `core-remaining=${r?.coreRemaining ?? 'unknown'}`,
+      );
+    }
+
+    // M5 task 16, beside the star snapshots and for the same reason -- except
+    // that this pass covers the STORED corpus as well as what the cycle just
+    // wrote. 7,267 item versions existed with zero entity rows and `items` is
+    // append-only, so they cannot be re-normalised; `item_entities` has no
+    // append-only trigger and takes new rows for an existing item_id without
+    // touching the version. Bounded per run and level-triggered off the
+    // ruleset's content digest, so editing config/entities.yaml re-opens the
+    // whole corpus automatically. See src/entities/sweep.ts.
+    const entities = sweepEntities(db, entityRules, { now: report.finishedAt });
+    if (entities.scanned > 0 || entities.remaining > 0) {
+      console.log(
+        `  entities (ruleset ${entities.rulesetVersion}): scanned=${entities.scanned} ` +
+          `written=${entities.entitiesWritten} withEntities=${entities.itemsWithEntities} ` +
+          `remaining=${entities.remaining} ` +
+          `[org=${entities.byType.org} product=${entities.byType.product} ` +
+          `concept=${entities.byType.concept} id=${entities.byType.identifier}]`,
+      );
+    }
+    if (entities.orphaned.length > 0) {
+      // Insert-only, per CLAUDE.md's never-delete rule: a term removed from
+      // config leaves its rows behind. Reported rather than silently divergent.
+      console.log(
+        `  ! ${entities.orphaned.length} stored entit(ies) the current ruleset can no longer ` +
+          `produce: ${entities.orphaned.slice(0, 8).join(', ')}`,
       );
     }
 

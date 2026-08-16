@@ -28,6 +28,8 @@ import { canonicalizeUrl } from './url.ts';
 import { assertCanonicalTimestamp, type NewItem } from '../domain/item.ts';
 import type { Source } from '../sources/load.ts';
 import { classifyItemType } from '../classify/itemType.ts';
+import { extractEntities } from '../entities/extract.ts';
+import type { EntityRuleset } from '../entities/rules.ts';
 
 export interface RawItem {
   url: string;
@@ -461,7 +463,30 @@ function truncateSummary(summary: string | null): string | null {
 // normalizeItem
 // ---------------------------------------------------------------------------
 
-export function normalizeItem(raw: RawItem, source: Source, fetchedAt: string): NewItem {
+/**
+ * `entityRules` is optional, and omitting it means `entities: []` -- exactly
+ * what this function did before M5 task 16, so every existing caller and test
+ * is unaffected.
+ *
+ * It is a PARAMETER rather than a module-level load because this function is
+ * pure: reading `config/entities.yaml` here would put file I/O in the one
+ * module whose doc comment promises none, and would make the extraction rules
+ * a hidden global instead of something a composition root hands in and a test
+ * can vary. `src/scheduler/run.ts` threads it through from `src/bin/ingest.ts`
+ * and `src/bin/scheduler.ts`.
+ *
+ * Entities are attributed from `source.beats` -- THIS version's beats, not the
+ * `item_key`-wide union, which does not exist yet at insert time and must not:
+ * an extraction is stored per `item_id`, so it has to be a pure function of the
+ * row for this path and the backfill sweep to provably agree.
+ * `getItemEntities` recovers the union at read time.
+ */
+export function normalizeItem(
+  raw: RawItem,
+  source: Source,
+  fetchedAt: string,
+  entityRules?: EntityRuleset,
+): NewItem {
   // fetchedAt is a passthrough, not something this function converts -- the
   // caller (the scheduler) owns producing it, normally via
   // `new Date().toISOString()`. Validating it here, with the exact same
@@ -471,10 +496,22 @@ export function normalizeItem(raw: RawItem, source: Source, fetchedAt: string): 
   assertCanonicalTimestamp('fetchedAt', fetchedAt);
 
   const originalSummary = raw.summary ?? null;
+  const canonicalUrl = canonicalizeUrl(raw.url);
+  // Computed once and used for BOTH the stored column and entity extraction.
+  //
+  // Entities read the TRUNCATED summary, deliberately, and this differs from
+  // `classifyItemType` two lines below, which reads the original: the
+  // classifier's >=400-word rule is a fact about the feed's text, but the
+  // backfill sweep (src/entities/sweep.ts) can only ever see `summary_raw` as
+  // stored. Feeding this path the untruncated text would make the two write
+  // paths disagree on any summary over 300 characters -- silently, and only on
+  // long items. The cost is stated rather than hidden: an entity named only
+  // beyond the 300-character cut is not extracted by either path.
+  const summaryRaw = truncateSummary(originalSummary);
 
   return {
     url: raw.url,
-    canonicalUrl: canonicalizeUrl(raw.url),
+    canonicalUrl,
     title: raw.title,
     author: raw.author ?? null,
     sourceId: source.id,
@@ -484,12 +521,19 @@ export function normalizeItem(raw: RawItem, source: Source, fetchedAt: string): 
     // would let one item's caller mutate the array out from under every
     // other item from the same source.
     beats: [...source.beats],
-    // Entity extraction is not this task's responsibility -- RawItem carries
-    // no entity data to extract from. Left empty for a later milestone.
-    entities: [],
+    // M5 task 16. This line read `entities: []` from M1 until now, with a
+    // comment deferring it to "a later milestone" -- and `select count(*) from
+    // item_entities` returned 0 across 7,267 live items the whole time, while
+    // five modules read that table and one acceptance criterion depended on it.
+    // The canonical URL is passed because cisa-kev states its CVE id nowhere
+    // else (see src/entities/extract.ts).
+    entities:
+      entityRules === undefined
+        ? []
+        : extractEntities({ title: raw.title, summaryRaw, canonicalUrl, beats: source.beats }, entityRules),
     publishedAt: parsePublishedAt(raw.publishedAt),
     fetchedAt,
-    summaryRaw: truncateSummary(originalSummary),
+    summaryRaw,
     // JSON.stringify(undefined) returns the JS value `undefined`, not a
     // string -- NewItem.rawJson is non-nullable, so an adapter that passes
     // `raw: undefined` (permitted by the `unknown` type) must not produce a

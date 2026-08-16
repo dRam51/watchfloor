@@ -38,7 +38,7 @@
  * Both are enforced at load rather than left to be discovered later:
  *
  *  - **No two names may differ only by case**, and every name must already be
- *    NFC. `groupEntities` in `src/vault/entities.ts` *skips both* members of a
+ *    NFC. `groupEntities`, in the vault's entity-note module, *skips both* members of a
  *    case collision (they are one file on macOS and two on Linux) and merges
  *    NFC-equal spellings. A config that allows either produces entities that
  *    silently never get a note.
@@ -177,7 +177,7 @@ function assertUsableName(name: string): void {
   if (name.normalize('NFC') !== name) {
     throw new EntityRulesError(
       `entity name ${JSON.stringify(name)} is not NFC-normalised; write the precomposed form ` +
-        `(src/vault/entities.ts merges NFC-equal spellings, so a decomposed name silently becomes another entity)`,
+        `(the vault's entity-note module merges NFC-equal spellings, so a decomposed name silently becomes another entity)`,
     );
   }
   if (NAME_FORBIDDEN.test(name)) {
@@ -229,7 +229,7 @@ export function loadEntityRules(yamlText: string): EntityRuleset {
     if (existing !== undefined) {
       throw new EntityRulesError(
         `entity names ${JSON.stringify(existing)} and ${JSON.stringify(entity.name)} differ only by case; ` +
-          `src/vault/entities.ts skips BOTH members of a case collision, so neither would ever get a note`,
+          `the vault's entity-note module skips BOTH members of a case collision, so neither would ever get a note`,
       );
     }
     byFoldedName.set(folded, entity.name);

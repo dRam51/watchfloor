@@ -12,6 +12,8 @@ import { googleNewsAdapter } from '../adapters/googleNews.ts';
 import { githubSearchAdapter } from '../adapters/github.ts';
 import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
+import { loadEntityRulesFile } from '../entities/rules.ts';
+import { sweepEntities } from '../entities/sweep.ts';
 import {
   advanceVaultSlots,
   dueVaultWork,
@@ -90,6 +92,9 @@ try {
   }
 
   const sources = loadSourcesFile(join(repoRoot, 'config', 'sources.yaml'));
+  // M5 task 16. Loaded once at boot, like sources: a malformed entities.yaml
+  // must stop the daemon starting rather than fail on every item forever.
+  const entityRules = loadEntityRulesFile(join(repoRoot, 'config', 'entities.yaml'));
   console.log(
     `watchfloor scheduler starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
       `tick=${env.WF_SCHEDULER_TICK_INTERVAL_MS}ms)`,
@@ -201,7 +206,7 @@ try {
   async function tick(): Promise<void> {
     const now = new Date().toISOString();
     try {
-      const report = await runPollCycle(db, sources, adapters, now);
+      const report = await runPollCycle(db, sources, adapters, now, { entityRules });
 
       // M4a task 9. Mirrors src/bin/ingest.ts's own call at the same point in
       // the cycle -- the daemon is the path that will ACTUALLY accumulate the
@@ -227,6 +232,13 @@ try {
         ? await enrichRepoReadmes(db, sources, { now: report.finishedAt })
         : null;
 
+      // M5 task 16. Mirrors src/bin/ingest.ts's own call at the same point in
+      // the cycle, and the daemon is the path that matters most: the backfill
+      // over 7,267 stored item versions COMPOUNDS across polls, and a hand-run
+      // `npm run ingest` would look identical while covering one batch and
+      // stopping. See src/entities/sweep.ts.
+      const entities = sweepEntities(db, entityRules, { now: report.finishedAt });
+
       const counts = new Map<string, number>();
       for (const outcome of report.sources) {
         counts.set(outcome.kind, (counts.get(outcome.kind) ?? 0) + 1);
@@ -249,11 +261,16 @@ try {
       // same placement as the star snapshots above, and for the same reason:
       // a note written before the poll would describe the corpus as it was an
       // instant ago and then sit unchanged for an hour.
+      const entitySummary =
+        entities.scanned > 0
+          ? ` -- entities: ${entities.entitiesWritten} written over ${entities.scanned} item(s)` +
+            (entities.remaining > 0 ? `, ${entities.remaining} to go` : '')
+          : '';
       const vaultSummary = vaultDeps === null ? '' : await syncVaultIfDue(vaultDeps, report.finishedAt);
 
       console.log(
         `poll cycle finished at ${formatLocal(report.finishedAt, env.WF_TZ)} ` +
-          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}${readmeSummary}${vaultSummary}`,
+          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}${readmeSummary}${entitySummary}${vaultSummary}`,
       );
     } catch (err) {
       // runPollCycle itself only ever rejects on a contract violation (e.g.
