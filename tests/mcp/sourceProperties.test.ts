@@ -28,7 +28,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import {
   findFilesystemWrites,
   findForbiddenImports,
@@ -40,12 +40,26 @@ import {
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 
-/** Every file this process's boundary covers: the package, plus its entrypoint. */
+/**
+ * Every file this process's boundary covers: the package, plus its entrypoint.
+ *
+ * **RECURSIVE, and that is not cosmetic (M5 task 11).** The first version of
+ * this helper called `readdirSync` without `recursive`, which was correct while
+ * `src/mcp/` was flat. Task 11 added `src/mcp/tools/`, and a non-recursive scan
+ * would have left five new modules — the only ones that actually touch the
+ * corpus and construct SQL — outside all five rules, while every assertion
+ * below stayed green. That is precisely the vacuous-pass shape this file's own
+ * "non-vacuity check" exists to catch, so the check now names a file in the
+ * subdirectory.
+ */
 function mcpSources(): SourceFile[] {
   const dir = join(repoRoot, 'src', 'mcp');
-  const files: SourceFile[] = readdirSync(dir)
-    .filter((name) => name.endsWith('.ts'))
-    .map((name) => ({ path: `src/mcp/${name}`, text: readFileSync(join(dir, name), 'utf8') }));
+  const files: SourceFile[] = readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
+    .map((entry) => {
+      const absolute = join(entry.parentPath, entry.name);
+      return { path: relative(repoRoot, absolute), text: readFileSync(absolute, 'utf8') };
+    });
   files.push({
     path: 'src/bin/mcp.ts',
     text: readFileSync(join(repoRoot, 'src', 'bin', 'mcp.ts'), 'utf8'),
@@ -172,6 +186,18 @@ describe('the MCP package itself', () => {
     expect(files.length).toBeGreaterThanOrEqual(10);
     expect(files.map((f) => f.path)).toContain('src/bin/mcp.ts');
     expect(files.map((f) => f.path)).toContain('src/mcp/server.ts');
+    // The subdirectory, named explicitly: a non-recursive readdirSync passes
+    // every rule below while scanning none of the tool modules. See mcpSources.
+    expect(files.map((f) => f.path)).toContain(join('src', 'mcp', 'tools', 'asOf.ts'));
+  });
+
+  it('scans every .ts file under src/mcp, at any depth', () => {
+    const scanned = new Set(mcpSources().map((f) => f.path));
+    const onDisk = readdirSync(join(repoRoot, 'src', 'mcp'), { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
+      .map((entry) => relative(repoRoot, join(entry.parentPath, entry.name)));
+    expect(onDisk.length).toBeGreaterThan(12);
+    expect(onDisk.filter((path) => !scanned.has(path))).toEqual([]);
   });
 
   it('contains no TypeScript parameter property, which Node 26 cannot strip', () => {
