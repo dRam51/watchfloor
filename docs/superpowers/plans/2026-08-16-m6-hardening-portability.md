@@ -61,7 +61,34 @@ Measured 2026-08-16, before planning:
 
 **Task 2 — Case-exact import and filename check.** §12 asks for it, it does not exist, and it is the most likely cause of a failed rehearsal. Add it to `check:portability`. **Prove it bites**: introduce an import whose casing differs from the file on disk and watch it fail — on macOS, where the import still resolves.
 
-**Task 3 — Retention/archive job.** §11's note governs what may be dropped and what `raw_json` must keep. This is where "never delete anything" is hardest: retention *is* deletion by another name. Read `CLAUDE.md`'s standing rule and `db/migrations/`'s append-only triggers before designing. An archive that moves rows to a cold table is not the same as one that removes them — decide, and defend it against the rule.
+**Task 3 — Retention/archive job. DEFERRED 2026-08-16, with reasons, not skipped.**
+
+The brief's policy is: *"keep full items 90 days, then collapse to title+URL+score for archive."*
+Measured before building:
+
+- **The corpus is two days old** — `fetched_at` spans `2026-08-14T18:38` → `2026-08-16T20:46`. **Zero
+  items qualify for a 90-day policy**, and none will for 88 more days. Building it now ships a
+  feature that cannot be exercised, which is the exact "correct by construction, unproven against
+  use" shape this project has spent a milestone learning to distrust.
+- **"Collapse" is an UPDATE, and `items` forbids it.** The table carries `items_no_update` and
+  `items_no_delete` `raise(ABORT)` triggers. Retention as written cannot be implemented without
+  either relaxing the append-only guarantee that M0 chose deliberately and M2's read paths depend
+  on, or moving `raw_json` to a side table — a migration plus a backfill of 11,016 rows, and a
+  real architectural change rather than a job.
+
+**What the eventual design has to reckon with**, measured now so it is not rediscovered:
+`items` is **46 MB of the 60 MB** database, dominated by `raw_json`. There are **7,016 distinct
+keys across 11,016 versions**, and **3,655 keys have more than one version** — so roughly 4,000
+rows are re-polls carrying a near-duplicate payload. That, not age, is where the space actually
+is, and a 90-day age policy would not touch it.
+
+**Revisit when:** the corpus approaches 90 days, or the database becomes large enough to matter
+on the host. Until then `npm run backup` bounds the risk and `listBackups` makes growth visible.
+
+Also note the brief's storage paragraph is stale in three ways: it names `better-sqlite3` (this
+project uses `node:sqlite`), says migrations are "applied on boot" (they are not — `npm run
+migrate` is the only applier since M3), and predates the append-only triggers that make its own
+retention sentence unimplementable.
 
 **Task 4 — Backup script.** The deliverable names **one backup file**. `VACUUM INTO` is the mechanism this project already uses and it produces a consistent single file from a live database. Verify a restore *actually works* — a backup nobody restored is a hypothesis too.
 
