@@ -13,18 +13,43 @@ skipped**: its entire input is `config/portfolio.yaml`, which only the owner can
 (enrichment, vault, MCP, CLI) is in progress**, plan at
 `docs/superpowers/plans/2026-08-14-m5-enrichment-vault-mcp-cli.md`.
 
-> [!important] M4a's live run found three gaps that every unit test missed
-> All three were *between* correctly-built, fully-tested parts, and no task owned the seam.
-> **The `github_search` adapter was unreachable** — the registry lives in `src/scheduler/run.ts`
-> plus two composition roots, so it compiled fine and failed at *poll* time, once per cycle.
-> **Nothing wrote star snapshots**, so velocity would have returned `no_snapshots` forever
-> rather than for seven days — silent by construction, because that is a state the UI is
-> *designed* to render honestly. **Nothing called the README enricher**, so §4's fourth
-> suppression rule was inert. A test literally named *"only uses source types that have a
-> registered M1 adapter"* passed throughout, because no source used the type.
+> [!important] The unowned seam is this project's characteristic defect. It has now happened **seven times**.
+> Every instance is the same shape: a component that is correctly built, fully tested, and
+> **reachable from nothing**. `tsc` is clean, the suite is green, and the feature is inert.
 >
-> The lesson is not "write more unit tests." It is that **a milestone is not done until it has
-> been run against reality**, and that every wave needs an explicit owner for the wiring.
+> | # | Component | Found by |
+> | --- | --- | --- |
+> | 1 | `registerItems` — the dashboard could display state it had no way to change | M3 integration |
+> | 2 | The `github_search` adapter — in the `SourceType` union since M1, no registry entry | M4a live run |
+> | 3 | Star snapshots — velocity would have returned `no_snapshots` *forever*, not for seven days | M4a live run |
+> | 4 | The README enricher — §4's fourth suppression rule silently inert | M4a live run |
+> | 5 | Entity extraction — `item_entities` is **0 rows across 7,267 items**, and a comment has said so since M2 | M5 Task 7 |
+> | 6–7 | `createLlmBackend` and `loadEnrichmentPolicy` — Wave 1's whole LLM stack, called only by its own modules | M5 Task 15 |
+>
+> **The tests that should have caught these were often named for the exact rule they failed to
+> exercise.** `tests/sources/load.test.ts` had an assertion called *"only uses source types that
+> have a registered M1 adapter"* — it passed throughout, because no source used the type.
+> `tests/vault/sourceProperties.test.ts` enforced "nothing but the safety layer calls `fs`" while
+> exempting the whole directory the note writers live in. Both are the same failure: **scope that
+> excludes the only files capable of exhibiting the defect.**
+>
+> Three practices, earned rather than assumed:
+> 1. **A milestone is not done until it has been run against reality.** Every instance above was
+>    found by a live run or by a task reading the corpus, never by the suite.
+> 2. **Every wave needs an explicit owner for the wiring**, because a task that owns
+>    `src/vault/weekly.ts` does not own an entrypoint, and nobody notices the difference.
+> 3. **Pin the absence.** M5 Task 8 shipped a test asserting `promoteSavedItem` has no caller, so
+>    wiring it turns the test red. That is the first time the pattern announced itself instead of
+>    waiting to be discovered.
+
+> [!note] `git add` then `git commit` is a race whenever more than one writer is live
+> Twice in one session a commit swallowed another agent's staged files — `git add <path>` stages
+> a file's **entire working-tree content**, including edits someone else made between your `add`
+> and your `commit`. Explicit paths do not help; the window is the problem.
+> **Use `git commit -F - -- <paths>` in one invocation**, which stages and commits atomically.
+> Nothing was lost either time, and history is never rewritten here — but a commit message that
+> does not describe everything in the commit is exactly the confusion this project avoids
+> elsewhere.
 
 **There is a working dashboard.** `npm run migrate` → `npm run ingest` → `npm run score`, then
 `npm run dev` (API) and `npm run dev:web` (Vite, `http://localhost:5173`). It prompts once for
