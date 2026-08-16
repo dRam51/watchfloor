@@ -551,8 +551,23 @@ describe('known costs, pinned so they are decisions rather than surprises', () =
    *
    * This test asserts the gap so it cannot be forgotten. When the save route
    * is wired, this turns red and whoever wired it must say so here.
+   *
+   * ---------------------------------------------------------------------
+   * M5 task 15, first amendment: **a re-export is not a caller.**
+   *
+   * The original match was `text.includes('promoteSavedItem')`, which cannot
+   * tell `export { promoteSavedItem } from './saved.ts'` from an actual call
+   * — so adding this function to `src/vault/index.ts`, which changes nothing
+   * about whether it ever runs, turned the pin red on its own. That is the
+   * wrong trigger: a barrel export is *precisely* the thing that makes an
+   * unreachable component look wired, and a pin that fires on it would have
+   * been spent before the wiring it exists to announce.
+   *
+   * Matching `promoteSavedItem(` narrows it to a call, which is the fact the
+   * pin is about. The gap it asserts is unchanged.
+   * ---------------------------------------------------------------------
    */
-  it('IS NOT WIRED YET — promoteSavedItem has no caller in src/', () => {
+  it('IS NOT WIRED YET — promoteSavedItem has no CALLER in src/ (the barrel re-exports it)', () => {
     const callers: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -561,13 +576,19 @@ describe('known costs, pinned so they are decisions rather than surprises', () =
         else if (
           entry.name.endsWith('.ts') &&
           full !== join('src', 'vault', 'saved.ts') &&
-          readFileSync(full, 'utf8').includes('promoteSavedItem')
+          /\bpromoteSavedItem\s*\(/.test(readFileSync(full, 'utf8'))
         )
           callers.push(full);
       }
     };
     walk('src');
     expect(callers).toEqual([]);
+
+    // Non-vacuity, and the distinction the amendment above turns on: the
+    // barrel really does mention the name, and really is not a caller.
+    const barrel = readFileSync(join('src', 'vault', 'index.ts'), 'utf8');
+    expect(barrel).toContain('promoteSavedItem');
+    expect(/\bpromoteSavedItem\s*\(/.test(barrel)).toBe(false);
   });
 
   // A summary arriving with newlines must not be able to close the blockquote

@@ -27,6 +27,19 @@
  * | bounded | `session.ts` — files per run and bytes per file |
  *
  * Start at `session.ts`; the other modules are its parts.
+ *
+ * ## The order below is the order the package is meant to be read in
+ *
+ * The safety layer first (`frontmatter`, `mount`, `paths`, `session`), then
+ * the four note writers built on it, then `sync.ts` — the one composition that
+ * turns them into a run.
+ *
+ * **Tasks 5–8 each shipped without their exports here** (M5 task 15). Four
+ * complete, heavily-tested note writers, and the one door into the package
+ * mentioned none of them — which is the same defect one level down from
+ * "nothing calls them", and is why `tests/vault/wiring.test.ts` now asserts
+ * that every module in this directory is re-exported here rather than trusting
+ * the next person to remember.
  */
 
 export {
@@ -52,6 +65,11 @@ export {
   type VaultMounted,
   type VaultMountRefusal,
   type VaultMountStatus,
+  // The refusal half of VaultMountStatus. Absent until M5 task 15 needed to
+  // name it in a return type: a caller handed a `VaultMountStatus` cannot
+  // describe the not-mounted branch without it, and would reach past this
+  // barrel into ./mount.ts to do so.
+  type VaultUnmounted,
 } from './mount.ts';
 
 export {
@@ -79,3 +97,101 @@ export {
   type VaultWriteRefusal,
   type VaultWriteResult,
 } from './session.ts';
+
+// ---------------------------------------------------------------------------
+// The note writers (tasks 5–8). Each reported the export line it needed; each
+// is reproduced from that report rather than guessed.
+// ---------------------------------------------------------------------------
+
+export {
+  buildDailyNote,
+  dailyNoteInstant,
+  writeDailyNote,
+  DEFAULT_FLAGGED_LIMIT,
+  DEFAULT_TOP_PER_BEAT,
+  type BeatCoverage,
+  type DailyBeatSection,
+  type DailyEntry,
+  type DailyNote,
+  type DailyNoteDeps,
+} from './daily.ts';
+
+export {
+  buildBlurbPrompt,
+  classifyEvidence,
+  estimateReadTime,
+  isoWeekOf,
+  renderWeeklyNote,
+  selectWeeklyReading,
+  syncWeeklyNote,
+  validateBlurbText,
+  weeklyNoteInstant,
+  weeklyNoteRelPath,
+  BLURB_NOVEL_WORDS_MIN,
+  BLURB_QUESTIONS,
+  BLURB_SYSTEM,
+  BLURB_TASK_ID,
+  BODY_WORDS_MIN,
+  DEFAULT_WEEKLY_LIMIT,
+  EXCERPT_NOVEL_WORDS_MIN,
+  HEADLINE_ONLY_LIMIT,
+  MAX_MATERIAL_CHARS,
+  WEEKLY_READING_KINDS,
+  WORDS_PER_MINUTE,
+  WeeklyBlurbError,
+  type BlurbEvidence,
+  type BlurbOutcome,
+  type BlurbPromptItem,
+  type BlurbQuestion,
+  type BlurbRejection,
+  type BlurbValidation,
+  type EvidenceInput,
+  type EvidenceLevel,
+  type IsoWeek,
+  type ReadTimeEstimate,
+  type WeeklyBlurbCounts,
+  type WeeklyCandidate,
+  type WeeklyEntry,
+  type WeeklyExclusions,
+  type WeeklyNoteInput,
+  type WeeklySelection,
+  type WeeklySelectionDeps,
+  type WeeklySelectionOptions,
+  type WeeklySyncDeps,
+  type WeeklySyncOptions,
+  type WeeklySyncResult,
+} from './weekly.ts';
+
+export {
+  entityFileName,
+  entityNoteRelPath,
+  planEntityNotes,
+  renderEntityBlock,
+  syncEntityNotes,
+  DEFAULT_MAX_ITEMS,
+  DEFAULT_MAX_RELATED,
+  EntityNameError,
+  type EntityItemRef,
+  type EntityNameRefusal,
+  type EntityNotePlan,
+  type EntityPlan,
+  type EntityPlanOptions,
+  type EntitySkip,
+  type EntitySkipReason,
+  type EntitySyncOptions,
+  type EntitySyncResult,
+  type RelatedEntity,
+} from './entities.ts';
+
+export {
+  promoteSavedItem,
+  readSavedItem,
+  renderSavedNote,
+  savedNotePath,
+  savedTitleSlug,
+  SAVED_KEY_SUFFIX_LENGTH,
+  SAVED_SLUG_FALLBACK,
+  SAVED_SLUG_MAX_LENGTH,
+  type SavedItem,
+  type SavedPromotion,
+} from './saved.ts';
