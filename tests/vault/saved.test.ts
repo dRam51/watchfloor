@@ -411,6 +411,22 @@ describe('a re-sync after the tree is gone does NOT bring saved/ back', () => {
    *
    * Non-vacuity is checked first, because M4a's post-mortem is about exactly
    * this shape of test passing for a milestone while reading nothing.
+   *
+   * ---------------------------------------------------------------------
+   * M5 task 15: **a mention is not a call**, the same amendment the wiring pin
+   * below needed and for a sharper reason — this one was reddened by a *doc
+   * comment*. Task 9's `src/vault/verify.ts` explains why the leftover temp
+   * entry is a hard link with the sentence *"`writeSavedNote` uses `link`
+   * rather than …"*, and a `text.includes` match counted that as a second
+   * caller into the write-once tier.
+   *
+   * Widening the expected list to include `verify.ts` would have been the easy
+   * fix and the wrong one: it would record a file that never touches `saved/`
+   * as one that does, and the next real caller would then slip in beside it
+   * unremarked. Matching `writeSavedNote(` restores the property as written —
+   * a module that *calls* it still turns this red — and makes the rule
+   * survivable by anyone who writes about the vault in prose.
+   * ---------------------------------------------------------------------
    */
   it('is called by nothing but this module', () => {
     const callers: string[] = [];
@@ -418,7 +434,7 @@ describe('a re-sync after the tree is gone does NOT bring saved/ back', () => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith('.ts') && readFileSync(full, 'utf8').includes('writeSavedNote'))
+        else if (entry.name.endsWith('.ts') && /\bwriteSavedNote\s*\(/.test(readFileSync(full, 'utf8')))
           callers.push(full);
       }
     };
@@ -544,30 +560,46 @@ describe('known costs, pinned so they are decisions rather than surprises', () =
   });
 
   /**
-   * THE WIRING PIN. M4a's post-mortem: a `github_search` adapter that compiled
-   * fine and was unreachable, found only by a live run. Nothing in `src/`
-   * calls {@link promoteSavedItem} yet — the composition roots and
-   * `src/api/routes/items.ts` were outside this task's ownership.
+   * THE WIRING PIN — **now discharged, and kept as the opposite assertion.**
    *
-   * This test asserts the gap so it cannot be forgotten. When the save route
-   * is wired, this turns red and whoever wired it must say so here.
+   * It was written by task 8 as *"IS NOT WIRED YET — promoteSavedItem has no
+   * caller in `src/`"*, so that wiring the save route would turn it red and
+   * whoever wired it would have to say so here. M5 task 15 is that wiring, and
+   * this is that saying-so. It is the first time in this project the
+   * unreachable-component pattern announced itself instead of waiting for a
+   * live run — M3's `registerItems`, M4a's `github_search` adapter, its star
+   * snapshots and its README enricher were each found by running the thing.
    *
-   * ---------------------------------------------------------------------
-   * M5 task 15, first amendment: **a re-export is not a caller.**
+   * **Two amendments were needed to keep it honest, and both are the point.**
    *
-   * The original match was `text.includes('promoteSavedItem')`, which cannot
-   * tell `export { promoteSavedItem } from './saved.ts'` from an actual call
-   * — so adding this function to `src/vault/index.ts`, which changes nothing
-   * about whether it ever runs, turned the pin red on its own. That is the
-   * wrong trigger: a barrel export is *precisely* the thing that makes an
-   * unreachable component look wired, and a pin that fires on it would have
-   * been spent before the wiring it exists to announce.
+   * 1. *A re-export is not a caller.* The original match was
+   *    `text.includes('promoteSavedItem')`, which cannot tell
+   *    `export { promoteSavedItem } from './saved.ts'` from an actual call —
+   *    so adding the name to `src/vault/index.ts`, which changes nothing about
+   *    whether it ever runs, fired the pin on its own. A barrel export is
+   *    *precisely* what makes an unreachable component look wired, so firing
+   *    on it would have spent the pin before the wiring it exists to announce.
+   *    The matcher is now `promoteSavedItem(`.
+   * 2. *The caller list is declared, not merely non-empty.* "Something calls
+   *    it" is satisfied by any accident. What is asserted is the exact set —
+   *    one caller, `src/vault/sync.ts` — so a second, quieter call site
+   *    appearing later still turns this red.
    *
-   * Matching `promoteSavedItem(` narrows it to a call, which is the fact the
-   * pin is about. The gap it asserts is unchanged.
-   * ---------------------------------------------------------------------
+   * **Why the caller is `sync.ts` and not `items.ts` directly.** The route's
+   * job is to answer the request; the vault's error taxonomy (unmounted, cap,
+   * wrong tier, a title that will not slug) belongs with the vault. So
+   * `promoteSavedItemToVault` in `src/vault/sync.ts` is the one function that
+   * calls this one, and it is the function the save route calls — a two-link
+   * chain, and **both links are asserted below**, the second by name and the
+   * whole of it behaviourally in `tests/api/itemsVault.test.ts`, which POSTs
+   * to the real server built by `src/api/server.ts` and reads the note off
+   * disk.
+   *
+   * The property task 8 wanted is therefore preserved rather than deleted:
+   * this function has exactly one call site, that call site is reached from
+   * the save route, and any change to either of those facts fails here.
    */
-  it('IS NOT WIRED YET — promoteSavedItem has no CALLER in src/ (the barrel re-exports it)', () => {
+  it('IS WIRED — promoteSavedItem is called by exactly one module, reached from the save route', () => {
     const callers: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -582,10 +614,24 @@ describe('known costs, pinned so they are decisions rather than surprises', () =
       }
     };
     walk('src');
-    expect(callers).toEqual([]);
 
-    // Non-vacuity, and the distinction the amendment above turns on: the
-    // barrel really does mention the name, and really is not a caller.
+    // Link one: exactly one caller, and it is the vault's own promotion helper.
+    expect(callers.sort()).toEqual([join('src', 'vault', 'sync.ts')]);
+
+    // Link two: the save route calls that helper, and it is the SAVE route —
+    // not read, not dismiss. Asserted against the registration line itself,
+    // because "items.ts mentions it somewhere" would also be true of a call
+    // wired to the wrong verb.
+    const route = readFileSync(join('src', 'api', 'routes', 'items.ts'), 'utf8');
+    expect(route).toContain('promoteSavedItemToVault(');
+    const saveHandler = route.slice(route.indexOf("server.post(\n    '/items/:itemKey/save'"));
+    expect(saveHandler).toContain('promoteToVault(');
+    expect(saveHandler.indexOf('promoteToVault(')).toBeLessThan(
+      saveHandler.indexOf("server.delete('/items/:itemKey/save'"),
+    );
+
+    // Non-vacuity, and the distinction amendment 1 turns on: the barrel really
+    // does mention the name, and really is not a caller.
     const barrel = readFileSync(join('src', 'vault', 'index.ts'), 'utf8');
     expect(barrel).toContain('promoteSavedItem');
     expect(/\bpromoteSavedItem\s*\(/.test(barrel)).toBe(false);

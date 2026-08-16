@@ -95,7 +95,17 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       // built the domain layer and task 4's feed reads the state onto each
       // row, but no Wave 2 task owned exposing the writes — so the dashboard
       // could display state it had no way to change.
-      registerItems(api, { db: deps.db });
+      //
+      // M5 task 15: `vault` is what makes §8.1's `saved/` promotion happen at
+      // SAVE TIME. It has to be threaded from here, because this is the only
+      // place that holds the validated Env — and it is the second half of the
+      // wiring, the half a route-level test cannot see. `WF_VAULT_ROOT` is
+      // commented out in `.env`, so `null` is the ordinary value and means "no
+      // promotion", quietly.
+      registerItems(api, {
+        db: deps.db,
+        vault: { root: deps.env.WF_VAULT_ROOT ?? null, tz: deps.env.WF_TZ },
+      });
     },
     { prefix: '/api' },
   );

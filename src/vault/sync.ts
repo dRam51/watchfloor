@@ -61,12 +61,14 @@ import { localDayOf } from './cadence.ts';
 import { writeDailyNote, type DailyNoteDeps } from './daily.ts';
 import { syncEntityNotes, type EntitySyncResult } from './entities.ts';
 import { VaultContentError } from './frontmatter.ts';
+import { promoteSavedItem, readSavedItem, type SavedPromotion } from './saved.ts';
 import {
   checkVaultMount,
   vaultRootFromEnv,
   type VaultUnmounted,
 } from './mount.ts';
 import {
+  openVaultSession,
   VaultCapError,
   VaultWriteError,
   type VaultSession,
@@ -90,17 +92,33 @@ export type VaultTarget =
   | { readonly status: 'ready'; readonly root: string };
 
 /**
- * What `WF_VAULT_ROOT` currently means, without creating anything.
+ * What a configured root currently means, without creating anything.
+ *
+ * Takes the root rather than an environment because the API path has one
+ * already: `src/api/server.ts` holds the loaded, validated `Env` and passes
+ * `WF_VAULT_ROOT` down. A second read of `process.env` inside a request
+ * handler would be a global the composition root cannot see or override, and
+ * it would leave a test's vault one stray environment variable away from the
+ * owner's real one.
+ */
+export function vaultTargetFor(root: string | null): VaultTarget {
+  if (root === null) return { status: 'not_configured' };
+  const status = checkVaultMount(root);
+  return status.mounted ? { status: 'ready', root } : { status: 'unmounted', root, refusal: status };
+}
+
+/**
+ * {@link vaultTargetFor}, reading `WF_VAULT_ROOT` from an environment.
  *
  * `env` is a parameter rather than a read of `process.env` so a test can
  * exercise all three states without touching the real environment — and
  * therefore without any path by which a test could reach the owner's vault.
+ * Blank is `null`, never `''`: an empty string resolves against the process
+ * working directory, which is the repository, and a sync that "succeeded" into
+ * `./daily/` would be both wrong and easy to miss.
  */
 export function resolveVaultTarget(env: NodeJS.ProcessEnv = process.env): VaultTarget {
-  const root = vaultRootFromEnv(env);
-  if (root === null) return { status: 'not_configured' };
-  const status = checkVaultMount(root);
-  return status.mounted ? { status: 'ready', root } : { status: 'unmounted', root, refusal: status };
+  return vaultTargetFor(vaultRootFromEnv(env));
 }
 
 // ---------------------------------------------------------------------------
@@ -280,4 +298,87 @@ export async function runVaultSync(
     refusals,
     filesWritten: session.filesWritten,
   };
+}
+// ---------------------------------------------------------------------------
+// `saved/` promotion, which is not part of a run
+// ---------------------------------------------------------------------------
+
+/**
+ * What promoting one saved item did. Every branch is a normal outcome; none of
+ * them is an HTTP failure.
+ */
+export type SavedPromotionOutcome =
+  | { readonly status: 'not_configured' }
+  | { readonly status: 'unmounted'; readonly reason: string; readonly detail: string }
+  | { readonly status: 'not_saved' }
+  | { readonly status: 'refused'; readonly reason: string; readonly detail: string }
+  // `written` carries the bytes; `exists` deliberately does not — see
+  // SavedPromotion's own comment on why "the path was occupied" is not the
+  // same claim as "this item was already promoted".
+  | SavedPromotion;
+
+/**
+ * Promotes one just-saved item into `saved/`, and **never throws**.
+ *
+ * ## Why this runs at save time rather than in the sync pass above
+ *
+ * Task 8 established it and the acceptance criterion forces it: a
+ * reconciliation pass over `item_state where saved_at is not null` cannot
+ * distinguish a note that was never written from one the owner deleted on
+ * purpose. Delete the tree, re-sync, and such a pass faithfully rebuilds
+ * exactly what §8.1's "written once, then never touched again by any job"
+ * forbids. So promotion is an event on the save transition, and there is
+ * deliberately **no backfill**: an item saved while the vault is unmounted is
+ * never promoted, which is a bounded, visible cost (the item is still saved in
+ * the dashboard) rather than a silent rebuild of something deleted on purpose.
+ *
+ * ## Why it cannot throw
+ *
+ * The caller is `POST /api/items/:itemKey/save`, and by the time this runs the
+ * save has already succeeded. The vault being unmounted is not the caller's
+ * problem and must not become a 500 on an action that worked. Every refusal is
+ * therefore a return value, and the route logs it.
+ *
+ * ## Why a fresh session per save
+ *
+ * `openVaultSession` re-runs the mount guard, so a vault that came back is
+ * picked up without restarting the API. A long-lived session would also latch
+ * shut permanently after `maxFilesPerRun` saves — a cap sized for a sync run,
+ * not for the lifetime of a server process.
+ */
+export function promoteSavedItemToVault(
+  db: Db,
+  itemKey: string,
+  options: { readonly tz: string; readonly root: string | null },
+): SavedPromotionOutcome {
+  const target = vaultTargetFor(options.root);
+  if (target.status === 'not_configured') return { status: 'not_configured' };
+  if (target.status === 'unmounted') {
+    return {
+      status: 'unmounted',
+      reason: target.refusal.reason,
+      detail: `${target.refusal.detail}. ${target.refusal.remedy}`,
+    };
+  }
+
+  const item = readSavedItem(db, itemKey);
+  // Not an error: the route deliberately does not check that an item_key
+  // exists, and an un-save between the write and this read is legitimate.
+  if (item === null) return { status: 'not_saved' };
+
+  try {
+    return promoteSavedItem(openVaultSession(target.root), item, { tz: options.tz });
+  } catch (err) {
+    if (err instanceof VaultWriteError || err instanceof VaultCapError) {
+      return { status: 'refused', reason: err.reason, detail: err.message };
+    }
+    // Includes a path refusal (a title that slugs to something the path layer
+    // will not express) and any genuinely unexpected error. The save stands
+    // either way, so this is reported rather than raised.
+    return {
+      status: 'refused',
+      reason: (err as Error).name || 'error',
+      detail: (err as Error).message,
+    };
+  }
 }
