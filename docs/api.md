@@ -231,6 +231,120 @@ Returns `{ query, unsearchable, hits: [{ itemKey, title, sourceId, canonicalUrl,
   an article will not find it — the system stores links and short excerpts by policy, never
   full text.
 
+### `GET /api/entities` · `GET /api/entities/graph`
+
+§7.4's entity graph. Added M5 task 17; **every payload below was copied out of a live
+response** served over a `VACUUM INTO` copy of the real corpus (11,016 item versions, 12,232
+entity attributions, 3,474 distinct entities), not transcribed from the route file.
+
+Two resources, because there are two questions: *which entities are worth looking at* (a
+ranked list) and *what surrounds this one* (an ego graph). **There is deliberately no
+whole-graph resource** — at the default threshold the live corpus has 176 drawable entities
+and on the order of a thousand edges between them, which is a hairball at any viewport, and
+shipping it would move the decision about what to draw into the frontend, which §7.1 forbids.
+
+Neither route takes `now`. **Nothing here decays**: co-occurrence is a fact about the corpus,
+so two requests over an unchanged corpus return identical bytes and there is no frozen-cursor
+problem to reason about.
+
+#### `GET /api/entities`
+
+| param | type | notes |
+| --- | --- | --- |
+| `minItems` | integer ≥ 1, default **2** | fewest distinct items an entity needs to be listed |
+| `limit` | 1–500, default 200 | list cap; not a page size — there is no cursor |
+
+```json
+{ "minItems": 2, "limit": 200,
+  "entitiesTotal": 3474, "entitiesAtOrAboveThreshold": 176, "entitiesBelowThreshold": 3298,
+  "entities": [ { "entity": "Linux", "itemCount": 702 },
+                { "entity": "OpenAI", "itemCount": 582 },
+                { "entity": "Microsoft", "itemCount": 459 } ] }
+```
+
+Ranked by `itemCount` descending, ties by codepoint. `itemCount` is **distinct `item_key`s**,
+so a cross-listed item stored twice counts once.
+
+**The three totals are the endpoint's most important field, not decoration.** The threshold is
+a real editorial choice and the client is expected to show it — `entitiesBelowThreshold: 3298`
+against `entitiesTotal: 3474` is the whole shape of this corpus, and a list that silently
+omitted 95% of it while looking complete is exactly the quiet wrongness this file exists to
+prevent. The excluded tail is almost entirely CVE identifiers named by one item each.
+
+`minItems=1` is a valid request and returns the tail (`entitiesAtOrAboveThreshold: 3474`,
+`entitiesBelowThreshold: 0`). That is why `limit` exists.
+
+#### `GET /api/entities/graph`
+
+| param | type | notes |
+| --- | --- | --- |
+| `entity` | non-empty string | **required**; the focus |
+| `minItems` | integer ≥ 1, default **2** | applies to NEIGHBOURS, never to the focus |
+| `neighbours` | 1–200, default **15** | how many neighbours are drawn |
+
+**`entity` is a query parameter, not a path segment**, on purpose. Entity names are extracted
+text, not identifiers: live ones include `Model Context Protocol`, `S&P 500`, `Moody's` and
+`GPT-4.1`. URL-encode it (`?entity=Prompt%20injection`).
+
+Live, abridged only where marked:
+
+```json
+{ "entity": "OpenAI", "known": true, "minItems": 2,
+  "nodes": [
+    { "entity": "OpenAI",  "itemCount": 582, "focus": true,  "sharedItemsWithFocus": null },
+    { "entity": "ChatGPT", "itemCount": 235, "focus": false, "sharedItemsWithFocus": 78 },
+    { "entity": "GPT-5",   "itemCount": 94,  "focus": false, "sharedItemsWithFocus": 33 }
+  ],
+  "edges": [
+    { "source": "ChatGPT",   "target": "OpenAI", "sharedItems": 78 },
+    { "source": "Anthropic", "target": "Claude", "sharedItems": 15 }
+  ],
+  "neighbours": { "shown": 15, "aboveThreshold": 54, "hiddenBelowThreshold": 2 },
+  "corpus": { "entitiesTotal": 3474, "entitiesAtOrAboveThreshold": 176,
+              "entitiesBelowThreshold": 3298 } }
+```
+
+- **`nodes[0]` is always the focus**, and it is the only node with
+  `sharedItemsWithFocus: null` — not a missing value: an entity is not related to itself, so
+  for that one node the question has no answer. Neighbours follow in the order they should be
+  rendered (shared items descending, ties by codepoint), so a client re-sorting them is
+  re-implementing ranking the server already did.
+- **`sharedItemsWithFocus` also appears in `edges`, and that redundancy is deliberate.** It is
+  the ordering key, materialised so the ranked adjacency list — which is what a phone browser
+  gets — needs no join between two arrays.
+- **`edges` is the INDUCED subgraph, not a star.** It contains neighbour-to-neighbour edges:
+  `Anthropic — Claude: 15` is in the `OpenAI` graph because those two co-occur, whether or not
+  OpenAI is on those items. An edge weight is a property of the pair alone, counted over the
+  whole corpus — it does not change depending on which node you focused. Without these edges
+  the result would be a ranked list drawn in a circle.
+- **`source`/`target` do not imply direction.** The relation is symmetric; each pair is emitted
+  once with `source < target` by codepoint. Edges are sorted by `sharedItems` descending.
+- **Every edge end is a drawn node.** Asserted by test, so a renderer needs no orphan check.
+- **`neighbours` distinguishes three numbers that a single count would collapse**:
+  `shown` (drawn), `aboveThreshold` (eligible, before the cap), and `hiddenBelowThreshold`
+  (co-occurring entities the floor removed). `OpenAI` live: 15 drawn of 54 eligible, with 2
+  more dropped by the floor. Absence and emptiness are different answers here exactly as they
+  are on `/api/sources`.
+- **The threshold governs neighbours, never the focus.** A single-item entity you explicitly
+  asked for is still drawn — live, `?entity=CVE-2002-0367` returns
+  `{ "itemCount": 1, "focus": true }` with `Microsoft` and `Windows` around it. Refusing to
+  draw the node the user selected would answer a question nobody asked.
+- **An unknown entity is `200` with `known: false`**, an empty `nodes`/`edges`, and the
+  `corpus` block still populated — never a 404. A 404 would mean "no such route"; this route
+  answered, and "the corpus does not name that entity" is a result. The taxonomy is
+  config-driven (`config/entities.yaml`), so an entity can be perfectly real and simply not
+  extracted from anything yet.
+
+**Bad input is `400 { error: "invalid_query", message: "<field>: <detail>" }`** — the
+lowercase-token shape this file specifies, matching `/api/feed`. Live:
+`{"error":"invalid_query","message":"entity: Required"}`.
+
+*(Note for anyone matching styles across routes: `/api/search` does **not** follow this
+convention — it sends zod's raw message as `error` itself, so a missing `q` answers
+`{"error":"Required"}`, which is capitalised, is not a token, and does not name the parameter.
+Verified live while writing this section. Left alone rather than changed here, because that is
+a contract change to an existing route and belongs to whoever owns it.)*
+
 ### `GET /api/sources`
 
 Per-source health. §7: *"Silent-failing feeds are the main failure mode of a system like this;

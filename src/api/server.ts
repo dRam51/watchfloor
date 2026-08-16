@@ -11,6 +11,7 @@ import { registerSources, countFailingSources } from './routes/sources.ts';
 import { registerDashboard } from './routes/dashboard.ts';
 import { registerSearch } from './routes/search.ts';
 import { registerItems } from './routes/items.ts';
+import { registerEntities } from './routes/entities.ts';
 
 export interface ServerDeps {
   db: Db;
@@ -106,6 +107,17 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         db: deps.db,
         vault: { root: deps.env.WF_VAULT_ROOT ?? null, tz: deps.env.WF_TZ },
       });
+
+      // M5 task 17: §7.4's entity graph. Registered here and pinned by
+      // tests/api/entitiesWiring.test.ts, because every route test in
+      // tests/api/ builds its own Fastify instance — correctly, so a route
+      // test does not depend on this file — and would therefore stay green
+      // with this line missing. That is `registerItems`' own history, and it
+      // is number one in CLAUDE.md's table of unreachable components.
+      //
+      // Needs only the db: the graph is a pure function of the corpus, with
+      // no decay, no `now`, and no source list.
+      registerEntities(api, { db: deps.db });
     },
     { prefix: '/api' },
   );
