@@ -43,6 +43,10 @@ import { z } from 'zod';
 import { defineTool, type ToolRegistry } from './registry.ts';
 import { FORBIDDEN_FIELD_PHRASES } from './fields.ts';
 import { LATEST_PROTOCOL_VERSION } from './protocol.ts';
+import { loadBotToolDeps, type BotToolDeps } from './tools/deps.ts';
+import { createItemsForEntityTool } from './tools/items.ts';
+import { createSourceHealthTool } from './tools/sourceHealth.ts';
+import { createMarketTools } from './tools/markets.ts';
 
 /**
  * The skeleton's own diagnostic, and deliberately not one of §8.2's five.
@@ -98,10 +102,35 @@ export const describeBoundary = defineTool({
  *
  * Called by `src/bin/mcp.ts` and by nothing else, so the set a live client
  * sees is the set written here — there is no second path by which a tool could
- * become reachable.
+ * become reachable. `tests/mcp/tools/registration.test.ts` pins both
+ * directions: every factory `src/mcp/tools/` exports is referenced below, and
+ * the entrypoint calls this function.
+ *
+ * `deps` defaults to the real `config/sources.yaml` and `config/decay.yaml`,
+ * read once, HERE — at process startup, where a malformed config is a refusal
+ * to boot with an operator watching, rather than an error on the first
+ * `tools/call` of a live session. The parameter exists so a test can supply its
+ * own without writing files.
+ *
+ * §8.2's five, and where each one's data comes from:
+ *
+ * | tool | data | status |
+ * | --- | --- | --- |
+ * | `get_items_for_entity` | `item_entities` + `items` + `item_scores` | real |
+ * | `get_source_health` | `source_fetch_state` + `config/sources.yaml` | real |
+ * | `get_market_snapshot` | the §7 market ribbon | **M4b — not configured** |
+ * | `get_catalysts` | earnings / FOMC / CPI calendar | **M4b — not configured** |
+ * | `get_filings` | an EDGAR adapter | **M4b — not configured** |
+ *
+ * The three deferred ones are registered rather than omitted, and report
+ * `status: "not_configured"` with an explicit `null` where the data would be.
+ * Omitting them would leave a bot to conclude the capability does not exist;
+ * returning `[]` would leave it to conclude the *world* is empty. See
+ * `./tools/markets.ts`.
  */
-export function registerBotTools(registry: ToolRegistry): void {
+export function registerBotTools(registry: ToolRegistry, deps: BotToolDeps = loadBotToolDeps()): void {
   registry.register(describeBoundary);
-  // Task 11 adds §8.2's tools here: get_items_for_entity, get_source_health,
-  // get_market_snapshot, get_catalysts, get_filings.
+  registry.register(createItemsForEntityTool(deps));
+  registry.register(createSourceHealthTool(deps));
+  for (const tool of createMarketTools(deps)) registry.register(tool);
 }

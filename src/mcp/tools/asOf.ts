@@ -65,6 +65,7 @@
 
 import { assertCanonicalTimestamp, BEATS, type Beat, type ItemType } from '../../domain/item.ts';
 import type { ReadOnlyCorpus, SqlParam } from '../readonly.ts';
+import type { McpToolContext, McpToolResult } from '../registry.ts';
 
 export type AsOfFailure = 'malformed' | 'retention_horizon';
 
@@ -132,6 +133,53 @@ export function assertWithinRetentionHorizon(corpus: ReadOnlyCorpus, asOf: strin
         `history before that instant has been thinned, so any answer would be quietly incomplete`,
     );
   }
+}
+
+/**
+ * The one place every bot tool resolves its reading instant.
+ *
+ * It exists because of a defect its own test found: `resolveReadInstant`
+ * throwing `AsOfError` out of a tool's `run` reaches `src/mcp/server.ts`'s
+ * catch-all and comes back as `-32603 internal error` — a **server bug**, which
+ * a model is told not to retry. A malformed `as_of` is the opposite: the MCP
+ * specification names *"date in wrong format"* as the canonical example of a
+ * tool EXECUTION error, *"actionable feedback that language models can use to
+ * self-correct"*. A bot sweeping a backtest over a mis-formatted boundary must
+ * be told to fix the string, not that Watchfloor fell over.
+ *
+ * Wrapping rather than editing the dispatcher keeps Task 10's seam intact: the
+ * dispatcher stays ignorant of the tools, and every tool gets the same
+ * behaviour by calling one function instead of by remembering a rule.
+ */
+export function withReadInstant(
+  asOf: string | undefined,
+  ctx: McpToolContext,
+  options: { checkRetention: boolean },
+  body: (instant: ReadInstant) => McpToolResult,
+): McpToolResult {
+  let instant: ReadInstant;
+  try {
+    instant = resolveReadInstant(asOf, ctx.now);
+    if (options.checkRetention) assertWithinRetentionHorizon(ctx.corpus, instant.readAt);
+  } catch (cause) {
+    if (cause instanceof AsOfError) {
+      return {
+        structured: {
+          status: 'invalid_as_of',
+          reason: cause.reason,
+          detail: cause.message,
+          // The value the caller sent, echoed so the fix is obvious. Not a
+          // corpus value and not a credential.
+          asOf: asOf ?? null,
+        },
+        text: `invalid asOf: ${cause.message}`,
+        isError: true,
+        rows: 0,
+      };
+    }
+    throw cause;
+  }
+  return body(instant);
 }
 
 export interface ItemVersionAsOf {
