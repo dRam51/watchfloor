@@ -198,7 +198,30 @@ export function sortRanked(items: readonly RankedItem[], profile: SortProfile): 
     }
     const byScore = scoreFor(b, profile) - scoreFor(a, profile);
     if (byScore !== 0) return byScore;
-    return a.title.localeCompare(b.title);
+
+    // Codepoint order, NOT `localeCompare` -- which reads the host's ICU
+    // tables and therefore makes the ranking a property of the machine rather
+    // than of the data. That violates "portability from the first commit"
+    // (CLAUDE.md), and it is not theoretical: M5 task 5's live run found the
+    // cyber top five to be five NVD rows at exactly 0.100, so the tie-break
+    // decides real output, and the dev Mac and the target host could disagree
+    // about it. `<`/`>` on strings is UTF-16 code-unit order, which is stable
+    // everywhere.
+    if (a.title < b.title) return -1;
+    if (a.title > b.title) return 1;
+
+    // Titles can be BYTE-IDENTICAL, so title alone is not a total order. M5
+    // task 8 measured the live corpus: 185 slug-collision groups covering 551
+    // of 5,937 items, the largest being 24 distinct CVEs that CISA publishes
+    // under the identical title "Microsoft Win32k Privilege Escalation
+    // Vulnerability" -- and all 24 share one KEV-dump `fetched_at`, so their
+    // scores tie too. Without this line those 24 compare equal and their order
+    // is whatever the input array happened to be, which changes between
+    // queries. `item_key` is sha256 of the canonical URL and therefore unique
+    // per item, so it terminates the comparison for good.
+    if (a.itemKey < b.itemKey) return -1;
+    if (a.itemKey > b.itemKey) return 1;
+    return 0;
   });
 }
 

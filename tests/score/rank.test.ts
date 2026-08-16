@@ -313,6 +313,40 @@ describe('sortRanked -- pure algorithm', () => {
     expect(sorted.map((i) => i.title)).toEqual(['Apple', 'Zebra']);
   });
 
+  // -----------------------------------------------------------------------
+  // Two defects in one line, both found by M5 task 5's live run and task 8's
+  // corpus measurement.
+  // -----------------------------------------------------------------------
+
+  it('orders titles by CODEPOINT, not by host locale collation', () => {
+    // `localeCompare` reads the host's ICU tables, so this pair's order is a
+    // property of the machine, not of the data -- exactly what
+    // "portability from the first commit" forbids. Under en-US collation
+    // 'a' sorts BEFORE 'B' (case-insensitive-ish); by codepoint 'B' (0x42)
+    // sorts before 'a' (0x61). The assertion below is the codepoint answer,
+    // so it fails on any implementation that delegates to the locale.
+    const upperB = fakeRanked({ itemKey: 'k1', title: 'Boron', signalScore: 5 });
+    const lowerA = fakeRanked({ itemKey: 'k2', title: 'apple', signalScore: 5 });
+    expect(sortRanked([lowerA, upperB], 'signal').map((i) => i.title)).toEqual(['Boron', 'apple']);
+    // Sanity: this is genuinely the case where the two disagree.
+    expect('apple'.localeCompare('Boron')).toBeLessThan(0);
+  });
+
+  it('breaks a tie between IDENTICAL titles on item_key, which is unique', () => {
+    // Not hypothetical. M5 task 8 measured the live corpus: 185 slug-collision
+    // groups covering 551 of 5,937 items, the largest being 24 distinct CVEs
+    // that CISA publishes under the byte-identical title "Microsoft Win32k
+    // Privilege Escalation Vulnerability" -- all sharing one KEV-dump
+    // fetched_at, so score ties too. With title as the last comparator those
+    // 24 compare equal and the order is whatever the input happened to be.
+    const same = 'Microsoft Win32k Privilege Escalation Vulnerability';
+    const first = fakeRanked({ itemKey: 'aaa', title: same, signalScore: 5 });
+    const second = fakeRanked({ itemKey: 'bbb', title: same, signalScore: 5 });
+    expect(sortRanked([second, first], 'signal').map((i) => i.itemKey)).toEqual(['aaa', 'bbb']);
+    // And the reverse input gives the SAME output -- that is the property.
+    expect(sortRanked([first, second], 'signal').map((i) => i.itemKey)).toEqual(['aaa', 'bbb']);
+  });
+
   it("profile='read' sorts by readScore and pins by readOverride, INDEPENDENTLY of signal -- an item pinned only on signal does not jump the read-sorted queue", () => {
     const signalPinnedOnly = fakeRanked({
       itemKey: 'signal-pinned',
