@@ -1,0 +1,221 @@
+/**
+ * Styling for EntityGraphView.tsx (M5 task 17) — §7.4's entity graph.
+ *
+ * Every value below is a design token from web/src/styles/tokens.css. Nothing
+ * here is a literal colour, type size, or timing of its own: §7.1 puts them in
+ * one place so a native shell can reuse them, and CLAUDE.md records that the
+ * current palette is a PROPOSAL, which makes "retuning is a one-file edit" a
+ * property worth keeping rather than a slogan.
+ *
+ * The SVG is styled from here rather than with presentation attributes on the
+ * elements, for exactly that reason — a literal `fill` on a `<circle>` would be
+ * a hardcoded palette in the one place nobody thinks to look. Geometry (`cx`,
+ * `r`, `stroke-width`) stays on the elements, because that is layout and it
+ * comes from lib/entityRadial.ts.
+ *
+ * (An earlier draft of this very comment quoted an accent hex value as an
+ * example of what not to write, and the no-hardcoded-colour test caught it.)
+ *
+ * `web/tests/EntityGraphView.test.tsx` checks both directions of the
+ * component/stylesheet name agreement. jsdom parses no stylesheet, so a typo
+ * in a selector here is invisible to every other test in this feature.
+ */
+
+.entity-graph {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.entity-graph__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.entity-graph__picker-label {
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.entity-graph__picker {
+  flex: 1 1 14rem;
+  min-width: 0;
+  padding: 0 var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.entity-graph__picker:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.entity-graph__close {
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.entity-graph__close:hover {
+  border-color: var(--color-accent);
+}
+
+/* The threshold sentence. Dim, because it is standing context rather than a
+   warning -- but always present, because the whole argument for drawing 176
+   nodes instead of 3,474 rests on the reader being told which is which. */
+.entity-graph__threshold,
+.entity-graph__neighbour-note {
+  margin: 0;
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.entity-graph__status {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.entity-graph__status--error {
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+/* ---- the ring ---- */
+
+.entity-graph__svg {
+  width: 100%;
+  /* Bounded so the ring does not become a wall-sized circle on a 27-inch
+     display, where a 760-unit viewBox would scale the 11px labels to 30px. */
+  max-width: 48rem;
+  height: auto;
+  align-self: center;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.entity-graph__edge {
+  stroke: var(--color-border-strong);
+  /* Chords between neighbours are the structure BEHIND the answer, so they
+     recede; the spokes below are the answer itself. */
+  stroke-opacity: 0.55;
+}
+
+.entity-graph__edge--to-focus {
+  stroke: var(--color-accent-dim);
+  stroke-opacity: 1;
+}
+
+.entity-graph__node {
+  cursor: pointer;
+}
+
+.entity-graph__node--focus {
+  cursor: default;
+}
+
+.entity-graph__node-dot {
+  fill: var(--color-surface-raised);
+  stroke: var(--color-border-strong);
+  stroke-width: 1;
+  transition: stroke var(--motion-fast) var(--motion-ease);
+}
+
+.entity-graph__node:hover .entity-graph__node-dot {
+  stroke: var(--color-accent);
+}
+
+/* The focus is the ops-wall accent -- the same "this is the signal" hue the
+   dashboard already spends on focus rings and links. */
+.entity-graph__node--focus .entity-graph__node-dot {
+  fill: var(--color-accent-dim);
+  stroke: var(--color-accent);
+}
+
+.entity-graph__node-label {
+  fill: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.entity-graph__node--focus .entity-graph__node-label {
+  fill: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+}
+
+/* ---- the ranked adjacency list: the whole view below the lane breakpoint ---- */
+
+.entity-graph__related-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.entity-graph__related {
+  display: block;
+}
+
+.entity-graph__related-button {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-ease);
+}
+
+.entity-graph__related-button:hover,
+.entity-graph__related-button:focus-visible {
+  border-color: var(--color-accent);
+}
+
+.entity-graph__related-entity {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Never truncated here, unlike the ring label: this list is the only place
+     the full name is guaranteed to be readable, and on a phone it is the only
+     place the name appears at all. */
+  overflow-wrap: anywhere;
+}
+
+.entity-graph__related-shared {
+  color: var(--color-accent);
+  font-size: var(--text-xs);
+}
+
+.entity-graph__related-total {
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+}

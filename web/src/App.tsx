@@ -6,6 +6,7 @@ import { Stream } from './components/Stream.tsx';
 import { LaneBoard } from './components/LaneBoard.tsx';
 import { SearchView } from './components/SearchView.tsx';
 import { SourceHealthPage } from './components/SourceHealthPage.tsx';
+import { EntityGraphView } from './components/EntityGraphView.tsx';
 import { useIsWideViewport } from './lib/viewport.ts';
 
 /**
@@ -21,16 +22,22 @@ interface DashboardHeader {
 }
 
 /**
- * Which of the three views is showing. Deliberately a small union in state
- * rather than a router: the app has three views, and adding a routing
+ * Which of the four views is showing. Deliberately a small union in state
+ * rather than a router: the app has four views, and adding a routing
  * dependency for that is not justified (M3 task 11's brief said as much).
  *
  * `search` and `sources` were built standalone by task 11 while task 10 owned
  * App.tsx for the six-lane layout -- the same central-wiring pattern Wave 2's
  * routes used, where parallel tasks each export a component and one commit
  * mounts them.
+ *
+ * `entities` is M5 task 17's §7.4 graph, mounted here in the same commit that
+ * built it rather than left for someone to notice. CLAUDE.md's table of
+ * unreachable components opens with `registerItems` -- a correctly-built,
+ * fully-tested component with no mount point -- and a view that is not in this
+ * union is exactly that shape.
  */
-type View = 'items' | 'search' | 'sources';
+type View = 'items' | 'search' | 'sources' | 'entities';
 
 type LoadState =
   | { status: 'loading' }
@@ -113,6 +120,14 @@ function Dashboard() {
         </button>
         <button
           type="button"
+          className={`shell__nav-button${view === 'entities' ? ' shell__nav-button--active' : ''}`}
+          aria-current={view === 'entities' ? 'page' : undefined}
+          onClick={() => setView('entities')}
+        >
+          entities
+        </button>
+        <button
+          type="button"
           className={`shell__nav-button${view === 'sources' ? ' shell__nav-button--active' : ''}`}
           aria-current={view === 'sources' ? 'page' : undefined}
           onClick={() => setView('sources')}
@@ -143,6 +158,14 @@ function Dashboard() {
           rather than asserting it away. */}
       {token && view === 'search' && (
         <SearchView
+          token={token}
+          onUnauthorized={() => setToken(null)}
+          onClose={() => setView('items')}
+        />
+      )}
+
+      {token && view === 'entities' && (
+        <EntityGraphView
           token={token}
           onUnauthorized={() => setToken(null)}
           onClose={() => setView('items')}

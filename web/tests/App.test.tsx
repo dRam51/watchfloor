@@ -203,4 +203,67 @@ describe('App -- responsive arrangement (M3 task 10): Stream and LaneBoard are n
     expect(el.querySelector('.stream')).toBeNull();
     expect(el.querySelectorAll('.lane')).toHaveLength(6);
   });
+
+  // -------------------------------------------------------------------------
+  // M5 task 17 -- §7.4's entity graph. The BEHAVIOURAL half of the mount pin;
+  // web/tests/EntityGraphView.test.tsx checks App.tsx's source for the import
+  // and the element, and this checks that the affordance actually reaches it.
+  //
+  // CLAUDE.md's table of unreachable components opens with `registerItems`: a
+  // correctly-built, fully-tested component with nothing wired to it. A view
+  // whose own test file is green while no nav button mounts it is that shape
+  // exactly, and EntityGraphView.test.tsx alone cannot see it.
+  // -------------------------------------------------------------------------
+
+  it('reaches the entity graph from the nav, and it queries the real endpoint', async () => {
+    const fetchSpy = vi.fn((url: string) => {
+      if (url.startsWith('/api/entities/graph')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            entity: 'OpenAI',
+            known: true,
+            minItems: 2,
+            nodes: [{ entity: 'OpenAI', itemCount: 582, focus: true, sharedItemsWithFocus: null }],
+            edges: [],
+            neighbours: { shown: 0, aboveThreshold: 0, hiddenBelowThreshold: 0 },
+            corpus: { entitiesTotal: 3474, entitiesAtOrAboveThreshold: 176, entitiesBelowThreshold: 3298 },
+          }),
+        });
+      }
+      if (url.startsWith('/api/entities')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            minItems: 2,
+            limit: 200,
+            entitiesTotal: 3474,
+            entitiesAtOrAboveThreshold: 176,
+            entitiesBelowThreshold: 3298,
+            entities: [{ entity: 'OpenAI', itemCount: 582 }],
+          }),
+        });
+      }
+      return stubFetchForBothViews()(url);
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const el = mount();
+    await signIn(el);
+
+    const nav = [...el.querySelectorAll('.shell__nav-button')].find(
+      (b) => b.textContent?.trim() === 'entities',
+    ) as HTMLButtonElement | undefined;
+    expect(nav, 'App has no nav affordance that mounts the entity graph').toBeDefined();
+
+    await act(async () => {
+      nav!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+
+    expect(el.querySelector('.entity-graph')).not.toBeNull();
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).startsWith('/api/entities'))).toBe(true);
+    // The threshold reaches the screen, not just the response.
+    expect(el.textContent).toContain('3,474');
+  });
 });
