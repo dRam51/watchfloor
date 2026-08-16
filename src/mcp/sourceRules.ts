@@ -192,3 +192,46 @@ export function findForbiddenImports(files: readonly SourceFile[]): SourceFindin
     { label: 'the api package', re: /from\s+['"][^'"]*\bapi\/[^'"]*['"]/ },
   ]);
 }
+
+// ---------------------------------------------------------------------------
+// 5. No way out to the network (M5 task 11)
+// ---------------------------------------------------------------------------
+/**
+ * The other half of rule 4. That one keeps the *dashboard* out of this
+ * process's module graph; this one keeps the *poller* out, and closes the
+ * remaining direction a read-only server could acquire reach.
+ *
+ * It was written because task 11 declined a one-line convenience on exactly
+ * this ground and nothing was enforcing it: `get_source_health` needs
+ * `poll_interval` in milliseconds, and `src/scheduler/run.ts` exports a parser
+ * for it — but that module imports `src/fetch/robots.ts`, so the import would
+ * have put an HTTP client in the bot's graph to save six lines of arithmetic.
+ * A decision defended only in a comment is one the next person reverses, so it
+ * is a rule now, and the duplicated parser is pinned against the original by a
+ * test instead.
+ *
+ * `node:https` and the global `fetch` are included for the blunt reason: a
+ * process that cannot construct an outbound request cannot leak a corpus to
+ * one, whatever a future tool author intends. `node:sqlite`, `node:crypto`,
+ * `node:fs` reads and `node:path` are untouched.
+ */
+export function findNetworkReach(files: readonly SourceFile[]): SourceFinding[] {
+  return scanLines(files, [
+    { label: 'the fetch package', re: /from\s+['"][^'"]*\bfetch\/[^'"]*['"]/ },
+    { label: 'the adapters package', re: /from\s+['"][^'"]*\badapters\/[^'"]*['"]/ },
+    { label: 'the scheduler package', re: /from\s+['"][^'"]*\bscheduler\/[^'"]*['"]/ },
+    { label: 'the ingest package', re: /from\s+['"][^'"]*\bingest\/[^'"]*['"]/ },
+    { label: 'a node network module', re: /from\s+['"]node:(?:http|https|net|tls|dgram|dns)['"]/ },
+    { label: 'undici', re: /from\s+['"]undici['"]/ },
+    { label: 'the global fetch', re: /\bfetch\s*\(/ },
+    // Assembled from fragments, not written as a literal. Every other pattern
+    // here contains a regex escape (`\s`, `\/`, `\b` mid-token) that stops it
+    // matching its own definition line; this one is a bare identifier and DID
+    // match, reporting src/mcp/sourceRules.ts as reaching for the network. That
+    // is the FOURTH occurrence of a source rule matching its own explanation in
+    // this project -- src/vault/sourceRules.ts twice in one day, then
+    // findParameterProperties, now this. `stripComments` does not help, because
+    // the offending text is code.
+    { label: 'a browser http client', re: new RegExp(`\\b${'XML'}${'HttpRequest'}\\b`) },
+  ]);
+}

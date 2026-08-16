@@ -8,7 +8,7 @@
  * > their own synthetic-input tests, so this file can prove the detector works
  * > BEFORE trusting what it reports about the real tree."*
  *
- * Four rules, and every one of them exists because breaking it is invisible to
+ * Five rules, and every one of them exists because breaking it is invisible to
  * an ordinary unit test:
  *
  * 1. **No TypeScript parameter properties.** Node 26 runs `src/bin/*.ts`
@@ -24,6 +24,12 @@
  *    gets no write path."* Not "no write happens" — no write is possible.
  * 4. **No filesystem writes, and no import of the HTTP server.** The same
  *    boundary, extended to the two other ways a process acquires reach.
+ * 5. **No route to the network** (M5 task 11). The poller's half of rule 4: no
+ *    `src/fetch`, `src/adapters`, `src/scheduler` or `src/ingest` import, no
+ *    node network module, no global `fetch`. Written because task 11 declined
+ *    a convenient `parsePollIntervalMs` import on exactly this ground and
+ *    nothing was enforcing it — a decision defended only in a comment is one
+ *    the next person reverses.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -32,6 +38,7 @@ import { join, relative } from 'node:path';
 import {
   findFilesystemWrites,
   findForbiddenImports,
+  findNetworkReach,
   findParameterProperties,
   findStdoutWrites,
   findWritableDatabaseOpens,
@@ -177,6 +184,53 @@ describe('findForbiddenImports', () => {
   });
 });
 
+describe('findNetworkReach', () => {
+  it.each([
+    ["import { fetchRobots } from '../fetch/robots.ts';", 'the fetch package'],
+    ["import type { Adapter } from '../adapters/types.ts';", 'the adapters package'],
+    ["import { parsePollIntervalMs } from '../scheduler/run.ts';", 'the scheduler package'],
+    ["import { request } from 'node:https';", 'a node network module'],
+    ['const res = await fetch(url);', 'the global fetch'],
+    ['const xhr = new XMLHttpRequest();', 'a browser http client'],
+  ])('flags %s', (line, label) => {
+    const found = findNetworkReach([{ path: 'a.ts', text: line }]);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.rule).toBe(label);
+  });
+
+  // The one that would have been the real regression: task 11 wanted exactly
+  // this import for a six-line arithmetic helper.
+  it('flags the scheduler import task 11 declined, which drags an HTTP client in behind it', () => {
+    expect(findNetworkReach([{ path: 'a.ts', text: "import { parsePollIntervalMs } from '../../scheduler/run.ts';" }])).toHaveLength(1);
+  });
+
+  it('does not flag the reads and the database this process genuinely needs', () => {
+    const text = [
+      "import { openDb } from '../db/connection.ts';",
+      "import { loadSourcesFile } from '../sources/load.ts';",
+      "import { computeDecayFactor } from '../score/decay.ts';",
+      "import { readFileSync } from 'node:fs';",
+      "import { createHash } from 'node:crypto';",
+      'const row = corpus.get("select fetched_at as fetched_at from items");',
+    ].join('\n');
+    expect(findNetworkReach([{ path: 'a.ts', text }])).toEqual([]);
+  });
+
+  it('does not flag prose about fetch() in a comment', () => {
+    expect(findNetworkReach([{ path: 'a.ts', text: ' * a stray fetch() would give the bot reach' }])).toEqual([]);
+  });
+
+  // The fourth occurrence of a source rule matching its own explanation in this
+  // project. The browser-client pattern is a bare identifier with no regex
+  // escape to break the self-match, so written as a literal it reported
+  // src/mcp/sourceRules.ts itself -- as code, so blanking comments does not
+  // help. It is assembled from string fragments now.
+  it('does not flag its own definition — the self-match this project keeps rediscovering', () => {
+    const own = readFileSync(join(repoRoot, 'src', 'mcp', 'sourceRules.ts'), 'utf8');
+    expect(findNetworkReach([{ path: 'src/mcp/sourceRules.ts', text: own }])).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ...and now the real tree
 // ---------------------------------------------------------------------------
@@ -218,5 +272,9 @@ describe('the MCP package itself', () => {
 
   it('does not import the HTTP server it is isolated from', () => {
     expect(findForbiddenImports(mcpSources())).toEqual([]);
+  });
+
+  it('has no route to the network: no poller, no adapter, no http client, no global fetch', () => {
+    expect(findNetworkReach(mcpSources())).toEqual([]);
   });
 });
