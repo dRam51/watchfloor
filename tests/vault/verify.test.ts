@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { verifyVault, type VaultFinding } from '../../src/vault/verify.ts';
+import { readSavedIndex, verifyVault, type VaultFinding } from '../../src/vault/verify.ts';
+import { closeDb, openDb } from '../../src/db/connection.ts';
+import { runMigrations } from '../../src/db/migrate.ts';
+import { insertItem } from '../../src/domain/item.ts';
+import { saveItem } from '../../src/domain/itemState.ts';
 import { renderManagedNote, WATCHFLOOR_BEGIN_MARKER, WATCHFLOOR_END_MARKER } from '../../src/vault/frontmatter.ts';
 import { openVaultSession, VAULT_TEMP_PREFIX } from '../../src/vault/session.ts';
 import { WIN32K_GROUP } from './corpus.ts';
@@ -478,5 +483,69 @@ describe('verifyVault — the corpus view', () => {
       ],
     });
     expect(report.findings.map((f) => f.code)).not.toContain('saved_note_missing');
+  });
+});
+
+/**
+ * The one database read in this module.
+ *
+ * Verify's two corpus checks need "every item the corpus says is saved", and
+ * putting that query in the CLI would mean the check's input is assembled by
+ * whoever calls it. Real temp-file SQLite, real migrations, no mocks.
+ */
+describe('readSavedIndex', () => {
+  const openDbs: Array<ReturnType<typeof openDb>> = [];
+  afterEach(() => {
+    while (openDbs.length) closeDb(openDbs.pop()!);
+  });
+
+  function migratedDb() {
+    const db = openDb(join(mkdtempSync(join(tmpdir(), 'wf-verify-')), 'wf.db'));
+    openDbs.push(db);
+    runMigrations(db, join(process.cwd(), 'db', 'migrations'));
+    return db;
+  }
+
+  function insert(db: ReturnType<typeof openDb>, row: (typeof WIN32K_GROUP)[number]): string {
+    // The real NewItem shape: `item_key` is DERIVED from the canonical URL, not
+    // supplied, so the key under test is whatever insertItem returns.
+    return insertItem(db, {
+      url: row.canonicalUrl,
+      canonicalUrl: row.canonicalUrl,
+      title: row.title,
+      sourceId: row.sourceId,
+      itemType: 'analysis',
+      beats: [...row.beats],
+      entities: [],
+      publishedAt: null,
+      fetchedAt: '2026-08-15T00:00:00.000Z',
+      summaryRaw: null,
+      rawJson: '{}',
+    }).item_key;
+  }
+
+  it('returns one entry per saved item, with the title the note would carry', () => {
+    const db = migratedDb();
+    const savedKey = insert(db, WIN32K_GROUP[0]!);
+    insert(db, WIN32K_GROUP[1]!);
+    saveItem(db, savedKey, '2026-08-15T09:30:00.000Z');
+
+    const index = readSavedIndex(db);
+    expect(index.map((e) => e.itemKey)).toEqual([savedKey]);
+    expect(index[0]?.title).toBe(WIN32K_GROUP[0]!.title);
+    expect(index[0]?.savedAt).toBe('2026-08-15T09:30:00.000Z');
+  });
+
+  it('is empty when nothing is saved, which is the state today', () => {
+    const db = migratedDb();
+    insert(db, WIN32K_GROUP[0]!);
+    expect(readSavedIndex(db)).toEqual([]);
+  });
+
+  it('skips a saved key whose item was never stored, rather than inventing a title', () => {
+    // `item_state` is keyed on item_key and carries no foreign key to `items`.
+    const db = migratedDb();
+    saveItem(db, 'f'.repeat(64), '2026-08-15T09:30:00.000Z');
+    expect(readSavedIndex(db)).toEqual([]);
   });
 });

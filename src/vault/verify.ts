@@ -48,6 +48,8 @@ import {
   splitManagedBlock,
   type WatchfloorFrontmatter,
 } from './frontmatter.ts';
+import type { Db } from '../db/connection.ts';
+import { getCurrentItem } from '../domain/item.ts';
 import { checkVaultMount } from './mount.ts';
 import { VAULT_AREAS, vaultAreaOf, type VaultArea, type VaultTier } from './paths.ts';
 import { savedNotePath, type SavedItem } from './saved.ts';
@@ -148,6 +150,36 @@ export interface SavedIndexEntry {
   readonly itemKey: string;
   readonly title: string;
   readonly savedAt: string;
+}
+
+/**
+ * Every item the corpus says is saved, in the shape the filename rule needs.
+ *
+ * The title comes from the **current** version, which is what `readSavedItem`
+ * uses when it promotes an item — so this index answers "what filename would
+ * this item get if it were saved now", which is exactly the question the
+ * collision check asks. A note already on disk is matched by key, never by
+ * this recomputed name; see {@link classifySavedNotes}.
+ *
+ * A saved key with no item row is skipped rather than given an invented title:
+ * `item_state` is keyed on `item_key` and carries no foreign key into `items`,
+ * so the combination is representable.
+ */
+export function readSavedIndex(db: Db): SavedIndexEntry[] {
+  // The `node:sqlite` cast quirk (CLAUDE.md): an inline type literal passes
+  // where a named interface array target raises TS2352. Leave this as a
+  // literal — tidying it into a named type reintroduces the error.
+  const rows = db
+    .prepare('select item_key, saved_at from item_state where saved_at is not null order by item_key')
+    .all() as Array<{ item_key: string; saved_at: string }>;
+
+  const index: SavedIndexEntry[] = [];
+  for (const row of rows) {
+    const current = getCurrentItem(db, row.item_key);
+    if (current === null) continue;
+    index.push({ itemKey: row.item_key, title: current.title, savedAt: row.saved_at });
+  }
+  return index;
 }
 
 const AREA_TIERS: Readonly<Record<VaultArea, VaultTier>> = {
