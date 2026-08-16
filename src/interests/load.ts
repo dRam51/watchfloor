@@ -150,15 +150,26 @@ const WORD_CHAR = String.raw`[\p{L}\p{N}_]`;
  *    "Hall of Famers". Each inflected form that matters needs its own
  *    config entry -- see config/interests.yaml's sports section, which lists
  *    "homer" and "homers" as separate entries for exactly this reason.
+ *
+ * `caseSensitive` (M5 task 16, additive -- the default is unchanged) exists
+ * for the ENTITY gazetteer, not for interests. Interest terms are ordinary
+ * vocabulary, where a headline's Title Case is orthography; entity names are
+ * proper nouns and product identifiers where capitalisation IS the identity.
+ * Measured against the live corpus, case-insensitively matching `iOS` also
+ * matches 47 Cisco **IOS** advisories, `Progress` matches 31 occurrences of
+ * the common noun, and `SEC` matches `Sec-WebSocket-Key`. See
+ * `src/entities/rules.ts`. Nothing about the boundary semantics changes --
+ * that logic is hard-won (the `evalúan` bug) and is deliberately shared rather
+ * than reimplemented next door.
  */
-export function buildTermRegex(term: string): RegExp {
+export function buildTermRegex(term: string, options?: { caseSensitive?: boolean }): RegExp {
   const words = term
     .trim()
     .split(/[\s-]+/)
     .filter((w) => w.length > 0)
     .map(escapeRegExp);
   const pattern = words.join('[\\s-]+');
-  return new RegExp(`(?<!${WORD_CHAR})${pattern}(?!${WORD_CHAR})`, 'iu');
+  return new RegExp(`(?<!${WORD_CHAR})${pattern}(?!${WORD_CHAR})`, options?.caseSensitive === true ? 'u' : 'iu');
 }
 
 /** True if `term` appears in `text` as a whole word or whole phrase. */

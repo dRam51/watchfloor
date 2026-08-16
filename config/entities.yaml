@@ -1,0 +1,305 @@
+# Entity extraction rules (M5 task 16). Validated by src/entities/rules.ts;
+# a malformed entry stops the process rather than failing silently at ingest.
+#
+# Adding an entity is a CONFIG edit, never a code change -- the same rule
+# config/sources.yaml and config/interests.yaml follow.
+#
+# Editing this file changes the ruleset VERSION (a content digest, see
+# src/entities/rules.ts), which re-opens EVERY already-stored item for
+# re-extraction on the next ingest. That is the point: without it, a term added
+# here would only ever apply to items ingested afterwards, and the corpus
+# already in the database would keep whatever the rules said the day it
+# arrived.
+#
+# ===========================================================================
+# WHAT IS AN ENTITY HERE
+# ===========================================================================
+#
+#   org        companies, agencies, labs, foundations   Microsoft, CISA, OpenAI
+#   product    named software, hardware, models         Windows, iOS, Llama
+#   concept    techniques and research topics           prompt injection, RAG
+#   identifier external ids -- from `patterns` below,   CVE-2026-20349, CWE-79
+#              never from this list
+#
+# DELIBERATELY EXCLUDED, with the reason:
+#
+#   People.    Needs real NER. A gazetteer of person names is unmaintainable,
+#              and person-name false positives are the worst kind ("Claude"
+#              Shannon inside a paper about Claude the model).
+#   Places.    `items` already carries lat/lon/geo_confidence and there is an
+#              `item_locations` table. Geography is a different subsystem
+#              (§7's map, M7), not this one.
+#   Bare tickers. config/portfolio.yaml does not exist and is the owner's to
+#              write. Two-to-five-letter uppercase symbols collide
+#              catastrophically -- AI, IT, ALL, ON, NOW, KEY, CAT, ARM and META
+#              are all real tickers and all ordinary words or other entities.
+#              A ticker may appear as an ALIAS of the company whose canonical
+#              name is the org (NVDA -> NVIDIA), which is how the brief's own
+#              `NVDA` example is honoured without a ticker taxonomy. An entity
+#              is a research label; it is never directional and never a
+#              position (CLAUDE.md's markets rule).
+#   Vulnerability IMPACT CLASSES as phrases ("remote code execution", "denial
+#              of service", "cross-site scripting", "privilege escalation",
+#              "buffer overflow", "path traversal", "SQL injection",
+#              "command injection", "authentication bypass", "use-after-free").
+#              Measured against data/wf.db (7,267 items): every one of them is
+#              74-96% concentrated in a SINGLE source's title formula --
+#              cisa-kev writes "{vendor} {product} {CWE name} Vulnerability" for
+#              all 1,665 of its rows. "Remote code execution" matches 412 items,
+#              375 of them cisa-kev boilerplate. An entity note listing 412
+#              unrelated CVEs is M2's clustering bug in a new costume: it was
+#              transitive single-linkage over formulaic CVE titles that chained
+#              1,543 unrelated records into one cluster and PROMOTED churn.
+#              Vulnerability classes enter this system as CWE identifiers, when
+#              a source actually states one -- an id the source asserted, not a
+#              phrase we inferred from its title template.
+#
+# ===========================================================================
+# MATCHING
+# ===========================================================================
+#
+# Whole-word / whole-phrase, Unicode-aware, hyphens and spaces
+# interchangeable -- the same matcher config/interests.yaml uses
+# (src/interests/load.ts buildTermRegex), reused rather than reimplemented.
+#
+#   match: exact   (THE DEFAULT) case-sensitive
+#   match: loose   case-insensitive
+#
+# Exact is the default because entity names are proper nouns and product
+# identifiers where capitalisation IS the identity. Measured against
+# data/wf.db, loose vs exact:
+#
+#   iOS       139 -> 92   the 47 lost are Cisco IOS / IOS XE router software
+#   Progress   44 -> 13   the 31 lost are "in progress", "remarkable progress"
+#   Meta       24 -> 16   the 8 lost are "meta-learning", "meta tags"
+#   SEC         6 ->  1   the 5 lost are "Sec-WebSocket-Key", "20 sec"
+#
+# Use `loose` for ordinary multi-word vocabulary, where Title Case in a
+# headline is orthography rather than meaning: "prompt injection" matches 2
+# items exact and 28 loose.
+#
+# `beats:` is optional and means "only attribute this entity on these beats".
+# It exists for one measured, otherwise-unfixable false positive: the live
+# corpus carries "Army pauses Apache helicopter training missions after crash"
+# (ap-news) and a pbs-newshour variant. Both capitalise Apache, so case does
+# not separate them from the 62 Apache Software Foundation matches. Use it
+# sparingly -- an over-narrow scope silently loses real attributions.
+#
+# ===========================================================================
+# WHERE EACH KIND OF RULE READS FROM
+# ===========================================================================
+#
+#   patterns    title + summary + canonical URL
+#   entities    title + summary ONLY
+#
+# The URL is included for identifiers because cisa-kev states its CVE id
+# NOWHERE ELSE -- its title is prose and its summary is prose, and the id lives
+# in the canonical URL's query string. Including it takes CVE coverage from
+# 1,694 items / 931 distinct ids to 3,307 / 2,538.
+#
+# The URL is EXCLUDED for the gazetteer because a hostname is a fact about the
+# source, not a claim about the content: openai.com would attribute OpenAI to
+# all 1,129 openai-blog items whether or not the post is about OpenAI.
+
+patterns:
+  - cve
+  - cwe
+
+entities:
+  # =========================================================================
+  # Vendors and platforms. Seeded from cisa-kev's own `vendorProject` field
+  # (276 distinct values across 1,665 real rows) -- an authoritative list, not
+  # a guess. The head of that distribution is Microsoft 383, Cisco 96,
+  # Apple 93, Adobe 80, Google 72, Oracle 45, Apache 40, Ivanti 35.
+  # =========================================================================
+  - { name: Microsoft, type: org, aliases: [Microsoft, MSFT] }
+  - { name: Cisco, type: org, aliases: [Cisco] }
+  - { name: Apple, type: org, aliases: [Apple, AAPL] }
+  - { name: Adobe, type: org, aliases: [Adobe] }
+  - { name: Google, type: org, aliases: [Google, Alphabet, GOOGL] }
+  - { name: Oracle, type: org, aliases: [Oracle] }
+  # Beat-scoped: see the header. "Apache" the helicopter appears twice in the
+  # live corpus, both on usnews.
+  - name: Apache Software Foundation
+    type: org
+    beats: [cyber, aisec, ai, repos]
+    aliases: [Apache]
+  - { name: Ivanti, type: org, aliases: [Ivanti] }
+  - { name: Fortinet, type: org, aliases: [Fortinet, FortiOS, FortiGate] }
+  - { name: VMware, type: org, aliases: [VMware] }
+  - { name: Citrix, type: org, aliases: [Citrix] }
+  - { name: SonicWall, type: org, aliases: [SonicWall] }
+  - { name: Palo Alto Networks, type: org, aliases: [Palo Alto Networks, PAN-OS] }
+  - { name: Samsung, type: org, aliases: [Samsung] }
+  - { name: SAP, type: org, aliases: [SAP] }
+  - { name: Mozilla, type: org, aliases: [Mozilla] }
+  - { name: Atlassian, type: org, aliases: [Atlassian] }
+  - { name: Trend Micro, type: org, aliases: [Trend Micro] }
+  - { name: Qualcomm, type: org, aliases: [Qualcomm] }
+  - { name: Zyxel, type: org, aliases: [Zyxel] }
+  - { name: SolarWinds, type: org, aliases: [SolarWinds] }
+  - { name: QNAP, type: org, aliases: [QNAP] }
+  - { name: Zoho, type: org, aliases: [Zoho, ManageEngine] }
+  - { name: IBM, type: org, aliases: [IBM] }
+  - { name: D-Link, type: org, aliases: [D-Link] }
+  - { name: TP-Link, type: org, aliases: [TP-Link] }
+  - { name: Netgear, type: org, aliases: [Netgear] }
+  - { name: Dell, type: org, aliases: [Dell] }
+  - { name: Broadcom, type: org, aliases: [Broadcom] }
+  - { name: JetBrains, type: org, aliases: [JetBrains] }
+  - { name: Check Point, type: org, aliases: [Check Point] }
+  # "Progress" is an ordinary English word; exact matching is what makes this
+  # entry safe (44 loose -> 13 exact, every one of the 31 lost a common noun).
+  - { name: Progress Software, type: org, aliases: [Progress Software, Progress] }
+  - { name: Juniper Networks, type: org, aliases: [Juniper Networks, Juniper, Junos, ScreenOS] }
+  - { name: Arista Networks, type: org, aliases: [Arista Networks, Arista] }
+  - { name: HPE, type: org, aliases: [HPE, Hewlett Packard Enterprise] }
+  - { name: Salesforce, type: org, aliases: [Salesforce] }
+  - { name: WordPress, type: product, aliases: [WordPress] }
+  - { name: GitHub, type: org, aliases: [GitHub] }
+  - { name: Intel, type: org, aliases: [Intel] }
+  - { name: AMD, type: org, aliases: [AMD] }
+  - { name: NVIDIA, type: org, aliases: [NVIDIA, Nvidia, NVDA] }
+  - { name: Amazon, type: org, aliases: [Amazon, AWS, Amazon Web Services] }
+
+  # =========================================================================
+  # AI labs and platforms.
+  # =========================================================================
+  - { name: OpenAI, type: org, aliases: [OpenAI] }
+  - { name: Anthropic, type: org, aliases: [Anthropic] }
+  # "Meta" needs exact matching for the same reason "Progress" does.
+  - { name: Meta, type: org, aliases: [Meta, Meta Platforms] }
+  - { name: Google DeepMind, type: org, aliases: [Google DeepMind, DeepMind, GDM] }
+  - { name: Hugging Face, type: org, aliases: [Hugging Face, HuggingFace] }
+  - { name: Mistral AI, type: org, aliases: [Mistral AI, Mistral] }
+  - { name: Stability AI, type: org, aliases: [Stability AI] }
+  - { name: Cohere, type: org, aliases: [Cohere] }
+  - { name: xAI, type: org, aliases: [xAI] }
+
+  # =========================================================================
+  # Agencies, standards bodies, policy actors.
+  # =========================================================================
+  - { name: CISA, type: org, aliases: [CISA, Cybersecurity and Infrastructure Security Agency] }
+  - { name: NIST, type: org, aliases: [NIST] }
+  - { name: MITRE, type: org, aliases: [MITRE] }
+  - { name: OWASP, type: org, aliases: [OWASP] }
+  - { name: FBI, type: org, aliases: [FBI] }
+  - { name: NSA, type: org, aliases: [NSA] }
+  - { name: FTC, type: org, aliases: [FTC] }
+  # "SEC" is only safe exact-cased: loose also matches "Sec-WebSocket-Key",
+  # "20 sec" and the repo name "claudit-sec".
+  - { name: SEC, type: org, aliases: [SEC, Securities and Exchange Commission] }
+  - { name: FCC, type: org, aliases: [FCC] }
+  - { name: White House, type: org, aliases: [White House] }
+  - { name: European Union, type: org, aliases: [European Union, EU] }
+  - { name: United Nations, type: org, aliases: [United Nations] }
+
+  # =========================================================================
+  # Products, platforms and models.
+  # =========================================================================
+  - { name: Windows, type: product, aliases: [Windows] }
+  - { name: Microsoft Office, type: product, aliases: [Microsoft Office] }
+  - { name: SharePoint, type: product, aliases: [SharePoint] }
+  - { name: Microsoft Exchange, type: product, aliases: [Microsoft Exchange, Exchange Server] }
+  - { name: Chrome, type: product, aliases: [Chrome, Chromium] }
+  - { name: Android, type: product, aliases: [Android] }
+  # Exact-cased is load-bearing here: loose "iOS" also matches Cisco IOS and
+  # IOS XE, 47 real items in the live corpus.
+  - { name: iOS, type: product, aliases: [iOS, iPadOS] }
+  - { name: macOS, type: product, aliases: [macOS] }
+  - { name: Linux, type: product, aliases: [Linux] }
+  - { name: Kubernetes, type: product, aliases: [Kubernetes] }
+  - { name: Docker, type: product, aliases: [Docker] }
+  - { name: PyTorch, type: product, aliases: [PyTorch] }
+  - { name: TensorFlow, type: product, aliases: [TensorFlow] }
+  - { name: ChatGPT, type: product, aliases: [ChatGPT] }
+  - { name: Claude, type: product, aliases: [Claude] }
+  - { name: Gemini, type: product, aliases: [Gemini] }
+  - { name: Llama, type: product, aliases: [Llama, LLaMA] }
+  - { name: GPT-4, type: product, aliases: [GPT-4, GPT-4o] }
+  - { name: GPT-5, type: product, aliases: [GPT-5] }
+  - { name: Copilot, type: product, aliases: [Copilot, GitHub Copilot] }
+  - { name: Ollama, type: product, aliases: [Ollama] }
+
+  # =========================================================================
+  # Concepts. `loose` throughout, because these are ordinary vocabulary whose
+  # headline capitalisation is orthography, not identity -- and each one below
+  # was checked for cross-source spread rather than single-source boilerplate.
+  # =========================================================================
+  - name: Prompt injection
+    type: concept
+    aliases: [{ term: prompt injection, match: loose }]
+  - name: Jailbreak
+    type: concept
+    aliases: [{ term: jailbreak, match: loose }, { term: jailbreaking, match: loose }]
+  - name: Ransomware
+    type: concept
+    aliases: [{ term: ransomware, match: loose }]
+  - name: Zero-day
+    type: concept
+    aliases: [{ term: zero-day, match: loose }, { term: 0-day, match: loose }]
+  - name: Phishing
+    type: concept
+    aliases: [{ term: phishing, match: loose }]
+  - name: Malware
+    type: concept
+    aliases: [{ term: malware, match: loose }]
+  - name: Backdoor
+    type: concept
+    aliases: [{ term: backdoor, match: loose }]
+  - name: Botnet
+    type: concept
+    aliases: [{ term: botnet, match: loose }]
+  - name: Spyware
+    type: concept
+    aliases: [{ term: spyware, match: loose }]
+  - name: Deepfake
+    type: concept
+    aliases: [{ term: deepfake, match: loose }, { term: deepfakes, match: loose }]
+  - name: Supply chain attack
+    type: concept
+    aliases: [{ term: supply chain attack, match: loose }, { term: supply chain compromise, match: loose }]
+  - name: Data breach
+    type: concept
+    aliases: [{ term: data breach, match: loose }]
+  # `LLM` stays EXACT: the acronym carries this entity (159 items) while the
+  # spelled-out phrase matches 15, and lowercase "llm" is not a word.
+  - { name: Large language model, type: concept, aliases: [LLM, LLMs, { term: large language model, match: loose }] }
+  - { name: Retrieval-augmented generation, type: concept, aliases: [RAG, { term: retrieval-augmented generation, match: loose }] }
+  - { name: Model Context Protocol, type: concept, aliases: [MCP, { term: model context protocol, match: loose }] }
+  - name: Agentic AI
+    type: concept
+    aliases: [{ term: agentic AI, match: loose }, { term: AI agents, match: loose }]
+  - name: Fine-tuning
+    type: concept
+    aliases: [{ term: fine-tuning, match: loose }]
+  - name: Reinforcement learning
+    type: concept
+    aliases: [{ term: reinforcement learning, match: loose }, RLHF]
+  - name: Multimodal
+    type: concept
+    aliases: [{ term: multimodal, match: loose }]
+  - name: Quantization
+    type: concept
+    aliases: [{ term: quantization, match: loose }]
+  - name: Mixture of experts
+    type: concept
+    aliases: [{ term: mixture of experts, match: loose }, MoE]
+  - name: Chain of thought
+    type: concept
+    aliases: [{ term: chain of thought, match: loose }]
+  - name: Distillation
+    type: concept
+    aliases: [{ term: distillation, match: loose }]
+  - name: Guardrails
+    type: concept
+    aliases: [{ term: guardrails, match: loose }]
+  - name: Red teaming
+    type: concept
+    aliases: [{ term: red teaming, match: loose }, { term: red-teaming, match: loose }]
+  - name: Open weights
+    type: concept
+    aliases: [{ term: open weights, match: loose }, { term: open-weight, match: loose }]
+  - name: EU AI Act
+    type: concept
+    aliases: [{ term: EU AI Act, match: loose }, { term: AI Act, match: loose }]
