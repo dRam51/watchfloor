@@ -1,8 +1,13 @@
 import type { Db } from '../db/connection.ts';
 import { getFetchState } from '../db/fetchState.ts';
-import { getDailyLlmUsage } from '../db/llmCallLog.ts';
+import { getDailyLlmUsage, getDailyLlmReachability } from '../db/llmCallLog.ts';
 import { localDay } from '../db/repoSnapshots.ts';
 import { isPaidAllowed } from '../cost/gate.ts';
+import { SERVICES, SPEND_CATEGORIES, type CostClass, type SpendCategory } from '../cost/registry.ts';
+import { OLLAMA_SERVICE_ID } from '../enrich/llm/ollama.ts';
+import { ANTHROPIC_SERVICE_ID } from '../enrich/llm/anthropic.ts';
+import type { LlmConfig } from '../enrich/llm/config.ts';
+import type { LlmBackendName, LlmUnavailableReason } from '../enrich/llm/types.ts';
 import { BEATS, type Beat } from './item.ts';
 import type { Source } from '../sources/load.ts';
 
@@ -303,4 +308,279 @@ export function getEnrichmentSpendToday(
     asOf: now,
     note: `${usage.calls} enrichment call(s) on ${day} (${tz}), ${usage.countedTokens} tokens counted, every cost measured. ${gateNote}.${suffix}`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment status -- §15's "the API returns a clear 'disabled by cost
+// policy' status, and the dashboard shows the feature as off" (M5 task 14)
+// ---------------------------------------------------------------------------
+
+/**
+ * ## Why this is a second field beside `enrichmentSpend`, not more of it
+ *
+ * §15 asks for three things when a paid path's flag is absent: the scheduler
+ * skips the job, the API says "disabled by cost policy", and the dashboard
+ * shows the feature as off. M5 task 2 built a backend that *reports*
+ * `disabled_by_cost_policy`; nothing rendered it, so §15 was only partly
+ * discharged.
+ *
+ * The obvious move was to widen `enrichmentSpend`. That would have been
+ * wrong. There are **three different facts** here, and the M5 plan's RULING 2
+ * makes two of them true at once in the shipped configuration:
+ *
+ *  1. the paid backend is **off by cost policy** — chosen, not broken;
+ *  2. enrichment spend is a **measured $0** — already published by
+ *     `enrichmentSpend`, and a real guarantee rather than a placeholder;
+ *  3. the **local backend is unreachable** — a real problem.
+ *
+ * Any two of those collapsed produces a dashboard that lies. Folding (1) into
+ * (2) makes "off" and "free" the same sentence, so enabling the paid backend
+ * would look like a fault; folding (3) into (1) makes a stopped Ollama
+ * indistinguishable from a deliberate configuration. So this object publishes
+ * (1) and (3), never (2) — {@link getEnrichmentSpendToday} owns the money, and
+ * two fields publishing one number are two fields that can disagree.
+ */
+
+/** One `WF_ALLOW_PAID_*` category, and whether it is open. */
+export interface PaidPathStatus {
+  category: SpendCategory;
+  /** The exact variable to set. Naming it is the whole remedy. */
+  flag: string;
+  state: 'enabled' | 'disabled_by_cost_policy';
+  /** True when `config/llm.yaml` selects a backend spending against it. */
+  selected: boolean;
+}
+
+/** The backend `config/llm.yaml` selects, and whether policy permits it. */
+export interface ConfiguredBackendStatus {
+  name: LlmBackendName;
+  /** `null` when the selected backend's config block names no model. */
+  model: string | null;
+  /** The `docs/costs.md` / `src/cost/registry.ts` row it spends against. */
+  serviceId: string;
+  costClass: CostClass;
+  /** `null` for a free-forever backend — it is gated on nothing. */
+  spendCategory: SpendCategory | null;
+  /**
+   * `disabled_by_cost_policy` means enrichment cannot run **at all**: the
+   * backend it was told to use is the one that is hard-disabled. Distinct
+   * from a paid path merely being off while a free backend does the work.
+   */
+  state: 'enabled' | 'disabled_by_cost_policy';
+}
+
+/**
+ * Whether a backend could be reached, **measured from the call ledger rather
+ * than probed**.
+ *
+ * A probe would be an outbound request issued by a dashboard render, which is
+ * both a latency cost on every page load and a fact about a moment nobody
+ * asked about. The ledger already records the answer for every call that was
+ * actually wanted.
+ */
+export interface EnrichmentReachability {
+  /**
+   * `unknown` is a real answer and must never be rendered as health: on the
+   * vault cadence a day with no enrichment call is ordinary.
+   */
+  status: 'reachable' | 'unreachable' | 'unknown';
+  /** The WF_TZ calendar day the evidence covers; `null` when there is none. */
+  day: string | null;
+  attempts: number;
+  reached: number;
+  unreached: number;
+  /** Cost-gate refusals. Counted, and deliberately NOT attempts. */
+  costPolicyRefusals: number;
+  /**
+   * The last attempt's unavailable reason, or `null` when it reached a
+   * backend. A **field**, not something to be parsed back out of `detail`:
+   * §7.1 keeps judgement server-side, and a frontend that regexes a sentence
+   * to decide what to show has moved that judgement into the client.
+   *
+   * Note it can be non-null while `status` is `reachable` -- `model_missing`
+   * and `http_error` both mean something answered. That pairing is the whole
+   * point (task 1: collapsing them "sends an operator to restart a healthy
+   * daemon").
+   */
+  reason: LlmUnavailableReason | null;
+  detail: string;
+}
+
+export interface EnrichmentStatus {
+  /** `null` when the caller supplied no `config/llm.yaml`. */
+  backend: ConfiguredBackendStatus | null;
+  /** Every paid category in the registry, not only the configured one. */
+  paidPaths: PaidPathStatus[];
+  reachability: EnrichmentReachability;
+  asOf: string;
+  note: string;
+}
+
+/**
+ * How the status is reached. Both optional, and both for the same reason
+ * {@link EnrichmentSpendSources} is: a caller with neither still gets the
+ * structural cost-gate answer, which is pure environment.
+ */
+export interface EnrichmentStatusSources {
+  /** The database holding `llm_call_log` (db/migrations/0009). */
+  db?: Db;
+  /** `config/llm.yaml`, loaded once at boot. */
+  llmConfig?: LlmConfig;
+}
+
+/**
+ * The service-registry row each backend spends against.
+ *
+ * Imported constants rather than string literals: `src/cost/registry.ts` is
+ * mirrored by `docs/costs.md` and a test asserts the two agree, so a backend
+ * pointing at an id that is not in the registry must be a compile-or-test
+ * failure rather than a silently unclassified service.
+ */
+const BACKEND_SERVICE_ID: Record<LlmBackendName, string> = {
+  ollama: OLLAMA_SERVICE_ID,
+  anthropic: ANTHROPIC_SERVICE_ID,
+};
+
+function configuredModel(config: LlmConfig): string | null {
+  if (config.backend === 'ollama') return config.ollama.model;
+  // The `anthropic:` block is an opaque passthrough at this layer (task 1
+  // could not validate a shape task 2 had not designed). Read defensively
+  // rather than calling parseAnthropicConfig: a malformed block must not
+  // throw out of a dashboard render, and "which model" is not the question
+  // this function exists to answer.
+  const model = (config.anthropic as { model?: unknown } | undefined)?.model;
+  return typeof model === 'string' && model !== '' ? model : null;
+}
+
+function describeBackend(config: LlmConfig, env: NodeJS.ProcessEnv): ConfiguredBackendStatus {
+  const serviceId = BACKEND_SERVICE_ID[config.backend];
+  const entry = SERVICES.find((service) => service.id === serviceId);
+  const costClass: CostClass = entry?.costClass ?? 'paid';
+  const spendCategory = entry?.category ?? null;
+  // A backend with no spend category is gated on nothing and is always
+  // enabled. Note the fallback above: an id missing from the registry is
+  // treated as PAID and therefore disabled, because the safe answer to "is
+  // this billable?" when nobody knows is yes.
+  const state =
+    spendCategory === null || isPaidAllowed(spendCategory, env)
+      ? 'enabled'
+      : 'disabled_by_cost_policy';
+  return {
+    name: config.backend,
+    model: configuredModel(config),
+    serviceId,
+    costClass,
+    spendCategory,
+    state,
+  };
+}
+
+const NO_LEDGER: EnrichmentReachability = {
+  status: 'unknown',
+  day: null,
+  attempts: 0,
+  reached: 0,
+  unreached: 0,
+  costPolicyRefusals: 0,
+  reason: null,
+  detail:
+    'no call ledger was supplied, so whether a backend can be reached is unknown -- unknown is not health.',
+};
+
+function describeReachability(
+  db: Db | undefined,
+  env: NodeJS.ProcessEnv,
+  now: string,
+): EnrichmentReachability {
+  if (db === undefined) return NO_LEDGER;
+
+  const tz = usableTimeZone(env);
+  if (tz === null) {
+    return {
+      ...NO_LEDGER,
+      detail:
+        'WF_TZ is missing or is not a valid IANA timezone, so the call ledger cannot be scoped to a day. Reporting unknown rather than reachability measured over the wrong span.',
+    };
+  }
+
+  const day = localDay(now, tz);
+  const measured = getDailyLlmReachability(db, day);
+
+  const refusals =
+    measured.costPolicyRefusals === 0
+      ? ''
+      : ` ${measured.costPolicyRefusals} call(s) were refused by the cost gate before any request and are NOT counted as attempts -- that is a configuration fact, not a reachability one.`;
+
+  if (measured.latest === null) {
+    return {
+      status: 'unknown',
+      day,
+      attempts: measured.attempts,
+      reached: measured.reached,
+      unreached: measured.unreached,
+      costPolicyRefusals: measured.costPolicyRefusals,
+      reason: null,
+      detail: `nothing tried to reach a backend on ${day} (${tz}), so its state is unknown. Enrichment runs on the vault cadence, so a quiet day is ordinary -- but it is not evidence of health.${refusals}`,
+    };
+  }
+
+  // The LATEST attempt decides, not the day's totals: a daemon that answered
+  // twenty times this morning and has refused every connection since noon is
+  // down now, and a majority vote would call it healthy.
+  const { latest } = measured;
+  return {
+    status: latest.reached ? 'reachable' : 'unreachable',
+    day,
+    attempts: measured.attempts,
+    reached: measured.reached,
+    unreached: measured.unreached,
+    costPolicyRefusals: measured.costPolicyRefusals,
+    reason: latest.reason,
+    detail: latest.reached
+      ? `the last attempt on ${day} (${tz}) reached ${latest.backend}/${latest.model} at ${latest.calledAt}` +
+        (latest.reason === null
+          ? '.'
+          : ` -- it answered '${latest.reason}', which means the backend is UP and something else is wrong.`) +
+        ` ${measured.reached} of ${measured.attempts} attempt(s) reached it.${refusals}`
+      : `the last attempt on ${day} (${tz}) could not reach ${latest.backend}/${latest.model} at ${latest.calledAt}: ${latest.reason}. ` +
+        `${measured.unreached} of ${measured.attempts} attempt(s) failed to connect.${refusals}`,
+  };
+}
+
+/**
+ * What enrichment is configured to do, and whether cost policy and the
+ * network are letting it.
+ *
+ * `env` and `now` are both required and neither is defaulted -- no wall clock
+ * and no `process.env` read happens inside this module, matching every other
+ * function in it.
+ */
+export function getEnrichmentStatus(
+  env: NodeJS.ProcessEnv,
+  now: string,
+  sources?: EnrichmentStatusSources,
+): EnrichmentStatus {
+  const llmConfig = sources?.llmConfig;
+  const backend = llmConfig === undefined ? null : describeBackend(llmConfig, env);
+
+  const paidPaths: PaidPathStatus[] = SPEND_CATEGORIES.map((category) => ({
+    category,
+    flag: `WF_ALLOW_PAID_${category.toUpperCase()}`,
+    state: isPaidAllowed(category, env) ? 'enabled' : 'disabled_by_cost_policy',
+    selected: backend?.spendCategory === category,
+  }));
+
+  const reachability = describeReachability(sources?.db, env, now);
+
+  const note =
+    backend === null
+      ? 'no llm config was supplied, so which backend enrichment would use is unknown. The cost gates below are still exact -- they are read from the environment, not from config.'
+      : backend.state === 'disabled_by_cost_policy'
+        ? `config/llm.yaml selects the '${backend.name}' backend, which is disabled by cost policy: set ${`WF_ALLOW_PAID_${(backend.spendCategory ?? '').toUpperCase()}`}=1 to enable it. Nothing falls back to another backend -- a silent substitution would report enrichment as running on a backend it is not (§15).`
+        : `config/llm.yaml selects the '${backend.name}' backend (${backend.serviceId}, ${backend.costClass}), which cost policy permits.` +
+          (paidPaths.some((path) => path.state === 'enabled')
+            ? ''
+            : ' Every paid path is hard-disabled, so no enrichment call can originate a charge.');
+
+  return { backend, paidPaths, reachability, asOf: now, note };
 }

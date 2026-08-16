@@ -1,0 +1,108 @@
+/**
+ * Styling for EnrichmentStatus.tsx (M5 task 14). Standalone file, the same
+ * reasoning SourceHealthPage.css records: web/src/styles/** is sibling-owned
+ * this wave. Tokens only -- no literal colours, sizes or spacing.
+ *
+ * The palette choices here are the component's whole argument, so they are
+ * written down rather than left to be inferred:
+ *
+ *   - the paid-path line is `--color-text-dim`. It is off, it is meant to be
+ *     off, and it will be off forever unless the owner decides otherwise
+ *     (M5 plan RULING 2). A permanent correct condition must recede.
+ *   - an unreachable backend is `--color-error`, on exactly the reasoning
+ *     global.css gives for the failing-source badge: `--color-alert` is a
+ *     watchfloor SIGNAL (a KEV pin), while a daemon that will not answer is a
+ *     genuine fault.
+ *   - a CONFIGURED backend that is itself cost-disabled sits between the two
+ *     and gets `--color-alert`: nothing is being enriched, which deserves
+ *     attention, but it is a configuration statement with a one-line remedy
+ *     rather than a failure.
+ *
+ * `enrichment__reach--unknown` deliberately has a rule that makes it recede
+ * rather than no rule at all -- "nothing tried today" is ordinary on the
+ * vault cadence and must not read as either health or fault.
+ */
+
+.enrichment {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+}
+
+.enrichment__line {
+  margin: 0;
+  color: var(--color-text-secondary);
+  line-height: var(--leading-normal);
+}
+
+.enrichment__label {
+  color: var(--color-text-dim);
+  letter-spacing: 0.04em;
+}
+
+.enrichment__value {
+  color: var(--color-text-primary);
+}
+
+.enrichment__meta {
+  color: var(--color-text-dim);
+}
+
+/* The machine-readable reason from the seam's own vocabulary (`not_running`
+   vs `model_missing` -- restart the daemon, or pull a model). Rendered in the
+   text colour of the line it sits on so the STATE, not the reason, is what
+   carries the weight. */
+.enrichment__reason {
+  color: var(--color-text-secondary);
+}
+
+/* The word that names the policy, wherever it appears. Not loud: it is a
+   statement of configuration, and the line's own modifier below decides how
+   much attention the whole line gets. */
+.enrichment__flagword {
+  color: var(--color-alert);
+}
+
+/* Nothing is being enriched: the selected backend is the hard-disabled one. */
+.enrichment__backend--disabled .enrichment__value {
+  color: var(--color-alert);
+}
+
+/* Off, and correct. This is the shipped state; it recedes. */
+.enrichment__paid--off .enrichment__value {
+  color: var(--color-text-dim);
+}
+
+/* On means real money is reachable, which is worth one glance's worth of
+   contrast -- accent, not error: it is not a fault, it is a decision. */
+.enrichment__paid--on .enrichment__value {
+  color: var(--color-accent);
+}
+
+.enrichment__spend--measured .enrichment__value {
+  color: var(--color-text-primary);
+}
+
+/* Unknown is not zero. It must not look like a figure. */
+.enrichment__spend--unmeasured .enrichment__value {
+  color: var(--color-alert);
+}
+
+.enrichment__reach--reachable .enrichment__value {
+  color: var(--color-text-secondary);
+}
+
+/* The one genuinely loud state in this component. */
+.enrichment__reach--unreachable .enrichment__value {
+  color: var(--color-error);
+  font-weight: var(--weight-bold);
+}
+
+.enrichment__reach--unknown .enrichment__value {
+  color: var(--color-text-dim);
+}

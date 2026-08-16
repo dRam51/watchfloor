@@ -5,6 +5,7 @@ import { assertMigrationsUpToDate } from '../db/migrate.ts';
 import { loadSourcesFile } from '../sources/load.ts';
 import { loadDecayConfig } from '../score/decay.ts';
 import { loadOverridesConfig } from '../score/overrides.ts';
+import { loadLlmConfig } from '../enrich/llm/config.ts';
 import { buildServer } from '../api/server.ts';
 import { closeDb } from '../db/connection.ts';
 
@@ -44,7 +45,16 @@ try {
   const decayConfig = loadDecayConfig(join(repoRoot, 'config', 'decay.yaml'));
   const overridesConfig = loadOverridesConfig(join(repoRoot, 'config', 'overrides.yaml'));
 
-  const server = buildServer({ db, env, sources, decayConfig, overridesConfig });
+  // M5 task 14. Loaded at boot for the same reason as everything above, and
+  // for one more: §15 asks the API to report whether a paid path is disabled
+  // by cost policy, and the answer depends on WHICH backend config/llm.yaml
+  // selects. No backend is CONSTRUCTED here — this process only describes the
+  // configuration. Constructing one would give the API process a route to a
+  // paid vendor it has no reason to have, and would throw at boot if
+  // WF_ALLOW_PAID_ANTHROPIC were set without a credential.
+  const llmConfig = loadLlmConfig(join(repoRoot, 'config', 'llm.yaml'));
+
+  const server = buildServer({ db, env, sources, decayConfig, overridesConfig, llmConfig });
   // Bind to loopback only; external reach is via Tailscale (§2).
   await server.listen({ port: env.WF_API_PORT, host: '127.0.0.1' });
   console.log(

@@ -3,7 +3,13 @@ import { z } from 'zod';
 import type { Db } from '../../db/connection.ts';
 import type { Source } from '../../sources/load.ts';
 import { BEATS } from '../../domain/item.ts';
-import { getBeatRefreshStatus, getFailingSourceCount, getEnrichmentSpendToday } from '../../domain/headerStrip.ts';
+import {
+  getBeatRefreshStatus,
+  getFailingSourceCount,
+  getEnrichmentSpendToday,
+  getEnrichmentStatus,
+} from '../../domain/headerStrip.ts';
+import type { LlmConfig } from '../../enrich/llm/config.ts';
 import {
   getLaneLayout,
   setLaneLayout,
@@ -44,6 +50,18 @@ export interface DashboardDeps {
   countFailingSources?: (db: Db, sources: readonly Source[], now?: string) => number;
   /** Overridable clock for tests; defaults to the wall clock. */
   now?: () => string;
+  /**
+   * `config/llm.yaml`, loaded once at boot by `src/bin/api.ts` -- what makes
+   * `enrichment.backend` answerable (M5 task 14).
+   *
+   * Optional, for exactly the reason `EnrichmentSpendSources` is: a caller
+   * without it still gets the cost-gate answer, which is pure environment.
+   * The risk that buys is this project's characteristic defect -- an optional
+   * dep nothing passes is a feature that is inert in production while every
+   * route test stays green -- so the wiring is pinned in
+   * tests/api/dashboardEnrichmentStatus.test.ts rather than assumed.
+   */
+  llmConfig?: LlmConfig;
 }
 
 function defaultNow(): string {
@@ -118,6 +136,18 @@ export function registerDashboard(server: FastifyInstance, deps: DashboardDeps):
       // getEnrichmentSpendToday falls back, loudly and in its own note, if it
       // is missing or is not a valid IANA zone.
       enrichmentSpend: getEnrichmentSpendToday(env, at, { db: deps.db }),
+      // M5 task 14, and §15's second clause: "the API returns a clear
+      // 'disabled by cost policy' status". A SIBLING of enrichmentSpend, not
+      // a widening of it -- spend is money and this is configuration, and one
+      // field publishing both is one field whose two halves can disagree. See
+      // getEnrichmentStatus' own doc comment for the three facts that must
+      // never collapse into each other.
+      //
+      // Same `at` as everything above: one instant for the whole response.
+      enrichment: getEnrichmentStatus(env, at, {
+        db: deps.db,
+        ...(deps.llmConfig !== undefined ? { llmConfig: deps.llmConfig } : {}),
+      }),
     };
   });
 

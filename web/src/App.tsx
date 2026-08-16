@@ -7,18 +7,27 @@ import { LaneBoard } from './components/LaneBoard.tsx';
 import { SearchView } from './components/SearchView.tsx';
 import { SourceHealthPage } from './components/SourceHealthPage.tsx';
 import { EntityGraphView } from './components/EntityGraphView.tsx';
+import {
+  EnrichmentStatus,
+  type EnrichmentStatusData,
+  type EnrichmentSpendData,
+} from './components/EnrichmentStatus.tsx';
 import { useIsWideViewport } from './lib/viewport.ts';
 
 /**
  * Shape of GET /api/dashboard/header (src/api/routes/dashboard.ts, M3 task 6).
- * Deliberately loose (`enrichmentSpend: unknown`) -- this task only needs
- * enough of the shape to prove the fetch path works end to end; a full
- * typed client is later tasks' concern, not scaffolding's.
+ *
+ * M5 task 14 typed the two enrichment fields, which M3 left as `unknown`
+ * because nothing read them. Both are OPTIONAL: a response from a server
+ * older than this task simply has no `enrichment` key, and the component
+ * renders nothing rather than manufacturing a cost-policy claim out of an
+ * absent field.
  */
 interface DashboardHeader {
   beats: Record<string, { lastRefreshAt: string | null; sourceCount: number }>;
   failingSources: number;
-  enrichmentSpend: unknown;
+  enrichmentSpend?: EnrichmentSpendData;
+  enrichment?: EnrichmentStatusData;
 }
 
 /**
@@ -151,6 +160,18 @@ function Dashboard() {
           </p>
         )}
       </section>
+
+      {/* §15's third clause: "the dashboard shows the feature as off." Part of
+          the header strip, beside the beat/source counts, rather than tucked
+          onto the source-health page -- §7 puts today's enrichment spend in
+          the header, and the policy that governs that spend belongs next to
+          it. See EnrichmentStatus.tsx for why it is three lines and not one. */}
+      {state.status === 'ready' && (
+        <EnrichmentStatus
+          status={state.data.enrichment ?? null}
+          spend={state.data.enrichmentSpend ?? null}
+        />
+      )}
 
       {/* `token` is narrowed to `string` here by the `&&` guard -- AuthGate
           only renders Dashboard once a token exists, but that fact isn't

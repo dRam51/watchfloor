@@ -176,6 +176,143 @@ export interface DailyLlmUsage {
   mixedTimezone: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Reachability -- a DIFFERENT question from usage, and deliberately not folded
+// into DailyLlmUsage (M5 task 14)
+// ---------------------------------------------------------------------------
+
+/**
+ * Unavailable reasons meaning **nothing accepted the connection**: the daemon
+ * is not running, the host is wrong, or the connection died mid-flight.
+ *
+ * The list is short on purpose. `model_missing`, `http_error`,
+ * `malformed_response` and `response_too_large` all mean *something answered*
+ * — the daemon is up and something else is wrong — and task 1 records the
+ * cost of collapsing that distinction: it "sends an operator to restart a
+ * healthy daemon".
+ */
+export const UNREACHED_REASONS: readonly LlmUnavailableReason[] = [
+  'not_running',
+  'transport_error',
+  'timeout',
+];
+
+/**
+ * Reasons that are **not an attempt at all**. §15's cost gate refuses before
+ * any request is constructed, so a `disabled_by_cost_policy` row is evidence
+ * about configuration and about nothing else.
+ *
+ * This is the one classification a naive "count the unavailable calls" health
+ * check gets wrong, and it gets it wrong in exactly the shipped
+ * configuration: with `WF_ALLOW_PAID_ANTHROPIC` unset every paid call lands
+ * here, and a healthy local daemon would be reported as down.
+ */
+export const NO_ATTEMPT_REASONS: readonly LlmUnavailableReason[] = ['disabled_by_cost_policy'];
+
+/** The latest call that actually tried to reach a backend. */
+export interface LatestLlmAttempt {
+  calledAt: string;
+  backend: LlmBackendName;
+  model: string;
+  /** True when something answered, whatever it said. */
+  reached: boolean;
+  /** `null` on an ok call. */
+  reason: LlmUnavailableReason | null;
+}
+
+/**
+ * Whether a backend could be reached on one calendar day, and when it was
+ * last tried.
+ *
+ * Kept apart from {@link DailyLlmUsage} because they answer different
+ * questions and are read by different consumers: usage answers "what did
+ * today cost", this answers "is the thing running". A day can be a measured
+ * $0 and completely broken at the same time.
+ */
+export interface DailyLlmReachability {
+  day: string;
+  /** Calls that actually tried. Excludes {@link NO_ATTEMPT_REASONS}. */
+  attempts: number;
+  /** Attempts where something answered — including an answer that was an error. */
+  reached: number;
+  /** Attempts where nothing accepted the connection. */
+  unreached: number;
+  /** Calls refused by the cost gate before any request. Never an attempt. */
+  costPolicyRefusals: number;
+  /** The most recent attempt, or `null` when nothing was tried. */
+  latest: LatestLlmAttempt | null;
+}
+
+export function getDailyLlmReachability(db: Db, day: string): DailyLlmReachability {
+  assertCalendarDay('day', day);
+
+  // Grouped rather than SUM(CASE …): the classification lives in TypeScript,
+  // in one place, next to the constants that define it. Cardinality is at most
+  // (1 ok + 8 reasons) rows, so this is not a scan-versus-aggregate trade.
+  //
+  // Inline type literal, not a named interface -- see the cast note in
+  // src/cluster/store.ts and CLAUDE.md's "node:sqlite cast quirk".
+  const rows = db
+    .prepare(
+      `select status, unavailable_reason, count(*) as n
+         from llm_call_log
+        where usage_day = ?
+        group by status, unavailable_reason`,
+    )
+    .all(day) as Array<{ status: string; unavailable_reason: string | null; n: number }>;
+
+  let attempts = 0;
+  let reached = 0;
+  let unreached = 0;
+  let costPolicyRefusals = 0;
+  for (const row of rows) {
+    const reason = row.unavailable_reason as LlmUnavailableReason | null;
+    if (reason !== null && NO_ATTEMPT_REASONS.includes(reason)) {
+      costPolicyRefusals += row.n;
+      continue;
+    }
+    attempts += row.n;
+    if (reason !== null && UNREACHED_REASONS.includes(reason)) unreached += row.n;
+    else reached += row.n;
+  }
+
+  const excluded = NO_ATTEMPT_REASONS.map(() => '?').join(', ');
+  const latestRow = db
+    .prepare(
+      `select called_at, backend, model, status, unavailable_reason
+         from llm_call_log
+        where usage_day = ?
+          and (unavailable_reason is null or unavailable_reason not in (${excluded}))
+        order by called_at desc, rowid desc
+        limit 1`,
+    )
+    .get(day, ...NO_ATTEMPT_REASONS) as
+    | {
+        called_at: string;
+        backend: string;
+        model: string;
+        status: string;
+        unavailable_reason: string | null;
+      }
+    | undefined;
+
+  const latest: LatestLlmAttempt | null =
+    latestRow === undefined
+      ? null
+      : {
+          calledAt: latestRow.called_at,
+          backend: latestRow.backend as LlmBackendName,
+          model: latestRow.model,
+          reached: !(
+            latestRow.unavailable_reason !== null &&
+            UNREACHED_REASONS.includes(latestRow.unavailable_reason as LlmUnavailableReason)
+          ),
+          reason: latestRow.unavailable_reason as LlmUnavailableReason | null,
+        };
+
+  return { day, attempts, reached, unreached, costPolicyRefusals, latest };
+}
+
 export function getDailyLlmUsage(db: Db, day: string): DailyLlmUsage {
   assertCalendarDay('day', day);
 

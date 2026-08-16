@@ -97,3 +97,15 @@ data/scratch-verify-task11.db
 # mtime unchanged. Matches the *.db pattern above already; listed here for the
 # paper trail, exactly as tasks 7 and 11's copies are.
 data/scratch-verify-task10.db
+
+# The VACUUM INTO scratch copy of data/wf.db made for M5 task 14's live
+# verification of §15's rendering (the real API on 127.0.0.1:8791 and the real
+# Vite dev server against 11,016 items, plus a scheduler boot). The copy is
+# also where the two states the shipped configuration does not currently
+# exhibit -- an unreachable daemon, and a cost-gate refusal -- were written, so
+# the dashboard could be photographed showing them. data/wf.db itself was never
+# opened for writing: verified byte-identical by sha256 before and after, still
+# 10 migrations / 11,016 items / 24 ledger rows. Matches the *.db pattern above
+# already; listed here for the paper trail, exactly as tasks 7, 10 and 11's
+# copies are.
+data/scratch-verify-m5-task14.db

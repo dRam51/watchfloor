@@ -14,6 +14,8 @@ import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
 import { loadEntityRulesFile } from '../entities/rules.ts';
 import { sweepEntities } from '../entities/sweep.ts';
+import { loadLlmConfig } from '../enrich/llm/config.ts';
+import { getEnrichmentStatus } from '../domain/headerStrip.ts';
 import {
   advanceVaultSlots,
   dueVaultWork,
@@ -98,6 +100,35 @@ try {
   console.log(
     `watchfloor scheduler starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
       `tick=${env.WF_SCHEDULER_TICK_INTERVAL_MS}ms)`,
+  );
+
+  // -------------------------------------------------------------------------
+  // M5 task 14 -- §15: "Flag absent = the code path is hard-disabled: the
+  // scheduler skips the job, the API returns a clear 'disabled by cost policy'
+  // status, and the dashboard shows the feature as off."
+  //
+  // Said ONCE, at boot, beside the vault line and for the same reason: this is
+  // decided by config and environment, neither of which can change while the
+  // process lives, so re-deciding it 1,440 times a day would produce 1,440
+  // identical lines and train its operator to ignore them.
+  //
+  // The SAME sentence /api/dashboard/header publishes, from the same function.
+  // Two hand-written descriptions of one policy are two descriptions that
+  // drift, and this is the policy where a drifted description reads as
+  // permission to spend.
+  //
+  // NOTE the shape of the guarantee this line reports rather than creates: the
+  // only module that can bill is the Anthropic backend, `createLlmBackend` is
+  // the only route to it, and `loadVaultSyncDeps` is its only caller (pinned
+  // in tests/cost/schedulerCostPolicy.test.ts). With `backend: ollama` the
+  // paid module is never constructed, so there is no paid job here to skip --
+  // and if a paid backend were selected while its flag was unset, every call
+  // is refused at the gate with nothing sent and nothing retried
+  // (tests/cost/no-paid-requests.test.ts).
+  // -------------------------------------------------------------------------
+  const llmConfig = loadLlmConfig(join(repoRoot, 'config', 'llm.yaml'));
+  console.log(
+    `enrichment: ${getEnrichmentStatus(process.env, new Date().toISOString(), { llmConfig }).note}`,
   );
 
   // -------------------------------------------------------------------------

@@ -40,14 +40,23 @@ Liveness probe for process supervision (§12). Deliberately public: a supervisor
 carry a secret, and the body is operational status rather than item data.
 
 ```json
-{ "status": "ok", "db": "ok", "migrations": 7, "tz": "America/New_York",
-  "sources": 27, "costGates": { … } }
+{ "status": "ok", "db": "ok", "migrations": 10, "tz": "America/New_York", "sources": 28,
+  "costGates": { "anthropic": "disabled (cost policy)",
+                 "marketdata": "disabled (cost policy)" } }
 ```
 
 `migrations` is the count of *applied* migrations, so it moves when a migration lands — it
 was 6 before M4a added `0007_repo_star_snapshots`. A database that has not had
 `npm run migrate` run against it still reports the old number, and every entrypoint refuses
 to boot in that state rather than auto-applying.
+
+**`costGates` is written out above because an earlier revision of this file elided it as
+`{ … }`** — one key per `SpendCategory` (`src/cost/registry.ts`), each either `"enabled"` or
+`"disabled (cost policy)"`, read straight from the `WF_ALLOW_PAID_*` environment (§15). It is
+the *unauthenticated* answer, so it is deliberately a bare flag map: it says nothing about
+which backend enrichment is configured to use, or whether that backend can be reached. Those
+need the corpus, and they are on `GET /api/dashboard/header`'s `enrichment` field below. The
+two agree by construction — both call `isPaidAllowed`.
 
 ### `GET /api/feed`
 
@@ -410,12 +419,80 @@ M4a. It is the second time this section documented a field the route does not re
 ### `GET /api/dashboard/header`
 
 §7's header strip: `{ beats: { <beat>: { lastRefreshAt, sourceCount } }, failingSources,
-enrichmentSpend }`.
+enrichmentSpend, enrichment }`.
 
-`enrichmentSpend` is a **measured** zero, not a placeholder — it reports
-`{ amountUsd, measured, asOf, note }`, where the note records that every paid path is
-hard-disabled while `WF_ALLOW_PAID_ANTHROPIC` is unset. It will start reporting real numbers at
-M5 without a code change.
+`enrichmentSpend` is a **measured** zero, not a placeholder — `{ amountUsd, measured, asOf,
+note }`. M3 shipped it promising real numbers at M5 without a client change, and M5 task 3 kept
+that promise: the four fields are unchanged and the figures now come from `llm_call_log`,
+summed over the calendar day `now` falls on **in `WF_TZ`**. Copied from a live response:
+
+```json
+"enrichmentSpend": {
+  "amountUsd": 0, "measured": true, "asOf": "2026-08-16T21:16:33.962Z",
+  "note": "24 enrichment call(s) on 2026-08-16 (America/New_York), 7757 tokens counted, every cost measured. WF_ALLOW_PAID_ANTHROPIC is unset, so src/cost/gate.ts hard-disables every paid enrichment path."
+}
+```
+
+**`measured: false` means UNKNOWN, never zero.** A day containing one call whose backend
+reported no token counts has an unknown total, because zero plus unknown is unknown. A cache
+hit is not in these numbers at all — it made no call and consumed nothing.
+
+#### `enrichment` — §15's "disabled by cost policy" status (M5 task 14)
+
+§15: *"Flag absent = the code path is hard-disabled: the scheduler skips the job, **the API
+returns a clear 'disabled by cost policy' status**, and the dashboard shows the feature as
+off."* This is that field. A **sibling** of `enrichmentSpend` rather than a widening of it,
+because spend is money and this is configuration — one field publishing both is one field whose
+two halves can disagree. Copied from a live response against the real corpus:
+
+```json
+"enrichment": {
+  "backend": { "name": "ollama", "model": "llama3.2:latest", "serviceId": "ollama-local",
+               "costClass": "free-forever", "spendCategory": null, "state": "enabled" },
+  "paidPaths": [
+    { "category": "anthropic",  "flag": "WF_ALLOW_PAID_ANTHROPIC",
+      "state": "disabled_by_cost_policy", "selected": false },
+    { "category": "marketdata", "flag": "WF_ALLOW_PAID_MARKETDATA",
+      "state": "disabled_by_cost_policy", "selected": false }
+  ],
+  "reachability": { "status": "reachable", "day": "2026-08-16", "attempts": 24, "reached": 24,
+                    "unreached": 0, "costPolicyRefusals": 0, "reason": null,
+                    "detail": "the last attempt on 2026-08-16 (America/New_York) reached ollama/llama3.2:latest at 2026-08-16T20:48:25.373Z. 24 of 24 attempt(s) reached it." },
+  "asOf": "2026-08-16T21:16:33.962Z",
+  "note": "config/llm.yaml selects the 'ollama' backend (ollama-local, free-forever), which cost policy permits. Every paid path is hard-disabled, so no enrichment call can originate a charge."
+}
+```
+
+**It publishes three facts that must never be collapsed into each other**, which is the only
+reason it is this shape:
+
+- **`backend`** — which backend `config/llm.yaml` selects, and whether cost policy permits it.
+  `state: "disabled_by_cost_policy"` here means enrichment cannot run **at all**: the backend it
+  was told to use is the hard-disabled one. That is a different situation from a paid path being
+  off while a free local backend does the work, which is the shipped state above. `null` when the
+  server was built without an llm config; `model` is `null` when the selected backend's config
+  block names none.
+- **`paidPaths`** — every `SpendCategory` in `src/cost/registry.ts`, not only the configured one,
+  so M4b's market-data client is reported the day it lands rather than silently omitted.
+  `flag` is the exact variable to set; `selected` says whether that category is the configured
+  backend. Pure environment — the corpus cannot influence it.
+- **`reachability`** — whether a backend could actually be reached, **measured from
+  `llm_call_log`, never probed.** A dashboard render issues no outbound request.
+
+**`costPolicyRefusals` is counted and is deliberately not an attempt.** A cost-gate refusal is
+an `LlmUnavailableReason` like any other in the ledger, so a naive "count the unavailable calls"
+health check reports a healthy local daemon as down in exactly the shipped configuration. It is
+excluded from `attempts`, from `unreached`, and from the latest-attempt decision.
+
+**`status` follows the LATEST attempt, not the day's totals** — a daemon that answered twenty
+times this morning and has refused every connection since noon is down now, and a majority vote
+would call it healthy. `unknown` is a real answer and must not be rendered as health: enrichment
+runs on the vault cadence, so a day with no call is ordinary.
+
+**`reason` can be non-null while `status` is `reachable`.** `model_missing`, `http_error`,
+`malformed_response` and `response_too_large` all mean *something answered* — only
+`not_running`, `transport_error` and `timeout` mean nothing accepted the connection. Collapsing
+those two groups sends an operator to restart a healthy daemon.
 
 ### `GET /api/dashboard/layout` · `PUT /api/dashboard/layout`
 

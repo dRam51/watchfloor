@@ -4,6 +4,7 @@ import type { Env } from '../config/env.ts';
 import type { Source } from '../sources/load.ts';
 import type { DecayConfig } from '../score/decay.ts';
 import type { OverridesConfig } from '../score/overrides.ts';
+import type { LlmConfig } from '../enrich/llm/config.ts';
 import { registerHealth } from './routes/health.ts';
 import { registerAuth } from './auth.ts';
 import { registerFeed } from './routes/feed.ts';
@@ -25,6 +26,18 @@ export interface ServerDeps {
   sources: Source[];
   decayConfig: DecayConfig;
   overridesConfig: OverridesConfig;
+  /**
+   * `config/llm.yaml` (M5 task 14). The dashboard's `enrichment` field needs
+   * to say WHICH backend enrichment is configured to use, because "the paid
+   * path is off while a free local backend does the work" and "the backend
+   * enrichment was told to use is hard-disabled" are different situations and
+   * §15 asks the dashboard to show the second one as off.
+   *
+   * Optional so that this is an additive change to a shape several route tests
+   * construct by hand; `src/bin/api.ts` always supplies it, and
+   * tests/api/dashboardEnrichmentStatus.test.ts pins that it does.
+   */
+  llmConfig?: LlmConfig;
 }
 
 export function buildServer(deps: ServerDeps): FastifyInstance {
@@ -84,10 +97,17 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       // strip's failing count would miss the silent-stale case §7 cares most
       // about — a feed that has not succeeded in weeks while reporting zero
       // failures because nothing is polling it.
+      //
+      // M5 task 14: `llmConfig` is what turns the `enrichment` field's
+      // `backend` from `null` into the real answer. Spread rather than passed
+      // straight through because `exactOptionalPropertyTypes` distinguishes
+      // "absent" from "present and undefined", and the route's own optionality
+      // is what keeps this an additive change for every hand-built test server.
       registerDashboard(api, {
         db: deps.db,
         sources: deps.sources,
         countFailingSources,
+        ...(deps.llmConfig !== undefined ? { llmConfig: deps.llmConfig } : {}),
       });
 
       registerSearch(api, { db: deps.db });
