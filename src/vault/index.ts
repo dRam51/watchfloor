@@ -199,6 +199,22 @@ export {
   type RelatedEntity,
 } from './entities.ts';
 
+// ---------------------------------------------------------------------------
+// The run itself (task 15) — the composition tasks 5–8 each reported needing.
+// ---------------------------------------------------------------------------
+
+export {
+  loadVaultSyncDeps,
+  resolveVaultTarget,
+  runVaultSync,
+  type VaultAreaRefusal,
+  type VaultSyncDeps,
+  type VaultSyncDepsOptions,
+  type VaultSyncReport,
+  type VaultSyncWork,
+  type VaultTarget,
+} from './sync.ts';
+
 export {
   promoteSavedItem,
   readSavedItem,
