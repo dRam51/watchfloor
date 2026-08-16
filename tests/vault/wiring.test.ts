@@ -154,6 +154,21 @@ const VAULT_ENTRYPOINTS: readonly Entrypoint[] = [
     definedIn: join(SRC, 'vault', 'saved.ts'),
     consequence: 'saving an item in the dashboard never reaches saved/',
   },
+  // M5 task 12. Task 9 shipped both of these complete and tested, and ended
+  // its report naming them as occurrence SIX of this project's characteristic
+  // defect: "neither `verify` nor `prune` has a CLI caller." §8.1 asks for
+  // `watchfloor vault verify` by name, so an unreachable verifyVault is not an
+  // internal tidiness question — it is a named deliverable that cannot be run.
+  {
+    symbol: 'verifyVault',
+    definedIn: join(SRC, 'vault', 'verify.ts'),
+    consequence: '§8.1\'s `watchfloor vault verify` cannot be run at all',
+  },
+  {
+    symbol: 'pruneVault',
+    definedIn: join(SRC, 'vault', 'prune.ts'),
+    consequence: 'the one job allowed to delete has no way to be invoked',
+  },
 ];
 
 describe('the scan reads this repository', () => {

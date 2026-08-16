@@ -19,6 +19,7 @@
     "rank": "node --env-file=.env src/bin/rank.ts",
     "suggest": "node --env-file=.env src/bin/suggest.ts",
     "vault": "node --env-file=.env src/bin/vault.ts",
+    "watchfloor": "node --env-file=.env src/bin/watchfloor.ts",
     "scheduler": "node --env-file=.env src/bin/scheduler.ts",
     "test": "vitest run",
     "test:watch": "vitest",
