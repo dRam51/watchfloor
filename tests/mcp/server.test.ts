@@ -370,6 +370,20 @@ describe('query logging through the dispatcher', () => {
     expect(logged()[0]).toMatchObject({ method: 'tools/list', outcome: 'unauthorized', code: WF_UNAUTHORIZED });
   });
 
+  // Found by reading a real session's stderr rather than by an assertion: the
+  // `unauthorized` and `initialize` lines carried `code`, and the unknown-tool
+  // line did not. An operator filtering the log by error code would have had a
+  // silent gap in it.
+  it('logs a code on EVERY non-ok outcome, including a tools/call error', async () => {
+    const { server, logged } = harness([countItems]);
+    await server.handle(authedRequest('tools/call', { params: { name: 'nope', arguments: {} } }));
+    await server.handle(authedRequest('tools/call', { id: 2, params: { name: 'count_items', arguments: { sourceId: 42 } } }));
+    for (const entry of logged()) {
+      expect(entry.outcome, JSON.stringify(entry)).not.toBe('ok');
+      expect(entry.code, JSON.stringify(entry)).toBe(-32602);
+    }
+  });
+
   it('logs a refused leak as `refused`, not as a generic error', async () => {
     const leaky = defineTool({
       name: 'leaky',

@@ -88,3 +88,12 @@ data/scratch-verify-task7.db
 # table, mtime unchanged. Matches the *.db pattern above already; listed here
 # for the paper trail, exactly as task 7's copy is.
 data/scratch-verify-task11.db
+
+# The VACUUM INTO scratch copy of data/wf.db made for M5 task 10's live
+# verification of `npm run mcp` (7,267 real items; migrated 0009 and 0010 on
+# the COPY only, then a full JSON-RPC session against it over stdio).
+# data/wf.db itself was never migrated or written to -- verified afterwards:
+# still 8 applied migrations, no llm_* or entity-extraction tables, size and
+# mtime unchanged. Matches the *.db pattern above already; listed here for the
+# paper trail, exactly as tasks 7 and 11's copies are.
+data/scratch-verify-task10.db

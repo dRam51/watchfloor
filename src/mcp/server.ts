@@ -167,17 +167,35 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
     id: RpcId,
     params: Record<string, unknown>,
     now: string,
-  ): Promise<{ response: RpcResponse; outcome: QueryOutcome; tool: string | null; rows?: number; args?: Record<string, unknown> }> {
+  ): Promise<{
+    response: RpcResponse;
+    outcome: QueryOutcome;
+    tool: string | null;
+    /** Threaded so EVERY non-ok log line carries a code -- a real session's stderr showed this gap. */
+    code?: number;
+    rows?: number;
+    args?: Record<string, unknown>;
+  }> {
     const name = params.name;
     if (typeof name !== 'string') {
-      return { response: errorResponse(id, RPC_INVALID_PARAMS, 'params.name must be a string'), outcome: 'error', tool: null };
+      return {
+        response: errorResponse(id, RPC_INVALID_PARAMS, 'params.name must be a string'),
+        outcome: 'error',
+        code: RPC_INVALID_PARAMS,
+        tool: null,
+      };
     }
     const tool = deps.registry.get(name);
     if (tool === undefined) {
       // The spec's own example for this case uses -32602 and puts it on the
       // protocol side: "Unknown tool" is not something a model fixes by
       // adjusting parameters.
-      return { response: errorResponse(id, RPC_INVALID_PARAMS, `Unknown tool: ${name}`), outcome: 'error', tool: name };
+      return {
+        response: errorResponse(id, RPC_INVALID_PARAMS, `Unknown tool: ${name}`),
+        outcome: 'error',
+        code: RPC_INVALID_PARAMS,
+        tool: name,
+      };
     }
 
     const rawArgs = params.arguments;
@@ -204,6 +222,12 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
       return {
         response: ok(id, { content: [{ type: 'text', text: `invalid arguments: ${message}` }], isError: true }),
         outcome: 'error',
+        // A tool EXECUTION error carries no JSON-RPC code on the wire -- it is
+        // a successful response with `isError: true`. The LOG still records
+        // the code an operator would filter by, so "the bot sent bad
+        // arguments" and "the bot named a tool that does not exist" sort
+        // together rather than one of them having a blank column.
+        code: RPC_INVALID_PARAMS,
         tool: name,
         args,
       };
@@ -326,6 +350,7 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
           const called = await callTool(id, params, now);
           return finish(called.response, called.outcome, {
             tool: called.tool,
+            ...(called.code === undefined ? {} : { code: called.code }),
             ...(called.rows === undefined ? {} : { rows: called.rows }),
             ...(called.args === undefined ? {} : { args: called.args }),
             meta,
