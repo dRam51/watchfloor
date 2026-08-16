@@ -3,6 +3,7 @@ import {
   applyManagedBlock,
   hasManagedBlock,
   isWatchfloorManaged,
+  readWatchfloorFrontmatter,
   renderManagedNote,
   splitManagedBlock,
   VaultContentError,
@@ -344,5 +345,43 @@ describe('the invariant applyManagedBlock checks on itself', () => {
     // And the only bytes this package added ahead of the block are the blank
     // line separating the prose from the marker.
     expect(split.prologue.slice(before.length)).toBe('\n');
+  });
+});
+
+/**
+ * The read-only accessor `vault verify` (M5 task 9) needs.
+ *
+ * Verify has to answer "which tier does this file CLAIM to be", and the only
+ * honest source is the bytes on disk. A second YAML parser in `verify.ts`
+ * would be a second answer to "is this ours" — the exact duplication that put
+ * the separator bug in two places on the same day — so the accessor lives here
+ * and `isWatchfloorManaged` is now defined in terms of it.
+ */
+describe('readWatchfloorFrontmatter', () => {
+  it('returns the tier and the generated-at stamp of a note we wrote', () => {
+    const text = renderManagedNote({
+      tier: 'managed-block',
+      generatedAt: '2026-08-15T03:59:59.999Z',
+      body: '# X\n',
+      fields: { item_key: 'abc' },
+    });
+
+    const parsed = readWatchfloorFrontmatter(text);
+    expect(parsed?.tier).toBe('managed-block');
+    expect(parsed?.generatedAt).toBe('2026-08-15T03:59:59.999Z');
+    expect(parsed?.fields.item_key).toBe('abc');
+  });
+
+  it('answers null for exactly the files isWatchfloorManaged rejects', () => {
+    for (const text of [
+      '# Architecture\n\nHand-written prose.\n',
+      '---\nproject: watchfloor\n---\n\n# Mine\n',
+      '---\nwatchfloor: managed\n---\n\n# No tier\n',
+      '---\nwatchfloor: managed\nwatchfloor_tier: invented\n---\n',
+      '---\n: : :\n---\n',
+    ]) {
+      expect(readWatchfloorFrontmatter(text)).toBeNull();
+      expect(isWatchfloorManaged(text)).toBe(false);
+    }
   });
 });

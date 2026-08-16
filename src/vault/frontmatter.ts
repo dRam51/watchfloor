@@ -122,6 +122,51 @@ function frontmatterText(text: string): string | null {
   return lines.slice(0, closing).join('\n');
 }
 
+export interface WatchfloorFrontmatter {
+  readonly tier: VaultTier;
+  /** `null` when the key is absent or is not a string. */
+  readonly generatedAt: string | null;
+  /** Everything else in the block, verbatim. */
+  readonly fields: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * The parsed frontmatter of a note **we** wrote, or `null` for anything else.
+ *
+ * Added for `vault verify` (M5 task 9), which has to answer "which tier does
+ * this file claim to be" and "which item is this saved note for" from the
+ * bytes on disk. A second YAML parser over there would be a second answer to
+ * "is this ours" — the same duplication that put the separator bug in two
+ * places on one day — so the four conditions live here, once, and
+ * {@link isWatchfloorManaged} is defined in terms of this.
+ *
+ * Answers `null` for every failure mode, including a YAML parse error.
+ */
+export function readWatchfloorFrontmatter(text: string): WatchfloorFrontmatter | null {
+  const block = frontmatterText(text);
+  if (block === null) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(block);
+  } catch {
+    return null; // fail closed
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+
+  const record = parsed as Record<string, unknown>;
+  if (record[OWNERSHIP_KEY] !== OWNERSHIP_VALUE) return null;
+  const tier = record[TIER_KEY];
+  if (!VALID_TIERS.includes(tier as VaultTier)) return null;
+
+  const generatedAt = record[GENERATED_AT_KEY];
+  return {
+    tier: tier as VaultTier,
+    generatedAt: typeof generatedAt === 'string' ? generatedAt : null,
+    fields: record,
+  };
+}
+
 /**
  * Whether this file's own frontmatter says Watchfloor generated it.
  *
@@ -129,20 +174,7 @@ function frontmatterText(text: string): string | null {
  * the module comment for the four conditions and why each one is there.
  */
 export function isWatchfloorManaged(text: string): boolean {
-  const block = frontmatterText(text);
-  if (block === null) return false;
-
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(block);
-  } catch {
-    return false; // fail closed
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
-
-  const record = parsed as Record<string, unknown>;
-  if (record[OWNERSHIP_KEY] !== OWNERSHIP_VALUE) return false;
-  return VALID_TIERS.includes(record[TIER_KEY] as VaultTier);
+  return readWatchfloorFrontmatter(text) !== null;
 }
 
 export interface ManagedNoteInput {
