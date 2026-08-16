@@ -3,11 +3,19 @@ import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   readVaultText,
+  removeVaultFile,
   scanVaultTree,
   VaultAccessError,
+  VaultRemoveError,
   VAULT_TEMP_PREFIX,
 } from '../../src/vault/session.ts';
-import { createFixtureVault, HAND_AUTHORED_NOTES } from './fixture.ts';
+import { renderManagedNote } from '../../src/vault/frontmatter.ts';
+import {
+  createFixtureVault,
+  digestTree,
+  HAND_AUTHORED_IN_MANAGED_PATH,
+  HAND_AUTHORED_NOTES,
+} from './fixture.ts';
 
 /**
  * The READ primitives the safety layer grew for M5 task 9 (`vault verify` and
@@ -139,6 +147,145 @@ describe('readVaultText', () => {
     // come from the containment check, not from the file being absent.
     expect(refusalReason(() => readVaultText(vault.root, 'daily/elsewhere/Resume.md'))).toBe(
       'escapes_root',
+    );
+  });
+});
+
+/**
+ * The one delete in this repository.
+ *
+ * CLAUDE.md forbids deleting anything; the M5 plan carves out exactly one
+ * exception — *"`vault prune` is the one job allowed to remove anything, it is
+ * confined to `watchfloor/`"*. That confinement is enforced here, in the
+ * safety layer, and not in `prune.ts`: the policy layer cannot import the
+ * filesystem, so it cannot route around these gates even by accident.
+ *
+ * Four gates, and the first two are Task 4's, unchanged:
+ *
+ * 1. **Area.** The first segment must be one of the four §8.1 areas. The
+ *    owner's `Architecture.md` sits directly in the sync root, so it is not
+ *    "protected by a check" — there is no expressible request to delete it.
+ * 2. **Containment**, after `..` and symlink resolution.
+ * 3. **Regular file.** Never a directory, never a symlink.
+ * 4. **Ours.** Either the name is one `atomicWrite` produced, or the bytes on
+ *    disk carry Watchfloor frontmatter. §8.1's "never modify a file lacking
+ *    Watchfloor frontmatter" — and a delete is the strongest modification
+ *    there is.
+ */
+describe('removeVaultFile', () => {
+  const GENERATED_AT = '2026-08-15T03:59:59.999Z';
+
+  function managedNote(body: string): string {
+    return renderManagedNote({ tier: 'fully-managed', generatedAt: GENERATED_AT, body });
+  }
+
+  // Two error types, deliberately: `VaultAccessError` is the containment gate
+  // shared with the read primitives, `VaultRemoveError` is what only a delete
+  // can violate. Collapsing them would mean re-declaring eight refusal reasons
+  // in a second union to gain nothing — both carry the same machine-readable
+  // `reason`, which is what a caller acts on.
+  function removalRefusal(fn: () => unknown): string {
+    try {
+      fn();
+    } catch (err) {
+      if (err instanceof VaultRemoveError || err instanceof VaultAccessError) return err.reason;
+      throw err;
+    }
+    throw new Error('expected a refusal, nothing was thrown');
+  }
+
+  it('removes a crash-leftover temp file inside a managed area', () => {
+    const vault = createFixtureVault();
+    const temp = `${VAULT_TEMP_PREFIX}2026-08-15.md.4321.0`;
+    writeFileSync(join(vault.root, 'daily', temp), 'half a note');
+
+    removeVaultFile(vault.root, `daily/${temp}`);
+
+    expect(scanVaultTree(vault.root).some((e) => e.name === temp)).toBe(false);
+  });
+
+  it('removes a note carrying our own frontmatter', () => {
+    const vault = createFixtureVault();
+    writeFileSync(join(vault.root, 'daily', '2026-01-01.md'), managedNote('# Old\n'));
+
+    removeVaultFile(vault.root, 'daily/2026-01-01.md');
+
+    expect(readVaultText(vault.root, 'daily/2026-01-01.md')).toBeNull();
+  });
+
+  it('cannot be asked to delete a hand-authored note in the sync root', () => {
+    // The AREA gate, which is the stronger of the two. `Architecture.md` is
+    // exactly where WF_VAULT_ROOT would be pointed by mistake.
+    const vault = createFixtureVault();
+    const before = digestTree(vault.root);
+
+    expect(removalRefusal(() => removeVaultFile(vault.root, 'Architecture.md'))).toBe(
+      'unknown_area',
+    );
+    expect(digestTree(vault.root)).toEqual(before);
+  });
+
+  it('refuses a hand-authored note that is sitting INSIDE a managed area', () => {
+    // `daily/Scratch.md` passes the area gate and must still survive: it has
+    // no Watchfloor frontmatter, so it is not ours.
+    const vault = createFixtureVault();
+    const before = digestTree(vault.root);
+
+    expect(removalRefusal(() => removeVaultFile(vault.root, HAND_AUTHORED_IN_MANAGED_PATH))).toBe(
+      'foreign_file',
+    );
+    expect(digestTree(vault.root)).toEqual(before);
+  });
+
+  it('refuses to walk out of the root with a parent traversal', () => {
+    const vault = createFixtureVault();
+    const before = digestTree(vault.anchor);
+
+    expect(removalRefusal(() => removeVaultFile(vault.root, 'daily/../../VAULT-INDEX.md'))).toBe(
+      'parent_traversal',
+    );
+    expect(digestTree(vault.anchor)).toEqual(before);
+  });
+
+  it('refuses to leave the root through a symlinked directory', () => {
+    const vault = createFixtureVault();
+    symlinkSync(join(vault.anchor, '02 Career'), join(vault.root, 'daily', 'elsewhere'));
+    const before = digestTree(join(vault.anchor, '02 Career'));
+
+    expect(removalRefusal(() => removeVaultFile(vault.root, 'daily/elsewhere/Resume.md'))).toBe(
+      'escapes_root',
+    );
+    expect(digestTree(join(vault.anchor, '02 Career'))).toEqual(before);
+  });
+
+  it('refuses a symlink, even one that is inside the root', () => {
+    const vault = createFixtureVault();
+    const managed = join(vault.root, 'daily', '2026-01-01.md');
+    writeFileSync(managed, managedNote('# Old\n'));
+    symlinkSync(managed, join(vault.root, 'daily', 'link.md'));
+
+    expect(removalRefusal(() => removeVaultFile(vault.root, 'daily/link.md'))).toBe('not_a_file');
+  });
+
+  it('refuses a directory', () => {
+    const vault = createFixtureVault();
+    mkdirSync(join(vault.root, 'daily', 'archive'));
+
+    expect(removalRefusal(() => removeVaultFile(vault.root, 'daily/archive'))).toBe('not_a_file');
+  });
+
+  it('refuses a file that is not there', () => {
+    const vault = createFixtureVault();
+    expect(removalRefusal(() => removeVaultFile(vault.root, 'daily/nothing.md'))).toBe('missing');
+  });
+
+  it('refuses a nested path: this package never creates a directory inside an area', () => {
+    const vault = createFixtureVault();
+    mkdirSync(join(vault.root, 'daily', 'archive'));
+    writeFileSync(join(vault.root, 'daily', 'archive', 'old.md'), managedNote('# Old\n'));
+
+    expect(removalRefusal(() => removeVaultFile(vault.root, 'daily/archive/old.md'))).toBe(
+      'nested_path',
     );
   });
 });

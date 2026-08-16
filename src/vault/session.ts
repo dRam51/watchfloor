@@ -62,6 +62,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -79,6 +80,8 @@ import {
   isContainedIn,
   realpathOfDeepestExisting,
   resolveVaultPath,
+  vaultAreaOf,
+  VAULT_AREAS,
   type ResolvedVaultPath,
   type VaultTier,
 } from './paths.ts';
@@ -441,7 +444,7 @@ export class VaultAccessError extends Error {
  * resolution. A dot-prefixed *directory* segment is still refused, so
  * `.obsidian/…` is not addressable through here either.
  */
-function resolveWithinRoot(root: string, relPath: string): string {
+function safeSegments(relPath: string): string[] {
   if (relPath.trim() === '') {
     throw new VaultAccessError('empty', relPath, 'a vault path must name something');
   }
@@ -469,6 +472,12 @@ function resolveWithinRoot(root: string, relPath: string): string {
       );
     }
   });
+  return segments;
+}
+
+/** {@link safeSegments}, then containment against the resolved sync root. */
+function resolveWithinRoot(root: string, relPath: string): string {
+  const segments = safeSegments(relPath);
 
   let rootReal: string;
   try {
@@ -585,6 +594,116 @@ export function scanVaultTree(root: string): VaultEntry[] {
   };
   walk(rootReal, '');
   return found.sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
+}
+
+// ---------------------------------------------------------------------------
+// THE ONE DELETE (M5 task 9).
+//
+// CLAUDE.md: "Never delete anything." The M5 plan carves out exactly one
+// exception: "`vault prune` is the one job allowed to remove anything, it is
+// confined to `watchfloor/`." This is that exception, and it is here rather
+// than in `prune.ts` for the same reason every write is here — `prune.ts` may
+// not import the filesystem, so it cannot route around these gates even by
+// accident, and the source rule in `sourceRules.ts` names this one call site.
+// ---------------------------------------------------------------------------
+
+export type VaultRemoveRefusal = 'unknown_area' | 'nested_path' | 'missing' | 'not_a_file' | 'foreign_file';
+
+export class VaultRemoveError extends Error {
+  readonly reason: VaultRemoveRefusal;
+  constructor(reason: VaultRemoveRefusal, relPath: string, detail: string) {
+    super(`refusing to remove ${JSON.stringify(relPath)}: ${detail} (${reason})`);
+    this.name = 'VaultRemoveError';
+    this.reason = reason;
+  }
+}
+
+/**
+ * Removes one file from inside the sync root. **The only delete in this
+ * repository.**
+ *
+ * Four gates, in this order, and the order is deliberate:
+ *
+ * 1. **Syntax**, then **area** — the first segment must be one of
+ *    {@link VAULT_AREAS}. This is Task 4's stronger gate, unchanged: there is
+ *    no area for a bare filename, so the owner's `Architecture.md`, sitting
+ *    exactly where `WF_VAULT_ROOT` would be pointed by mistake, is not
+ *    protected by a check — **it is not an expressible request**.
+ * 2. **Containment** after `..` and symlink resolution. Checked *before* the
+ *    shape rule below, so a path that leaves the tree is always reported as
+ *    leaving the tree rather than as some tidier local violation.
+ * 3. **Shape** — exactly `area/file`. This package creates no directory inside
+ *    an area, so a nested path is something else's, whatever it is.
+ * 4. **Ours** — the name is one {@link atomicWrite} produces, or the bytes on
+ *    disk carry Watchfloor frontmatter. §8.1's *"never modify a file lacking
+ *    Watchfloor frontmatter"*, applied to the strongest modification there is.
+ *    Note what this refuses: an `entities/` note that a human wrote and we
+ *    only appended a block to has no frontmatter of ours, so it is foreign and
+ *    stays.
+ *
+ * `lstat`, never `stat`: a symlink is refused rather than followed, so this
+ * cannot be pointed at a file elsewhere in the owner's vault.
+ *
+ * Returns what was removed, so a caller can report it without re-reading a
+ * path that is now gone.
+ */
+export function removeVaultFile(root: string, relPath: string): VaultEntry {
+  const segments = safeSegments(relPath);
+  if (vaultAreaOf(relPath) === null) {
+    throw new VaultRemoveError(
+      'unknown_area',
+      relPath,
+      `must start with one of ${VAULT_AREAS.join(', ')} — Watchfloor removes nothing else`,
+    );
+  }
+
+  // Containment is decided on the RESOLVED path...
+  resolveWithinRoot(root, relPath);
+
+  if (segments.length !== 2) {
+    throw new VaultRemoveError(
+      'nested_path',
+      relPath,
+      'this package never creates a directory inside an area, so it never removes one either',
+    );
+  }
+
+  // ...and the delete then acts on the LITERAL one. The two differ for a
+  // symlink, and the difference is the whole game: resolving first and
+  // unlinking the result means `daily/link.md -> daily/2026-01-01.md` deletes
+  // the note instead of the link — a real defect, caught by the symlink test
+  // below on its first run. Containment has already been established, so
+  // lstat-ing the literal path cannot reach outside the tree; it can only
+  // reveal that the final component is a link, which is then refused.
+  const absolute = join(realpathSync(root), ...segments);
+
+  let entry: VaultEntry;
+  try {
+    entry = entryOf(relPath, absolute);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new VaultRemoveError('missing', relPath, 'there is nothing there');
+    }
+    throw err;
+  }
+  if (entry.kind !== 'file') {
+    throw new VaultRemoveError('not_a_file', relPath, `is a ${entry.kind}, not a regular file`);
+  }
+
+  const isTemp = entry.name.startsWith(VAULT_TEMP_PREFIX);
+  if (!isTemp) {
+    const text = readIfPresent(absolute);
+    if (text === null || !isWatchfloorManaged(text)) {
+      throw new VaultRemoveError(
+        'foreign_file',
+        relPath,
+        'carries no Watchfloor frontmatter and is not one of our temp files, so it is not ours',
+      );
+    }
+  }
+
+  unlinkSync(absolute);
+  return entry;
 }
 
 /**

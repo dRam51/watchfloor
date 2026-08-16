@@ -99,6 +99,22 @@ export {
 } from './session.ts';
 
 // ---------------------------------------------------------------------------
+// When a daemon writes each area (task 15). Pure: no clock, no filesystem.
+// ---------------------------------------------------------------------------
+
+export {
+  advanceVaultSlots,
+  dueVaultWork,
+  localDayOf,
+  localHourStamp,
+  weeklyReleaseStamp,
+  NO_VAULT_SLOTS,
+  WEEKLY_RELEASE_HOUR,
+  type VaultSyncDue,
+  type VaultSyncSlots,
+} from './cadence.ts';
+
+// ---------------------------------------------------------------------------
 // The note writers (tasks 5–8). Each reported the export line it needed; each
 // is reproduced from that report rather than guessed.
 // ---------------------------------------------------------------------------

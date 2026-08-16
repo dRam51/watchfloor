@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
 import {
+  auditForbiddenCalls,
   findForbiddenCalls,
   findVaultCallersTouchingFs,
   importsNodeFs,
   importsVaultPackage,
+  VAULT_DELETE_ALLOWANCES,
   type SourceFile,
 } from '../../src/vault/sourceRules.ts';
 
@@ -262,8 +264,72 @@ describe('the vault package deletes nothing and never creates a directory chain'
   // CLAUDE.md: "Never delete anything [...] Same standard applies inside any
   // script written here." The M5 plan: "This applies with special force to
   // vault code: `vault prune` is the one job allowed to remove anything."
-  it('finds no delete and no recursive mkdir anywhere in src/vault/', () => {
-    expect(findForbiddenCalls(VAULT_SOURCES)).toEqual([]);
+  //
+  // That last clause is what M5 task 9 cashes in, and it is the ONLY exception
+  // in the project. `findForbiddenCalls` is left exactly as it was -- it still
+  // finds the delete -- and the exception is expressed as a named allowance
+  // instead, so the rule below reads "one delete, in one file, of one kind"
+  // rather than "no delete". A second one anywhere goes red.
+  it('finds no recursive mkdir, and no delete beyond the single sanctioned one', () => {
+    const audit = auditForbiddenCalls(VAULT_SOURCES, VAULT_DELETE_ALLOWANCES);
+    expect(audit.unsanctioned).toEqual([]);
+  });
+
+  it('the sanctioned delete really exists, exactly once, where the allowance says', () => {
+    // Without this half, the allowance could name a file that no longer
+    // deletes anything and the rule above would pass while guarding nothing --
+    // and, worse, the allowance would silently cover a delete added there
+    // later for some other reason.
+    const audit = auditForbiddenCalls(VAULT_SOURCES, VAULT_DELETE_ALLOWANCES);
+    expect(audit.sanctioned.map((c) => `${c.path}:${c.call}`)).toEqual([
+      `${join(VAULT_DIR, 'session.ts')}:unlinkSync`,
+    ]);
+  });
+});
+
+describe('the sanctioned-delete allowance itself', () => {
+  const files: SourceFile[] = [
+    { path: join('src', 'vault', 'session.ts'), text: 'unlinkSync(target);\n' },
+    { path: join('src', 'vault', 'prune.ts'), text: 'unlinkSync(target);\n' },
+    { path: join('src', 'vault', 'session.ts.bak'), text: 'rmSync(target);\n' },
+  ];
+
+  it('covers the exact file and call it names, and nothing else', () => {
+    const audit = auditForbiddenCalls(files, [
+      { path: join('src', 'vault', 'session.ts'), call: 'unlinkSync' },
+    ]);
+    expect(audit.sanctioned.map((c) => c.path)).toEqual([join('src', 'vault', 'session.ts')]);
+    expect(audit.unsanctioned.map((c) => c.path)).toEqual([
+      join('src', 'vault', 'prune.ts'),
+      join('src', 'vault', 'session.ts.bak'),
+    ]);
+  });
+
+  it('does not cover a different call in the allowed file', () => {
+    const audit = auditForbiddenCalls([{ path: 'a.ts', text: 'rmSync(x);\n' }], [
+      { path: 'a.ts', call: 'unlinkSync' },
+    ]);
+    expect(audit.unsanctioned.map((c) => c.call)).toEqual(['rmSync']);
+    expect(audit.sanctioned).toEqual([]);
+  });
+
+  it('does not cover the allowed call in a different file', () => {
+    const audit = auditForbiddenCalls([{ path: 'b.ts', text: 'unlinkSync(x);\n' }], [
+      { path: 'a.ts', call: 'unlinkSync' },
+    ]);
+    expect(audit.unsanctioned.map((c) => c.path)).toEqual(['b.ts']);
+  });
+
+  it('an allowance is not a wildcard: a second delete in the allowed file is still reported', () => {
+    // One allowance, one occurrence. The primitive is a single call site, and
+    // "the file may delete things" is a materially weaker rule than "this one
+    // line may".
+    const audit = auditForbiddenCalls(
+      [{ path: 'a.ts', text: 'unlinkSync(x);\nunlinkSync(y);\n' }],
+      [{ path: 'a.ts', call: 'unlinkSync' }],
+    );
+    expect(audit.sanctioned).toHaveLength(1);
+    expect(audit.unsanctioned.map((c) => c.line)).toEqual([2]);
   });
 });
 
