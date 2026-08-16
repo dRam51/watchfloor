@@ -365,8 +365,12 @@ export function pruneVault(options: PruneOptions): PruneResult {
 
   const removed: string[] = [];
   if (apply) {
+    // Every candidate is checked BEFORE any of them is removed. Asserting
+    // inside the loop would abort a run that had already deleted files, which
+    // is the one outcome worse than refusing: a partly-pruned tree with an
+    // exception on top of it.
+    for (const candidate of candidates) assertRemovable(candidate);
     for (const candidate of candidates) {
-      assertRemovable(candidate);
       try {
         removeVaultFile(root, candidate.relPath);
         removed.push(candidate.relPath);
@@ -404,7 +408,7 @@ function assertRemovable(candidate: PruneCandidate): void {
         'touched again by any job. Only the spare temp directory entry is ever removable there',
     );
   }
-  if (area === 'entities') {
+  if (area === 'entities' && !name.startsWith(VAULT_TEMP_PREFIX)) {
     throw new Error(
       `prune refused to remove ${candidate.relPath}: an entities/ note can carry the owner's own ` +
         'prose outside the managed block',

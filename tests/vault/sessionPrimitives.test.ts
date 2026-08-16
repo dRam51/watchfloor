@@ -149,6 +149,49 @@ describe('readVaultText', () => {
       'escapes_root',
     );
   });
+
+  // -------------------------------------------------------------------------
+  // THE SIBLING-PREFIX CASE, and why it has its own test here.
+  //
+  // Task 4 found `startsWith` without a separator TWICE IN ONE DAY -- once in
+  // `isContainedIn` and once in the source-rule exemption, where
+  // `startsWith('src/vault')` also matched `src/vault-sync/`. This resolver is
+  // the third place the same check exists, and an injected-defect run over
+  // this suite found that replacing `isContainedIn` with a bare
+  // `absolute.startsWith(rootReal)` here turned NOTHING red: every other
+  // containment test uses paths that also fail the naive check.
+  //
+  // A vault genuinely has sibling directories sharing a name prefix -- an
+  // `01 Tech Projects/Watchfloor-old` next to the sync root is exactly the
+  // shape of an owner's backup.
+  // -------------------------------------------------------------------------
+  function vaultWithPrefixSibling() {
+    const vault = createFixtureVault();
+    const sibling = `${vault.root}-old`; // e.g. .../Watchfloor-old
+    mkdirSync(sibling);
+    writeFileSync(join(sibling, 'Architecture.md'), '# Architecture\n\nLast year, by hand.\n');
+    symlinkSync(sibling, join(vault.root, 'daily', 'elsewhere'));
+    return vault;
+  }
+
+  it('refuses a sibling directory whose name merely starts with the root', () => {
+    const vault = vaultWithPrefixSibling();
+    expect(refusalReason(() => readVaultText(vault.root, 'daily/elsewhere/Architecture.md'))).toBe(
+      'escapes_root',
+    );
+  });
+
+  it('refuses to REMOVE anything in that sibling directory', () => {
+    const vault = vaultWithPrefixSibling();
+    const before = digestTree(`${vault.root}-old`);
+
+    try {
+      removeVaultFile(vault.root, 'daily/elsewhere/Architecture.md');
+    } catch {
+      // The assertion below is the one that matters.
+    }
+    expect(digestTree(`${vault.root}-old`)).toEqual(before);
+  });
 });
 
 /**

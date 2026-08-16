@@ -364,3 +364,107 @@ describe('pruneVault — stale fully-managed notes need a manifest', () => {
     expect(digestTree(vault.root).has(HAND_AUTHORED_ENTITY_PATH)).toBe(true);
   });
 });
+
+/**
+ * The property, over a vault holding one of everything.
+ *
+ * The case-by-case tests above each pin one rule, and an injected-defect run
+ * showed what that leaves open: adding `saved` to the prunable areas turned
+ * NOTHING red, because a second, independent guard — the tier filter — was
+ * still excluding saved notes. Defence in depth working, and a test suite that
+ * could not tell which of the two guards was carrying the weight.
+ *
+ * So this asserts the invariant itself rather than the mechanism: whatever
+ * prune decides, a candidate is always either a temp file or a fully-managed
+ * note in `daily/` or `weekly/`. Nothing in `entities/`, no `saved/` note, and
+ * nothing the owner wrote.
+ */
+describe('pruneVault — the property that outlives any one guard', () => {
+  const KEY = 'c'.repeat(64);
+
+  function everythingVault() {
+    const vault = createFixtureVault();
+    mkdirSync(join(vault.root, 'weekly'));
+
+    // Ours, fully managed, in both managed areas.
+    writeFileSync(join(vault.root, 'daily', '2026-08-15.md'), managed('fully-managed', '# Today\n'));
+    writeFileSync(join(vault.root, 'daily', '2026-08-14.md'), managed('fully-managed', '# Yesterday\n'));
+    writeFileSync(join(vault.root, 'weekly', '2026-W33.md'), managed('fully-managed', '# Week\n'));
+
+    // Ours, managed-block: an entity note with no hand-authored prose at all,
+    // which is the most deletable-looking file in the vault and must survive.
+    writeFileSync(
+      join(vault.root, 'entities', 'OpenAI.md'),
+      `---\nwatchfloor: managed\nwatchfloor_tier: managed-block\nwatchfloor_generated_at: ${GENERATED_AT}\n---\n\n# OpenAI\n`,
+    );
+
+    // Ours, write-once, written by the real session so the hard link is real.
+    const session = openVaultSession(vault.root);
+    session.writeSavedNote(
+      `saved/2026-08-15-kept-${'c'.repeat(12)}.md`,
+      managed('write-once', '# Kept\n', { item_key: KEY, title: 'Kept' }) as never,
+    );
+
+    // Leftovers in two areas, plus a stray non-Markdown file.
+    writeFileSync(join(vault.root, 'daily', `${VAULT_TEMP_PREFIX}2026-08-13.md.1.0`), 'half');
+    writeFileSync(join(vault.root, 'entities', `${VAULT_TEMP_PREFIX}Meta.md.1.0`), 'half');
+    writeFileSync(join(vault.root, 'daily', 'notes.txt'), 'mine\n');
+    return vault;
+  }
+
+  it('every candidate is a temp file or a managed daily/weekly note — nothing else, ever', () => {
+    const vault = everythingVault();
+    const result = pruneVault({
+      root: vault.root,
+      nowMs: NOW,
+      expected: ['daily/2026-08-15.md'],
+    });
+
+    expect(result.candidates.length).toBeGreaterThan(0);
+    for (const candidate of result.candidates) {
+      const name = candidate.relPath.slice(candidate.relPath.lastIndexOf('/') + 1);
+      const area = candidate.relPath.slice(0, candidate.relPath.indexOf('/'));
+      const ok =
+        name.startsWith(VAULT_TEMP_PREFIX) || ((area === 'daily' || area === 'weekly') && name.endsWith('.md'));
+      expect(ok, `${candidate.relPath} must not be prunable`).toBe(true);
+    }
+  });
+
+  it('and the exact set is the one this run can defend', () => {
+    const vault = everythingVault();
+    const result = pruneVault({
+      root: vault.root,
+      apply: true,
+      nowMs: NOW,
+      expected: ['daily/2026-08-15.md', 'weekly/2026-W33.md'],
+    });
+
+    // Three names are fixed. The fourth is the saved note's spare entry, whose
+    // name carries the writer's pid and a counter that is shared across every
+    // write in this process — so it is matched by prefix rather than pinned to
+    // a number that depends on how many tests ran before this one.
+    const savedTemp = `saved/${VAULT_TEMP_PREFIX}2026-08-15-kept-${'c'.repeat(12)}.md.`;
+    expect([...result.removed].filter((rel) => !rel.startsWith(savedTemp)).sort()).toEqual([
+      `daily/${VAULT_TEMP_PREFIX}2026-08-13.md.1.0`,
+      'daily/2026-08-14.md',
+      `entities/${VAULT_TEMP_PREFIX}Meta.md.1.0`,
+    ]);
+    expect(result.removed.filter((rel) => rel.startsWith(savedTemp))).toHaveLength(1);
+
+    // The survivors, named rather than implied.
+    const after = digestTree(vault.root);
+    for (const survivor of [
+      'daily/2026-08-15.md',
+      'weekly/2026-W33.md',
+      'entities/OpenAI.md',
+      `saved/2026-08-15-kept-${'c'.repeat(12)}.md`,
+      HAND_AUTHORED_ENTITY_PATH,
+      HAND_AUTHORED_IN_MANAGED_PATH,
+      EXISTING_SAVED_PATH,
+      'daily/notes.txt',
+      'Architecture.md',
+    ]) {
+      expect(after.has(survivor), `${survivor} must survive`).toBe(true);
+    }
+  });
+});
