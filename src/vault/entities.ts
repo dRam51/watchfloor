@@ -259,6 +259,7 @@ export type EntitySkipReason =
   | 'case_collision'
   | 'malformed_block'
   | 'too_large'
+  | 'below_note_floor'
   | VaultWriteRefusal;
 
 export interface EntitySkip {
@@ -276,10 +277,50 @@ export interface EntityPlanOptions {
   /** Items listed in the block. The count is always reported in full. */
   readonly maxItems?: number;
   readonly maxRelated?: number;
+  /**
+   * Fewest DISTINCT `item_key`s an entity needs before it earns a note.
+   * See {@link DEFAULT_MIN_ITEMS_FOR_NOTE}. Set to 1 to write a note for every
+   * extracted entity — which is what the corpus measurement below argues
+   * against, not a configuration this project recommends.
+   */
+  readonly minItems?: number;
 }
 
 export const DEFAULT_MAX_ITEMS = 20;
 export const DEFAULT_MAX_RELATED = 15;
+
+/**
+ * An entity earns a note when at least two DISTINCT items mention it.
+ *
+ * ## Why this exists, measured rather than assumed
+ *
+ * M5 task 16 landed entity extraction and took `item_entities` from 0 rows to
+ * **8,371** across 71.4% of a 7,267-version corpus. Planning notes over that
+ * result produced **2,674 notes against task 4's 500-file-per-run cap** — and
+ * **486 of the first 500 were single-CVE notes**, because CVE identifiers sort
+ * early and each appears exactly once. `Microsoft` would have been note #2624,
+ * `OpenAI` #2638, `Prompt injection` #2643: all three past the cap, so the
+ * vault would fill with thousands of one-line CVE stubs and contain none of the
+ * entities the owner actually tracks.
+ *
+ * Extraction is not wrong — a CVE mentioned once *is* an entity of that item.
+ * Note-worthiness is a different question, and it is a VAULT question, which is
+ * why task 16 escalated it here rather than weakening its own extractor.
+ *
+ * A floor of 2 yields **176 notes** on the same corpus and keeps the
+ * genuinely multi-source CVEs — the ones that appeared in both CISA KEV and
+ * NVD, which is exactly the corroboration signal M2's clustering already
+ * treats as meaningful.
+ *
+ * ## Why the floor is applied BEFORE `writable` is consulted
+ *
+ * A related-entity link is a `[[wikilink]]`. An entity that is skipped must
+ * therefore be invisible to the related-list pass as well, or the owner's graph
+ * fills with dangling links to notes that can never exist — the same reason
+ * name-refused entities are filtered at that stage. Applying the floor
+ * afterwards would produce a vault that looks complete and is not.
+ */
+export const DEFAULT_MIN_ITEMS_FOR_NOTE = 2;
 
 /**
  * Codepoint order, everywhere, deliberately.
@@ -441,6 +482,7 @@ function groupEntities(names: readonly string[]): {
 export function planEntityNotes(db: Db, options: EntityPlanOptions = {}): EntityPlan {
   const maxItems = options.maxItems ?? DEFAULT_MAX_ITEMS;
   const maxRelated = options.maxRelated ?? DEFAULT_MAX_RELATED;
+  const minItems = options.minItems ?? DEFAULT_MIN_ITEMS_FOR_NOTE;
 
   const { groups, collisions } = groupEntities(distinctEntityStrings(db));
   const skipped: EntitySkip[] = [...collisions];
@@ -453,11 +495,28 @@ export function planEntityNotes(db: Db, options: EntityPlanOptions = {}): Entity
   for (const [entity, spellings] of [...groups].sort(([a], [b]) => byCodePoint(a, b))) {
     try {
       entityFileName(entity);
-      writable.set(entity, spellings);
     } catch (err) {
       if (!(err instanceof EntityNameError)) throw err;
       skipped.push({ entity, reason: err.reason, detail: err.message });
+      continue;
     }
+
+    // The note floor, applied HERE rather than after the notes are built, so a
+    // skipped entity is also invisible to the related-list pass below. See
+    // DEFAULT_MIN_ITEMS_FOR_NOTE for the corpus measurement behind it.
+    const mentions = itemKeysForEntities(db, spellings).length;
+    if (mentions < minItems) {
+      skipped.push({
+        entity,
+        reason: 'below_note_floor',
+        detail:
+          `mentioned by ${mentions} distinct item${mentions === 1 ? '' : 's'}, ` +
+          `below the ${minItems}-item floor a note requires`,
+      });
+      continue;
+    }
+
+    writable.set(entity, spellings);
   }
 
   const notes: EntityNotePlan[] = [];

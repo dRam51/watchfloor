@@ -42,6 +42,21 @@ import {
  * against the refusal.
  */
 
+/**
+ * Task 7's tests are about how a note is RENDERED and how the owner's prose is
+ * PROTECTED -- not about which entities earn a note. They therefore pass
+ * `minItems: 1` explicitly, so a single-item fixture still produces a note and
+ * each test keeps testing the one thing it names.
+ *
+ * The production default is `DEFAULT_MIN_ITEMS_FOR_NOTE` (2), added after M5
+ * task 16 landed extraction: 2,674 entities were extracted from the real
+ * corpus and 486 of the first 500 planned notes were single-CVE stubs, so the
+ * 500-file cap would have filled the vault with them and excluded `Microsoft`,
+ * `OpenAI` and `Prompt injection` entirely. The floor itself is exercised by
+ * its own describe block at the end of this file, against that measurement.
+ */
+const RENDER_ONLY = { minItems: 1 } as const;
+
 function reasonOf(fn: () => unknown): string {
   try {
     fn();
@@ -280,7 +295,7 @@ function kevUndated(overrides: Partial<NewItem> = {}): NewItem {
 }
 
 function noteFor(db: ReturnType<typeof openDb>, entity: string) {
-  const note = planEntityNotes(db).notes.find((n) => n.entity === entity);
+  const note = planEntityNotes(db, RENDER_ONLY).notes.find((n) => n.entity === entity);
   if (!note) throw new Error(`no planned note for ${JSON.stringify(entity)}`);
   return note;
 }
@@ -403,7 +418,7 @@ describe('planEntityNotes — ordering, counts and caps', () => {
       );
     }
 
-    const note = planEntityNotes(db, { maxItems: 2 }).notes.find((n) => n.entity === AI_ONLY_ENTITY);
+    const note = planEntityNotes(db, { ...RENDER_ONLY, maxItems: 2 }).notes.find((n) => n.entity === AI_ONLY_ENTITY);
     expect(note?.items).toHaveLength(2);
     expect(note?.totalItems).toBe(5);
   });
@@ -454,7 +469,7 @@ describe('planEntityNotes — names it refuses to write, reported rather than dr
     const db = migratedDb();
     insertItem(db, arsAnthropic({ entities: ['../../Architecture'] }));
 
-    const plan = planEntityNotes(db);
+    const plan = planEntityNotes(db, RENDER_ONLY);
     expect(plan.notes).toEqual([]);
     expect(plan.skipped).toEqual([
       expect.objectContaining({ entity: '../../Architecture', reason: 'separator' }),
@@ -476,7 +491,7 @@ describe('planEntityNotes — names it refuses to write, reported rather than dr
       }),
     );
 
-    const plan = planEntityNotes(db);
+    const plan = planEntityNotes(db, RENDER_ONLY);
     expect(plan.notes.map((n) => n.entity)).toEqual([]);
     expect(plan.skipped.map((s) => [s.entity, s.reason]).sort()).toEqual([
       ['OpenAI', 'case_collision'],
@@ -503,7 +518,7 @@ describe('planEntityNotes — names it refuses to write, reported rather than dr
       }),
     );
 
-    const plan = planEntityNotes(db);
+    const plan = planEntityNotes(db, RENDER_ONLY);
     expect(plan.notes.map((n) => n.entity)).toEqual([composed]);
     expect(plan.notes[0]?.totalItems).toBe(2);
     expect(plan.notes[0]?.relPath).toBe(`entities/${composed}.md`);
@@ -522,7 +537,7 @@ describe('planEntityNotes — the state the live corpus is actually in', () => {
     insertItem(db, arsAnthropic({ entities: [] }));
     insertItem(db, kevUndated({ entities: [] }));
 
-    expect(planEntityNotes(db)).toEqual({ notes: [], skipped: [] });
+    expect(planEntityNotes(db, RENDER_ONLY)).toEqual({ notes: [], skipped: [] });
   });
 });
 
@@ -531,7 +546,7 @@ describe('planEntityNotes — the state the live corpus is actually in', () => {
 // ---------------------------------------------------------------------------
 
 function blockFor(db: ReturnType<typeof openDb>, entity: string, options = {}) {
-  const note = planEntityNotes(db, options).notes.find((n) => n.entity === entity);
+  const note = planEntityNotes(db, { ...RENDER_ONLY, ...options }).notes.find((n) => n.entity === entity);
   if (!note) throw new Error(`no planned note for ${JSON.stringify(entity)}`);
   return renderEntityBlock(note);
 }
@@ -643,7 +658,7 @@ describe('renderEntityBlock', () => {
 function syncedVault(db: ReturnType<typeof openDb>, options = {}) {
   const { anchor, root } = createFixtureVault();
   const session = openVaultSession(root, options);
-  const result = syncEntityNotes(session, db, options);
+  const result = syncEntityNotes(session, db, { ...RENDER_ONLY, ...options });
   return { anchor, root, result };
 }
 
@@ -674,7 +689,7 @@ describe('syncEntityNotes — writes only where §8.1 allows', () => {
     const { anchor, root } = createFixtureVault();
     const before = digestTree(anchor);
     const session = openVaultSession(root);
-    syncEntityNotes(session, db);
+    syncEntityNotes(session, db, RENDER_ONLY);
     const after = digestTree(anchor);
 
     for (const [name] of HAND_AUTHORED_NOTES) {
@@ -738,7 +753,7 @@ describe('syncEntityNotes — the hand-edited note survives, which is the whole 
       }),
     );
     const session = openVaultSession(root);
-    syncEntityNotes(session, db);
+    syncEntityNotes(session, db, RENDER_ONLY);
 
     const after = readFileSync(path, 'utf8');
     expect(after.startsWith(prologue)).toBe(true);
@@ -756,7 +771,7 @@ describe('syncEntityNotes — the hand-edited note survives, which is the whole 
     writeFileSync(path, malformed);
 
     const session = openVaultSession(root);
-    const result = syncEntityNotes(session, db);
+    const result = syncEntityNotes(session, db, RENDER_ONLY);
 
     expect(readFileSync(path, 'utf8')).toBe(malformed);
     expect(result.skipped).toEqual([
@@ -776,7 +791,7 @@ describe('syncEntityNotes — the hand-edited note survives, which is the whole 
     writeFileSync(join(root, HAND_AUTHORED_ENTITY_PATH), 'x'.repeat(300 * 1024));
 
     const session = openVaultSession(root);
-    const result = syncEntityNotes(session, db);
+    const result = syncEntityNotes(session, db, RENDER_ONLY);
 
     expect(result.written.map((w) => w.relPath)).toEqual(['entities/Microsoft.md']);
     expect(result.skipped).toEqual([
@@ -797,7 +812,7 @@ describe('syncEntityNotes — idempotence, which is what M5 acceptance measures'
     const first = digestTree(join(root, 'entities'));
 
     const session = openVaultSession(root);
-    syncEntityNotes(session, db);
+    syncEntityNotes(session, db, RENDER_ONLY);
 
     expect(digestTree(join(root, 'entities'))).toEqual(first);
   });
@@ -912,5 +927,96 @@ describe('the note as-of instant is derived from the corpus, not from a clock', 
     expect(readNote(root, 'entities/Microsoft.md')).toContain(
       `watchfloor_generated_at: ${KEV_FIRST_FETCHED_AT}`,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The note floor (controller ruling, after M5 task 16's extraction landed).
+//
+// Task 16 took `item_entities` from 0 rows to 8,371 across a 7,267-version
+// corpus, then escalated rather than weakening its own extractor: planning
+// notes over that result produced 2,674 notes against task 4's 500-file cap,
+// and 486 of the FIRST 500 were single-CVE stubs -- so `Microsoft` (#2624),
+// `OpenAI` (#2638) and `Prompt injection` (#2643) all fell past the cap.
+//
+// Measured on a VACUUM INTO copy of the real corpus after converging the
+// sweep: minItems 1 -> 2,674 notes, 2 -> 176, 3 -> 112. Two is the default.
+// ---------------------------------------------------------------------------
+describe('the note floor', () => {
+  it('skips an entity mentioned by only one item, and says why', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+
+    const plan = planEntityNotes(db);
+
+    expect(plan.notes.map((n) => n.entity)).not.toContain('Anthropic');
+    const skip = plan.skipped.find((s) => s.entity === 'Anthropic');
+    expect(skip?.reason).toBe('below_note_floor');
+    expect(skip?.detail).toContain('1 distinct item');
+  });
+
+  it('writes the note once a second DISTINCT item mentions it', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+    insertItem(db, arsAnthropic({
+      url: 'https://arstechnica.com/second-anthropic-story',
+      canonicalUrl: 'https://arstechnica.com/second-anthropic-story',
+    }));
+
+    const plan = planEntityNotes(db);
+
+    expect(plan.notes.map((n) => n.entity)).toContain('Anthropic');
+    expect(plan.skipped.find((s) => s.entity === 'Anthropic')).toBeUndefined();
+  });
+
+  it('counts distinct item_keys, not versions -- a re-polled item is still one mention', () => {
+    // The failure this prevents: a single story re-fetched twice would
+    // otherwise clear a floor meant to mean "two different items said this".
+    const db = migratedDb();
+    const url = 'https://arstechnica.com/one-story';
+    // Same canonicalUrl -> same item_key -> two VERSIONS of one item.
+    insertItem(db, arsAnthropic({ url, canonicalUrl: url }));
+    insertItem(db, arsAnthropic({ url, canonicalUrl: url, title: 'Anthropic, updated headline' }));
+
+    const plan = planEntityNotes(db);
+
+    expect(plan.notes.map((n) => n.entity)).not.toContain('Anthropic');
+    expect(plan.skipped.find((s) => s.entity === 'Anthropic')?.reason).toBe('below_note_floor');
+  });
+
+  it('never leaves a dangling [[wikilink]] to a note the floor skipped', () => {
+    // Why the floor is applied before `writable` is consulted. A below-floor
+    // entity must be invisible to the related-list pass too, or the owner's
+    // graph fills with links to notes that can never exist.
+    const db = migratedDb();
+    const a = 'https://arstechnica.com/anthropic-one';
+    const b = 'https://arstechnica.com/anthropic-two';
+    // `Anthropic` clears the floor at two items. `Solo` rides along on exactly
+    // one of them, so it is below the floor -- and it co-occurs with
+    // `Anthropic`, which is what makes it a candidate for Anthropic's related
+    // list and therefore a dangling link if the floor is applied too late.
+    insertItem(db, arsAnthropic({ url: a, canonicalUrl: a }));
+    insertItem(db, arsAnthropic({ url: b, canonicalUrl: b, entities: ['Anthropic', 'Solo'] }));
+
+    const plan = planEntityNotes(db);
+    const writable = new Set(plan.notes.map((n) => n.entity));
+    const belowFloor = new Set(
+      plan.skipped.filter((s) => s.reason === 'below_note_floor').map((s) => s.entity),
+    );
+
+    expect(belowFloor.size).toBeGreaterThan(0); // non-vacuity
+    for (const note of plan.notes) {
+      for (const rel of note.related) {
+        expect(writable.has(rel.entity)).toBe(true);
+        expect(belowFloor.has(rel.entity)).toBe(false);
+      }
+    }
+  });
+
+  it('minItems: 1 restores the every-entity behaviour, for callers that want it', () => {
+    const db = migratedDb();
+    insertItem(db, arsAnthropic());
+
+    expect(planEntityNotes(db, { minItems: 1 }).notes.map((n) => n.entity)).toContain('Anthropic');
   });
 });
