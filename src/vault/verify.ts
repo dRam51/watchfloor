@@ -42,9 +42,15 @@
  *   a guess.
  */
 
-import { hasManagedBlock, readWatchfloorFrontmatter, splitManagedBlock } from './frontmatter.ts';
+import {
+  hasManagedBlock,
+  readWatchfloorFrontmatter,
+  splitManagedBlock,
+  type WatchfloorFrontmatter,
+} from './frontmatter.ts';
 import { checkVaultMount } from './mount.ts';
 import { VAULT_AREAS, vaultAreaOf, type VaultArea, type VaultTier } from './paths.ts';
+import { savedNotePath, type SavedItem } from './saved.ts';
 import { readVaultText, scanVaultTree, VAULT_TEMP_PREFIX, type VaultEntry } from './session.ts';
 
 export type VaultFindingSeverity = 'error' | 'warning' | 'info';
@@ -369,6 +375,178 @@ function classifyTempFiles(
 }
 
 /**
+ * `savedNotePath` reads exactly three fields of a {@link SavedItem}. The rest
+ * are named here rather than cast away with `as`, so that if the naming rule
+ * ever grows a fourth input, `tsc` breaks in this function instead of it
+ * quietly computing a stale name and reporting every saved note as misnamed.
+ *
+ * Re-deriving `{day}-{slug}-{12 hex}` locally would be the alternative, and it
+ * would be a second implementation of the exact rule this check exists to
+ * police.
+ */
+function expectedSavedPath(entry: SavedIndexEntry, tz: string): string {
+  const item: SavedItem = {
+    itemKey: entry.itemKey,
+    title: entry.title,
+    savedAt: entry.savedAt,
+    canonicalUrl: '',
+    sourceId: '',
+    beats: [],
+    entities: [],
+    publishedAt: null,
+    firstSeenAt: entry.savedAt,
+    summaryRaw: null,
+  };
+  return savedNotePath(item, tz);
+}
+
+function stringField(front: WatchfloorFrontmatter, key: string): string | null {
+  const value = front.fields[key];
+  return typeof value === 'string' ? value : null;
+}
+
+/**
+ * The `saved/` pass: does each note's filename still follow from the note's
+ * own frontmatter, and which item is each note for?
+ *
+ * The filename is checked against the note's OWN recorded title, never against
+ * the corpus's current one. Task 3 found ten live keys whose title changed
+ * under an unchanged URL — *"Wall Street holds near its record"* became
+ * *"slips back from its record"* — and a write-once note keeps the name it was
+ * created with. Checking against today's title would report every one of those
+ * as misnamed, which is the opposite of the truth.
+ */
+function classifySavedNotes(
+  entries: readonly VaultEntry[],
+  read: (relPath: string) => string | null,
+  tz: string,
+): { findings: VaultFinding[]; pathByKey: Map<string, string> } {
+  const findings: VaultFinding[] = [];
+  const pathByKey = new Map<string, string>();
+
+  for (const entry of entries) {
+    if (entry.kind !== 'file') continue;
+    if (vaultAreaOf(entry.relPath) !== 'saved') continue;
+    if (entry.name.startsWith(VAULT_TEMP_PREFIX) || !entry.name.endsWith('.md')) continue;
+
+    const text = read(entry.relPath);
+    const front = text === null ? null : readWatchfloorFrontmatter(text);
+    if (front === null || front.tier !== 'write-once') continue; // reported elsewhere
+
+    const itemKey = stringField(front, 'item_key');
+    const title = stringField(front, 'title');
+    const savedAt = stringField(front, 'saved_at');
+    if (itemKey === null || title === null || savedAt === null) {
+      findings.push(
+        finding(
+          'saved_filename_mismatch',
+          'warning',
+          entry.relPath,
+          'the frontmatter is missing one of item_key, title or saved_at, so the filename this ' +
+            'note should have cannot be derived from the note itself',
+        ),
+      );
+      continue;
+    }
+    pathByKey.set(itemKey, entry.relPath);
+
+    let expected: string;
+    try {
+      expected = expectedSavedPath({ itemKey, title, savedAt }, tz);
+    } catch (err) {
+      findings.push(
+        finding(
+          'saved_filename_mismatch',
+          'warning',
+          entry.relPath,
+          `the filename cannot be derived from this note's own frontmatter: ${(err as Error).message}`,
+        ),
+      );
+      continue;
+    }
+    if (expected !== entry.relPath) {
+      findings.push(
+        finding(
+          'saved_filename_mismatch',
+          'warning',
+          entry.relPath,
+          `its own frontmatter implies ${expected}. The note is never rewritten, so this is a ` +
+            'record of the naming rule changing, not of the note being wrong',
+        ),
+      );
+    }
+  }
+  return { findings, pathByKey };
+}
+
+/**
+ * The two checks that need the corpus, and the reason they exist.
+ *
+ * Task 8 measured §8.1's `saved/{day}-{slug}.md` as unimplementable — 185
+ * collision groups over 551 of 5,937 items, the largest being 24 distinct CVEs
+ * CISA publishes under one identical title — and settled on an unconditional
+ * 12-hex item-key suffix, leaving one stated residual:
+ *
+ * > Residual collision (12-hex agreement inside one day+slug bucket, ~10⁻¹²) is
+ * > stated rather than hidden, and `vault verify` can close it.
+ *
+ * **The collision is between two items, not between two files.** One file is
+ * all that can ever exist at the path: the second item's promotion is refused
+ * as `exists`, and nothing on disk records that it was lost. So the check runs
+ * over the corpus's saved set, where it is exact rather than probabilistic.
+ */
+function classifyCorpus(
+  savedIndex: readonly SavedIndexEntry[],
+  pathByKey: ReadonlyMap<string, string>,
+  tz: string,
+): VaultFinding[] {
+  const findings: VaultFinding[] = [];
+  const byPath = new Map<string, string[]>();
+
+  for (const entry of savedIndex) {
+    let path: string;
+    try {
+      path = expectedSavedPath(entry, tz);
+    } catch {
+      continue; // a malformed key is the corpus's problem, not the vault's
+    }
+    const keys = byPath.get(path) ?? [];
+    if (!keys.includes(entry.itemKey)) keys.push(entry.itemKey);
+    byPath.set(path, keys);
+  }
+
+  for (const [path, keys] of byPath) {
+    if (keys.length > 1) {
+      findings.push(
+        finding(
+          'saved_key_collision',
+          'error',
+          path,
+          `${keys.length} saved items compute this same filename (${keys.join(', ')}), so only ` +
+            'the first was ever promoted and the others were refused as already-present',
+        ),
+      );
+    }
+  }
+
+  for (const entry of savedIndex) {
+    if (pathByKey.has(entry.itemKey)) continue;
+    findings.push(
+      finding(
+        'saved_note_missing',
+        'warning',
+        null,
+        `the corpus says ${entry.itemKey} is saved and no note carries that key. Both causes are ` +
+          'possible and this tool cannot tell them apart: the item was saved while the vault was ' +
+          'unmounted (promotion runs at save time and there is deliberately no backfill), or the ' +
+          'owner deleted the note. Nothing here will recreate it',
+      ),
+    );
+  }
+  return findings;
+}
+
+/**
  * Reads the vault and reports. Writes nothing, ever.
  */
 export function verifyVault(options: VaultVerifyOptions): VaultVerifyReport {
@@ -453,6 +631,12 @@ export function verifyVault(options: VaultVerifyOptions): VaultVerifyReport {
   }
 
   findings.push(...classifyTempFiles(entries, read));
+
+  const saved = classifySavedNotes(entries, read, options.tz);
+  findings.push(...saved.findings);
+  if (options.savedIndex !== undefined) {
+    findings.push(...classifyCorpus(options.savedIndex, saved.pathByKey, options.tz));
+  }
 
   if (entries.some((entry) => entry.relPath === 'entities' && entry.kind === 'directory')) {
     if (notesByArea.entities === 0) {

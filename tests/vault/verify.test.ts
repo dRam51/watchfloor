@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { verifyVault, type VaultFinding } from '../../src/vault/verify.ts';
 import { renderManagedNote, WATCHFLOOR_BEGIN_MARKER, WATCHFLOOR_END_MARKER } from '../../src/vault/frontmatter.ts';
-import { VAULT_TEMP_PREFIX } from '../../src/vault/session.ts';
+import { openVaultSession, VAULT_TEMP_PREFIX } from '../../src/vault/session.ts';
+import { WIN32K_GROUP } from './corpus.ts';
 import {
   createFixtureVault,
   digestTree,
@@ -297,5 +298,185 @@ describe('verifyVault — things nothing here creates', () => {
       (f) => f.relPath === `daily/${temp}`,
     );
     expect(finding?.code).toBe('temp_leftover');
+  });
+});
+
+/**
+ * The `saved/` tier — §8.1's "written once at creation, then never touched
+ * again by any job. Not even to fix a typo."
+ *
+ * Every note here is written by the REAL write session, because the property
+ * being checked is a property of what `link(2)` leaves behind. Task 4 took a
+ * permanent temp hard link per saved note deliberately, asserted by inode
+ * equality; verify has to recognise that pair, and — the part that matters —
+ * has to tell it apart from the one case where the same two names hold
+ * DIFFERENT bytes.
+ */
+describe('verifyVault — saved/ and its hard links', () => {
+  const KEY_A = 'a'.repeat(64);
+  const KEY_B = `${'a'.repeat(12)}${'b'.repeat(52)}`; // same 12-hex prefix as KEY_A
+  const SAVED_AT = '2026-08-15T09:30:00.000Z';
+
+  function savedNote(itemKey: string, title: string, body = '# A piece\n'): string {
+    return renderManagedNote({
+      tier: 'write-once',
+      generatedAt: SAVED_AT,
+      body,
+      fields: { item_key: itemKey, title, saved_at: SAVED_AT },
+    });
+  }
+
+  it('recognises the permanent temp link the real writer leaves, and says the note is fine', () => {
+    const vault = createFixtureVault();
+    const session = openVaultSession(vault.root);
+    const rel = `saved/2026-08-15-a-piece-${KEY_A.slice(0, 12)}.md`;
+    session.writeSavedNote(rel, savedNote(KEY_A, 'A piece') as never);
+
+    const report = verifyVault({ root: vault.root, tz: TZ });
+    const temp = report.findings.find((f) => f.code === 'temp_hard_link');
+
+    expect(temp).toBeDefined();
+    expect(temp?.severity).toBe('info');
+    expect(temp?.detail).toContain(rel);
+    // The note itself is correct: nothing is said about it.
+    expect(codesFor(report.findings, rel)).toEqual([]);
+  });
+
+  it('proves a write-once note was replaced after creation, using its twin', () => {
+    // An editor that writes atomically gives the note a NEW inode and leaves
+    // the original bytes reachable under the temp name. That is the only
+    // evidence this system can have that a saved note changed, and it is why
+    // prune may never remove a temp file whose inode does not match its twin.
+    const vault = createFixtureVault();
+    const session = openVaultSession(vault.root);
+    const rel = `saved/2026-08-15-a-piece-${KEY_A.slice(0, 12)}.md`;
+    session.writeSavedNote(rel, savedNote(KEY_A, 'A piece') as never);
+
+    const scratch = join(vault.root, 'saved', 'scratch');
+    writeFileSync(scratch, savedNote(KEY_A, 'A piece', '# A piece\n\nTypo fixed by hand.\n'));
+    renameSync(scratch, join(vault.root, rel));
+
+    const finding = verifyVault({ root: vault.root, tz: TZ }).findings.find(
+      (f) => f.code === 'saved_replaced',
+    );
+    expect(finding?.severity).toBe('error');
+    expect(finding?.relPath).toBe(rel);
+  });
+
+  it('reports a saved note whose filename disagrees with its own frontmatter', () => {
+    const vault = createFixtureVault();
+    // Correct suffix, wrong day: the note says it was saved on the 15th.
+    writeFileSync(
+      join(vault.root, 'saved', `2020-01-01-a-piece-${KEY_A.slice(0, 12)}.md`),
+      savedNote(KEY_A, 'A piece'),
+    );
+
+    const finding = verifyVault({ root: vault.root, tz: TZ }).findings.find(
+      (f) => f.code === 'saved_filename_mismatch',
+    );
+    expect(finding?.detail).toContain('2026-08-15-a-piece');
+  });
+});
+
+/**
+ * Task 8's residual, closed.
+ *
+ * > Residual collision (12-hex agreement inside one day+slug bucket, ~10⁻¹²) is
+ * > stated rather than hidden, and `vault verify` can close it.
+ *
+ * The collision is between two ITEMS, not between two files — one file is all
+ * that can ever exist at the path, so the second item is simply never promoted
+ * and nothing on disk records that it was lost. So the check is over the
+ * corpus's saved set, and it is exact rather than probabilistic.
+ */
+describe('verifyVault — the corpus view', () => {
+  const KEY_A = 'a'.repeat(64);
+  const KEY_B = `${'a'.repeat(12)}${'b'.repeat(52)}`;
+  const SAVED_AT = '2026-08-15T09:30:00.000Z';
+
+  it('reports two saved items that compute the same filename', () => {
+    const vault = createFixtureVault();
+    const report = verifyVault({
+      root: vault.root,
+      tz: TZ,
+      savedIndex: [
+        { itemKey: KEY_A, title: 'Microsoft Win32k Privilege Escalation Vulnerability', savedAt: SAVED_AT },
+        { itemKey: KEY_B, title: 'Microsoft Win32k Privilege Escalation Vulnerability', savedAt: SAVED_AT },
+      ],
+    });
+
+    const finding = report.findings.find((f) => f.code === 'saved_key_collision');
+    expect(finding?.severity).toBe('error');
+    expect(finding?.detail).toContain(KEY_A);
+    expect(finding?.detail).toContain(KEY_B);
+  });
+
+  it('does not cry collision over the 24 real Win32k CVEs, which is the whole point of the suffix', () => {
+    // The identical-title group that made §8.1's `saved/{day}-{slug}.md`
+    // unimplementable. Same day, same slug, 24 distinct keys — and 24 distinct
+    // filenames, because the suffix is unconditional.
+    const vault = createFixtureVault();
+    const report = verifyVault({
+      root: vault.root,
+      tz: TZ,
+      savedIndex: WIN32K_GROUP.map((row) => ({
+        itemKey: row.itemKey,
+        title: row.title,
+        savedAt: SAVED_AT,
+      })),
+    });
+
+    expect(report.findings.filter((f) => f.code === 'saved_key_collision')).toEqual([]);
+  });
+
+  it('reports a saved item with no note, and names both possible causes', () => {
+    const vault = createFixtureVault();
+    const report = verifyVault({
+      root: vault.root,
+      tz: TZ,
+      savedIndex: [{ itemKey: KEY_A, title: 'A piece', savedAt: SAVED_AT }],
+    });
+
+    const finding = report.findings.find((f) => f.code === 'saved_note_missing');
+    expect(finding?.severity).toBe('warning');
+    // Promotion happens at save time and there is deliberately no backfill, so
+    // an item saved while the vault was unmounted has no note and never will.
+    expect(finding?.detail).toContain('unmounted');
+    expect(finding?.detail).toContain('deleted');
+  });
+
+  it('says nothing about the corpus when no index is supplied', () => {
+    const vault = createFixtureVault();
+    const codes = verifyVault({ root: vault.root, tz: TZ }).findings.map((f) => f.code);
+    expect(codes).not.toContain('saved_note_missing');
+    expect(codes).not.toContain('saved_key_collision');
+  });
+
+  it('matches a note to its item by KEY, not by filename', () => {
+    // Task 3 found ten live keys whose title changed under an unchanged URL --
+    // "Wall Street holds near its record" became "slips back from". A note is
+    // written once under the old title and keeps that name forever, so matching
+    // on a recomputed filename would report every one of them as missing.
+    const vault = createFixtureVault();
+    const session = openVaultSession(vault.root);
+    const rel = `saved/2026-08-15-wall-street-holds-near-its-record-${KEY_A.slice(0, 12)}.md`;
+    session.writeSavedNote(
+      rel,
+      renderManagedNote({
+        tier: 'write-once',
+        generatedAt: SAVED_AT,
+        body: '# Wall Street holds near its record\n',
+        fields: { item_key: KEY_A, title: 'Wall Street holds near its record', saved_at: SAVED_AT },
+      }) as never,
+    );
+
+    const report = verifyVault({
+      root: vault.root,
+      tz: TZ,
+      savedIndex: [
+        { itemKey: KEY_A, title: 'Wall Street slips back from its record', savedAt: SAVED_AT },
+      ],
+    });
+    expect(report.findings.map((f) => f.code)).not.toContain('saved_note_missing');
   });
 });
