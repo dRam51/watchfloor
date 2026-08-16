@@ -7,11 +7,24 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **M0–M3 complete. M4a repos lane complete — 11 tasks (9 planned + 2 found by the live
-run).** **2,086 tests.** 28 sources, all robots-verified. **M4b (markets) is deferred, not
-skipped**: its entire input is `config/portfolio.yaml`, which only the owner can write. **M5
-(enrichment, vault, MCP, CLI) is in progress**, plan at
-`docs/superpowers/plans/2026-08-14-m5-enrichment-vault-mcp-cli.md`.
+Status: **M0–M3, M4a and M5 complete.** **3,559 tests / 153 files.** 28 sources, 11,016 items,
+12,232 entity rows. **M4b (markets) is deferred, not skipped**: its entire input is
+`config/portfolio.yaml`, which only the owner can write, and its absence leaves three of §8.2's
+five bot tools reporting `not_configured`. Next is **M6 — hardening and portability**.
+
+> [!important] M5's acceptance passed, and what it could NOT establish matters as much
+> Four of five criteria are proven against the owner's **real** iCloud vault and the live
+> corpus, not fixtures: the tree moved aside and rebuilt **177 of 178 files byte-identical**;
+> hand-written prose above *and* below a managed block survived a sync untouched; a point-in-time
+> read matched SQL ground truth exactly (459 → 458 candidates); §7.4's graph renders. Zero paid
+> requests fire with `WF_ALLOW_PAID_ANTHROPIC` unset, proven by three injected bypasses.
+>
+> **But `item_state` holds `0 saved · 1 read · 0 dismissed` across 11,016 items.** Five features
+> are therefore *correct by construction and by unit test, and unproven against use*: `saved/`
+> promotion, `verify`'s saved-note checks, the weekly note's "haven't opened" filter, the
+> dismissal-signal log, and interest-profile proposals. Twenty minutes of real dashboard use
+> converts that column — and is also the only way to answer §7's acceptance question, which is
+> still open from M3: does it *read like a terminal rather than a content feed*.
 
 > [!important] The unowned seam is this project's characteristic defect. It has now happened **seven times**.
 > Every instance is the same shape: a component that is correctly built, fully tested, and
