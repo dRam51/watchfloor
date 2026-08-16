@@ -18,6 +18,8 @@
     "score:force": "node --env-file=.env src/bin/score.ts --force",
     "rank": "node --env-file=.env src/bin/rank.ts",
     "suggest": "node --env-file=.env src/bin/suggest.ts",
+    "vault": "node --env-file=.env src/bin/vault.ts",
+    "scheduler": "node --env-file=.env src/bin/scheduler.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json && tsc -p web/tsconfig.json",
