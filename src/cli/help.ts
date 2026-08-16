@@ -60,6 +60,11 @@ const DESCRIPTIONS: Readonly<Record<string, string>> = {
   // client spawns it and speaks JSON-RPC over its stdin/stdout, so running it
   // by hand gets a process that waits silently for a protocol message.
   mcp: 'the read-only MCP server for the trading bot — spawned by an MCP client over stdio, not run by hand',
+  // Added by M6, prompted by this same completeness check. Two things worth
+  // knowing are deliberately in the sentence rather than only in the module:
+  // it verifies (a copy nobody read is a hypothesis), and it is same-disk (so
+  // it answers a bad migration, not a dead laptop).
+  backup: 'write one verified copy of the corpus — same disk, so copy it off for a real backup',
 };
 
 /**

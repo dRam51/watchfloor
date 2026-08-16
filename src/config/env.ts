@@ -67,6 +67,19 @@ const EnvSchema = z.object({
   // real consumer arrives.
   WF_DATA_DIR: relativePath.optional(),
   WF_LOG_DIR: relativePath.optional(),
+  /**
+   * Where `npm run backup` writes (M6). Optional, defaulting to `./backups`
+   * in src/bin/backup.ts rather than here, so the schema keeps stating
+   * validation rather than policy.
+   *
+   * Relative-only, like every other WF_* path except WF_VAULT_ROOT. That is a
+   * deliberate limitation worth knowing: a backup written inside the repo is
+   * on the same disk as the corpus it copies, which protects against a bad
+   * migration but NOT against the disk failing. Getting a copy off the machine
+   * is a separate act, and the runbook says so rather than the variable
+   * implying otherwise.
+   */
+  WF_BACKUP_DIR: relativePath.optional(),
   WF_VAULT_ROOT: vaultRootPath.optional(),
   WF_TZ: z.string().min(1).refine(isValidTimeZone, {
     message: 'must be a valid IANA timezone, e.g. America/New_York',
