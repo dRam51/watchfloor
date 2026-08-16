@@ -155,9 +155,16 @@ export function dueVaultWork(slots: VaultSyncSlots, now: string, tz: string): Va
   const dailySlot = localHourStamp(now, tz);
   const date = dailySlot.slice(0, 10);
   const week = isoWeekOf(date);
+  const daily = slots.daily !== dailySlot;
   return {
-    daily: slots.daily !== dailySlot,
-    weekly: slots.weekly !== week.label && dailySlot >= weeklyReleaseStamp(week),
+    daily,
+    // `daily &&` is the coupling described above, and it is not decoration.
+    // The weekly watermark advances only on success, so its own condition
+    // stays true for every remaining tick of the evening after a refusal —
+    // roughly 360 of them — and the retry path would reproduce the exact
+    // "loud every tick" failure the trigger was designed to avoid. Making the
+    // daily slot the attempt clock for both bounds retries to one an hour.
+    weekly: daily && slots.weekly !== week.label && dailySlot >= weeklyReleaseStamp(week),
     date,
     week,
     dailySlot,

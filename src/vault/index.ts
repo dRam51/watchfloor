@@ -96,6 +96,19 @@ export {
   type VaultCaps,
   type VaultWriteRefusal,
   type VaultWriteResult,
+  // Task 9's read and remove primitives. `readVaultText` needs a SECOND
+  // resolver because `atomicWrite` names its temp files with a leading dot and
+  // `resolveVaultPath` refuses every dot-prefixed segment — so the files
+  // `prune` exists to find are exactly the ones the write path cannot express.
+  readVaultText,
+  removeVaultFile,
+  scanVaultTree,
+  VaultAccessError,
+  VaultRemoveError,
+  type VaultAccessRefusal,
+  type VaultEntry,
+  type VaultEntryKind,
+  type VaultRemoveRefusal,
 } from './session.ts';
 
 // ---------------------------------------------------------------------------
@@ -214,6 +227,39 @@ export {
   type VaultSyncWork,
   type VaultTarget,
 } from './sync.ts';
+
+// ---------------------------------------------------------------------------
+// The audit and the one job allowed to remove anything (task 9).
+//
+// Added here by task 15 rather than by task 9 itself — `src/vault/index.ts`
+// belonged to this task, and `tests/vault/wiring.test.ts` failed on the day
+// `verify.ts` and `prune.ts` landed without an entry, which is the barrel rule
+// doing its job on a sibling's change. Reproduced from their exported surface;
+// if task 9's report names a different set, reconcile against it.
+// ---------------------------------------------------------------------------
+
+export {
+  readSavedIndex,
+  verifyVault,
+  type SavedIndexEntry,
+  type VaultFinding,
+  type VaultFindingCode,
+  type VaultFindingSeverity,
+  type VaultVerifyOptions,
+  type VaultVerifyReport,
+} from './verify.ts';
+
+export {
+  pruneVault,
+  DEFAULT_MAX_DELETIONS_PER_RUN,
+  DEFAULT_MIN_TEMP_AGE_MS,
+  type PruneCandidate,
+  type PruneOptions,
+  type PruneReason,
+  type PruneResult,
+  type PruneSkip,
+  type PruneSkipReason,
+} from './prune.ts';
 
 export {
   promoteSavedItem,

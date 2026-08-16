@@ -185,6 +185,72 @@ describe('the scan reads this repository', () => {
   });
 });
 
+describe('every vault entrypoint is reachable from a way of starting this system', () => {
+  it.each(VAULT_ENTRYPOINTS)(
+    '$symbol has a caller — otherwise $consequence',
+    ({ symbol, definedIn }) => {
+      expect(MODULES.has(definedIn), `${definedIn} must exist`).toBe(true);
+      expect(callersOf(symbol, definedIn)).not.toEqual([]);
+    },
+  );
+
+  it.each(VAULT_ENTRYPOINTS)(
+    '$symbol is reachable from src/bin — otherwise $consequence',
+    ({ symbol, definedIn }) => {
+      // The half module reachability alone does not give: `github_search` was
+      // in the tree, exported, and imported by a barrel. What was missing was
+      // a key in a registry object inside a composition root.
+      const reachableCallers = callersOf(symbol, definedIn).filter((p) => REACHABLE.has(p));
+      expect(reachableCallers).not.toEqual([]);
+    },
+  );
+
+  it('reaches the vault through BOTH entrypoints, not just the one-shot', () => {
+    // M4a again, precisely: the daemon is the path that actually accumulates
+    // state in production, and a hand-run `npm run ingest` looked identical
+    // while covering 8 repos and stopping. A vault sync wired only into
+    // src/bin/vault.ts would leave the daemon writing nothing, forever, with
+    // every test green.
+    for (const root of ['vault.ts', 'scheduler.ts']) {
+      const reached = reachableFrom([join(SRC, 'bin', root)]);
+      expect(reached, `src/bin/${root} does not reach the vault sync`).toContain(
+        join(SRC, 'vault', 'sync.ts'),
+      );
+    }
+  });
+
+  it('drives the daemon from the cadence, not from a raw clock comparison', () => {
+    // Structural, and deliberately so: the daemon's tick cannot be run in a
+    // test (it polls 28 real sources), so what is pinned here is that its
+    // vault work goes through the level-triggered slots rather than through
+    // the two rules src/vault/cadence.ts exists to replace. A future edit that
+    // reached for `getHours() === 18` would leave every other test green.
+    const scheduler = MODULES.get(join(SRC, 'bin', 'scheduler.ts'))?.text ?? '';
+    expect(scheduler).not.toBe('');
+    for (const call of ['dueVaultWork(', 'advanceVaultSlots(', 'runVaultSync(']) {
+      expect(scheduler, `src/bin/scheduler.ts does not call ${call}`).toContain(call);
+    }
+    // And it reads the zone from config, never from the host.
+    expect(scheduler).toContain('env.WF_TZ');
+    expect(scheduler).not.toMatch(/getHours\(\)|getDay\(\)|resolvedOptions\(\)/);
+  });
+
+  it('reaches saved-item promotion from the API, and only from the API', () => {
+    // Promotion is an event on the save transition, never part of a sync pass:
+    // a reconciliation pass cannot tell "never written" from "the owner
+    // deleted it", and would rebuild what `saved/`'s never-regenerated rule
+    // forbids. So the API must reach it and the sync entrypoints must not.
+    const fromApi = reachableFrom([join(SRC, 'bin', 'api.ts')]);
+    expect(fromApi).toContain(join(SRC, 'api', 'routes', 'items.ts'));
+    expect(callersOf('promoteSavedItem', join(SRC, 'vault', 'saved.ts'))).toEqual([
+      join(SRC, 'vault', 'sync.ts'),
+    ]);
+    for (const module of [join(SRC, 'bin', 'vault.ts'), join(SRC, 'bin', 'scheduler.ts')]) {
+      expect(MODULES.get(module)?.text).not.toMatch(/\bpromoteSavedItem\w*\s*\(/);
+    }
+  });
+});
+
 describe('the barrel is the whole package, not a quarter of it', () => {
   it('exports every entrypoint Wave 2 built', async () => {
     const barrel = await import('../../src/vault/index.ts');

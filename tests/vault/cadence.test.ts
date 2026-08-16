@@ -240,6 +240,24 @@ describe('the two watermarks are advanced differently, and the asymmetry is the 
     expect(state.daily).toBe('2026-08-12T14');
   });
 
+  it('does not retry a refused weekly note within the same hour', () => {
+    // The daily slot is the ATTEMPT CLOCK for both. Without that coupling the
+    // weekly flag stays true for every one of the ~360 remaining ticks in the
+    // evening, because its watermark advances only on success — so a refused
+    // Friday write would be retried, and logged, every 60 seconds until
+    // midnight. That is the same "loud every tick" failure the module exists
+    // to avoid, arriving through the retry path instead of the trigger.
+    const friday = dueVaultWork(NO_VAULT_SLOTS, '2026-08-14T22:00:00.000Z', TZ_NY);
+    const refused = advanceVaultSlots(NO_VAULT_SLOTS, friday, { weeklyWritten: false });
+
+    const sameHour = dueVaultWork(refused, '2026-08-14T22:01:00.000Z', TZ_NY);
+    expect(sameHour.daily).toBe(false);
+    expect(sameHour.weekly).toBe(false);
+
+    // And it IS retried once the hour rolls.
+    expect(dueVaultWork(refused, '2026-08-14T23:00:00.000Z', TZ_NY).weekly).toBe(true);
+  });
+
   it('advances the weekly slot only on a SUCCESS, so a missed week is retried', () => {
     // A refused Friday-evening write (vault unmounted) must not consume the
     // week: the next slot for the daily note is an hour away and writes the
