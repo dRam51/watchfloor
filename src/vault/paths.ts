@@ -163,8 +163,13 @@ export function isContainedIn(root: string, target: string): boolean {
  * loudly at `open` with the kernel's own error rather than one invented here.
  * ELOOP and EACCES are deliberately NOT caught — a symlink cycle or an
  * unreadable ancestor is a real condition the caller must see.
+ *
+ * Exported for `session.ts`'s inspection primitives (M5 task 9), which need
+ * the same resolution under a different set of syntactic rules. Sharing it is
+ * the point: two implementations of "where does this path really land" is how
+ * one of them ends up with the separator bug the other already fixed.
  */
-function realpathOfDeepestExisting(p: string): string {
+export function realpathOfDeepestExisting(p: string): string {
   const tail: string[] = [];
   let current = p;
   for (;;) {

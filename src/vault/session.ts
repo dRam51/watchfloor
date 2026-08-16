@@ -55,14 +55,16 @@ import {
   existsSync,
   fsyncSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   applyManagedBlock,
   hasManagedBlock,
@@ -73,7 +75,13 @@ import {
   type ManagedContent,
 } from './frontmatter.ts';
 import { assertVaultMounted, icloudPlaceholderFor } from './mount.ts';
-import { isContainedIn, resolveVaultPath, type ResolvedVaultPath, type VaultTier } from './paths.ts';
+import {
+  isContainedIn,
+  realpathOfDeepestExisting,
+  resolveVaultPath,
+  type ResolvedVaultPath,
+  type VaultTier,
+} from './paths.ts';
 
 /** Recognisable, dot-prefixed (so Obsidian ignores it) and prune-able. */
 export const VAULT_TEMP_PREFIX = '.watchfloor-tmp-';
@@ -386,6 +394,197 @@ export class VaultSession {
     this.#filesWritten += 1;
     return { relPath: resolved.relPath, bytes, created };
   }
+}
+
+// ---------------------------------------------------------------------------
+// The READ primitives (M5 task 9).
+//
+// `vault verify` and `vault prune` need to walk the sync root and read what is
+// there. Neither may import the filesystem itself: the rule in
+// `tests/vault/sourceProperties.test.ts` exempts exactly three modules, and
+// this is one of them. So the traversal lives here, next to the writer whose
+// leftovers it is looking for — a change to the temp-file naming scheme and
+// the code that recognises those files are then in the same diff.
+// ---------------------------------------------------------------------------
+
+export type VaultAccessRefusal =
+  | 'empty'
+  | 'absolute'
+  | 'nul_byte'
+  | 'backslash'
+  | 'parent_traversal'
+  | 'dot_segment'
+  | 'root_unresolvable'
+  | 'escapes_root';
+
+export class VaultAccessError extends Error {
+  readonly reason: VaultAccessRefusal;
+  constructor(reason: VaultAccessRefusal, relPath: string, detail: string) {
+    super(`refusing vault access to ${JSON.stringify(relPath)}: ${detail} (${reason})`);
+    this.name = 'VaultAccessError';
+    this.reason = reason;
+  }
+}
+
+/**
+ * Containment for a path that is being INSPECTED rather than written.
+ *
+ * Deliberately not {@link resolveVaultPath}, and the difference is one rule:
+ * a **dot-prefixed final segment is allowed**. `atomicWrite` names its temp
+ * files `.watchfloor-tmp-…`, and `resolveVaultPath` refuses every dot-prefixed
+ * segment — so the files `vault prune` exists to remove are, by construction,
+ * the ones the write path cannot express. A reader that could not name them
+ * either would leave them undiscoverable.
+ *
+ * Everything else is kept: no absolutes, no `..`, no NUL, no backslash, no
+ * empty or bare-dot segment, and containment re-checked after symlink
+ * resolution. A dot-prefixed *directory* segment is still refused, so
+ * `.obsidian/…` is not addressable through here either.
+ */
+function resolveWithinRoot(root: string, relPath: string): string {
+  if (relPath.trim() === '') {
+    throw new VaultAccessError('empty', relPath, 'a vault path must name something');
+  }
+  if (relPath.includes('\0')) {
+    throw new VaultAccessError('nul_byte', relPath, 'contains a NUL byte');
+  }
+  if (relPath.includes('\\')) {
+    throw new VaultAccessError('backslash', relPath, 'contains a backslash');
+  }
+  if (isAbsolute(relPath)) {
+    throw new VaultAccessError('absolute', relPath, 'vault paths are relative to the sync root');
+  }
+
+  const segments = relPath.split('/');
+  segments.forEach((segment, index) => {
+    if (segment === '..') {
+      throw new VaultAccessError('parent_traversal', relPath, 'contains a `..` segment');
+    }
+    const isLast = index === segments.length - 1;
+    if (segment === '.' || segment === '' || (segment.startsWith('.') && !isLast)) {
+      throw new VaultAccessError(
+        'dot_segment',
+        relPath,
+        'contains an empty segment, a bare dot, or a dot-prefixed directory',
+      );
+    }
+  });
+
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+  } catch (err) {
+    throw new VaultAccessError(
+      'root_unresolvable',
+      relPath,
+      `sync root does not resolve: ${(err as Error).message}`,
+    );
+  }
+
+  const absolute = realpathOfDeepestExisting(join(rootReal, ...segments));
+  if (!isContainedIn(rootReal, absolute)) {
+    throw new VaultAccessError(
+      'escapes_root',
+      relPath,
+      'resolves outside the sync root after symlink resolution',
+    );
+  }
+  return absolute;
+}
+
+/**
+ * The bytes of one file under the sync root, or `null` if it is not there.
+ *
+ * Read-only by construction, so it is the one primitive that does not need the
+ * area gate: `vault verify` must be able to see the owner's hand-authored
+ * notes sitting in the sync root in order to REPORT them, and reporting a file
+ * is the opposite of touching it. Containment still applies in full.
+ */
+export function readVaultText(root: string, relPath: string): string | null {
+  return readIfPresent(resolveWithinRoot(root, relPath));
+}
+
+export type VaultEntryKind = 'file' | 'directory' | 'symlink' | 'other';
+
+export interface VaultEntry {
+  /** Path relative to the sync root, `/`-separated. */
+  readonly relPath: string;
+  readonly name: string;
+  readonly kind: VaultEntryKind;
+  /** 0 for anything that is not a regular file. */
+  readonly bytes: number;
+  /**
+   * Hard links to these bytes. **2 is how a `saved/` note's permanent temp
+   * link is told apart from a crash leftover**, which is the distinction that
+   * keeps `vault prune` from removing the only name a saved note has.
+   */
+  readonly nlink: number;
+  /**
+   * `dev:ino` — a device-qualified identity, so two files on different
+   * filesystems that happen to share an inode number are not confused.
+   */
+  readonly inode: string;
+  readonly mtimeMs: number;
+}
+
+function entryOf(relPath: string, absolute: string): VaultEntry {
+  // lstat, never stat: a symlink must be reported as a symlink rather than as
+  // whatever it points at. See `scanVaultTree` for why that matters here.
+  const stats = lstatSync(absolute);
+  const kind: VaultEntryKind = stats.isSymbolicLink()
+    ? 'symlink'
+    : stats.isFile()
+      ? 'file'
+      : stats.isDirectory()
+        ? 'directory'
+        : 'other';
+  return {
+    relPath,
+    name: basename(relPath),
+    kind,
+    bytes: kind === 'file' ? stats.size : 0,
+    nlink: stats.nlink,
+    inode: `${stats.dev}:${stats.ino}`,
+    mtimeMs: stats.mtimeMs,
+  };
+}
+
+/**
+ * Every entry under the sync root, sorted by path. Reads only.
+ *
+ * **Symlinks are reported and never followed.** The sync root is a directory
+ * the owner can put anything into, and following a link would let
+ * `daily/elsewhere -> ../../02 Career` turn a read-only audit of Watchfloor's
+ * own subtree into a read of the owner's wider vault. The same property keeps
+ * a link cycle from hanging the walk.
+ *
+ * A missing root answers `[]` rather than throwing: M5 acceptance deletes the
+ * whole `watchfloor/` tree, and "there is nothing there" is a state verify
+ * must be able to report.
+ */
+export function scanVaultTree(root: string): VaultEntry[] {
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+
+  const found: VaultEntry[] = [];
+  const walk = (dirAbsolute: string, prefix: string): void => {
+    for (const child of readdirSync(dirAbsolute, { withFileTypes: true })) {
+      const relPath = prefix === '' ? child.name : `${prefix}/${child.name}`;
+      const absolute = join(dirAbsolute, child.name);
+      const entry = entryOf(relPath, absolute);
+      found.push(entry);
+      // Only a real directory is descended into. `child.isDirectory()` is
+      // false for a symlink to one, which is exactly the behaviour wanted.
+      if (entry.kind === 'directory') walk(absolute, relPath);
+    }
+  };
+  walk(rootReal, '');
+  return found.sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
 }
 
 /**
