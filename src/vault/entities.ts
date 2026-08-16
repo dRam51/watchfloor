@@ -30,7 +30,18 @@ import type { Db } from '../db/connection.ts';
 import type { Beat } from '../domain/item.ts';
 import { getCurrentItem } from '../domain/item.ts';
 import { getItemBeats } from '../domain/itemBeats.ts';
-import { getItemEntities } from '../domain/itemEntities.ts';
+// M5 task 17 lifted the related-entity relation and the entity->item-keys read
+// out of this file into `src/domain/`, so §7.4's graph endpoint and this
+// planner compute it ONCE. Task 7's report asked for exactly that when an
+// endpoint was built, "rather than an API route importing a vault module".
+// Nothing about what this module DOES changed: the domain function is the same
+// algorithm, and `tests/domain/entityGraph.test.ts` pins it against a verbatim
+// copy of the loop that used to live here.
+import {
+  countRelatedEntities,
+  entityItemKeys,
+  type RelatedEntity,
+} from '../domain/entityGraph.ts';
 import { getItemFirstFetchedAt } from '../domain/itemFirstFetchedAt.ts';
 import { VaultContentError } from './frontmatter.ts';
 import {
@@ -213,10 +224,7 @@ export interface EntityItemRef {
   readonly dated: boolean;
 }
 
-export interface RelatedEntity {
-  readonly entity: string;
-  readonly sharedItems: number;
-}
+export type { RelatedEntity };
 
 export interface EntityNotePlan {
   /** The NFC display name, which is also the note's filename stem. */
@@ -341,20 +349,6 @@ function distinctEntityStrings(db: Db): string[] {
     entity: string;
   }>;
   return rows.map((r) => r.entity);
-}
-
-function itemKeysForEntities(db: Db, spellings: readonly string[]): string[] {
-  const placeholders = spellings.map(() => '?').join(', ');
-  const rows = db
-    .prepare(
-      `select distinct i.item_key as item_key
-       from item_entities e
-       join items i on i.item_id = e.item_id
-       where e.entity in (${placeholders})
-       order by i.item_key`,
-    )
-    .all(...spellings) as Array<{ item_key: string }>;
-  return rows.map((r) => r.item_key);
 }
 
 /**
@@ -504,7 +498,7 @@ export function planEntityNotes(db: Db, options: EntityPlanOptions = {}): Entity
     // The note floor, applied HERE rather than after the notes are built, so a
     // skipped entity is also invisible to the related-list pass below. See
     // DEFAULT_MIN_ITEMS_FOR_NOTE for the corpus measurement behind it.
-    const mentions = itemKeysForEntities(db, spellings).length;
+    const mentions = entityItemKeys(db, spellings).length;
     if (mentions < minItems) {
       skipped.push({
         entity,
@@ -521,24 +515,21 @@ export function planEntityNotes(db: Db, options: EntityPlanOptions = {}): Entity
 
   const notes: EntityNotePlan[] = [];
   for (const [entity, spellings] of writable) {
-    const itemKeys = itemKeysForEntities(db, spellings);
+    const itemKeys = entityItemKeys(db, spellings);
     const refs = itemKeys
       .map((key) => itemRef(db, key))
       .filter((ref): ref is EntityItemRef => ref !== null)
       .sort((a, b) => byCodePoint(b.at, a.at) || byCodePoint(a.itemKey, b.itemKey));
 
-    const counts = new Map<string, number>();
-    for (const key of itemKeys) {
-      for (const other of getItemEntities(db, key)) {
-        const otherNfc = other.normalize('NFC');
-        if (otherNfc === entity || !writable.has(otherNfc)) continue;
-        counts.set(otherNfc, (counts.get(otherNfc) ?? 0) + 1);
-      }
-    }
-    const related = [...counts]
-      .map(([name, sharedItems]) => ({ entity: name, sharedItems }))
-      .sort((a, b) => b.sharedItems - a.sharedItems || byCodePoint(a.entity, b.entity))
-      .slice(0, maxRelated);
+    // `writable` as the eligibility predicate is the whole reason the domain
+    // function takes one: a related link here is a `[[wikilink]]`, so an entity
+    // that gets no note must be invisible to this pass or the owner's graph
+    // fills with links that can never resolve. The API's graph passes its own
+    // threshold instead -- same relation, different policy about who is drawn.
+    const related = countRelatedEntities(db, entity, itemKeys, {
+      isEligible: (name) => writable.has(name),
+      limit: maxRelated,
+    });
 
     const asOf = newestFetchedAtFor(db, spellings);
     if (asOf === null) {
