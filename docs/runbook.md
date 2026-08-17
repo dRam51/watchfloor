@@ -51,7 +51,24 @@ npm run check:portability
 
 ## Running it
 
-**Unattended (what you want on the always-on host):**
+**On a laptop — a scheduled one-shot (recommended):**
+
+```bash
+node scripts/generate-service.mjs launchd-cycle > ~/Library/LaunchAgents/io.dram51.watchfloor.cycle.plist
+launchctl load ~/Library/LaunchAgents/io.dram51.watchfloor.cycle.plist
+```
+
+Runs a full cycle at 08:00, 13:00 and 19:00 local, then **exits**. Nothing resident between runs, nothing on battery, no wakeups. Measured: **15s per run, 305 MB transient, 0 bytes resident afterwards** — against the daemon's 170 MB held all day.
+
+If the Mac is asleep at a scheduled hour, launchd runs the job **once** shortly after wake rather than queuing every missed occurrence. A laptop shut all weekend does one catch-up cycle, not six.
+
+```bash
+launchctl start io.dram51.watchfloor.cycle          # run one now, don't wait
+launchctl unload ~/Library/LaunchAgents/io.dram51.watchfloor.cycle.plist   # stop entirely
+tail -f logs/cycle.log
+```
+
+**On an always-on host — the resident daemon:**
 
 ```bash
 node scripts/generate-service.mjs launchd > ~/Library/LaunchAgents/io.dram51.watchfloor.scheduler.plist
@@ -67,16 +84,17 @@ systemctl --user daemon-reload && systemctl --user enable --now watchfloor
 
 Both run `scripts/scheduler-service.sh`, which applies pending migrations and then **execs** the scheduler — so a restart after a pull that brought a migration self-heals, and `SIGTERM` reaches the scheduler's own handler so the database closes cleanly.
 
-**In the foreground, to watch it:**
+**In the foreground, to watch either one:**
 
 ```bash
-sh scripts/scheduler-service.sh
+sh scripts/cycle.sh                # one cycle, then exits
+sh scripts/scheduler-service.sh    # the resident daemon
 ```
 
-**By hand, one step at a time:**
+**By hand.** `npm run ingest` now clusters and scores as part of a cycle, so it is complete on its own; `npm run score` remains available to rescore without polling.
 
 ```bash
-npm run ingest && npm run score && npm run rank
+npm run ingest
 ```
 
 **The dashboard** — two processes, API and Vite:
