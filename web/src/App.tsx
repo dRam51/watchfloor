@@ -9,6 +9,7 @@ import { SourceHealthPage } from './components/SourceHealthPage.tsx';
 import { EntityGraphView } from './components/EntityGraphView.tsx';
 import { MapPanel } from './components/MapPanel.tsx';
 import { AmbientView, isAmbientRequested } from './components/AmbientView.tsx';
+import { startShellIntegration } from './shell/tauri.ts';
 import {
   EnrichmentStatus,
   type EnrichmentStatusData,
@@ -57,6 +58,26 @@ type LoadState =
 
 function Dashboard() {
   const { token, setToken } = useAuth();
+
+  // M8. The desktop shell's tray count and native notifications, started here
+  // because this is the first component that holds a token — and the token is
+  // the whole reason the polling lives in the webview rather than in Rust
+  // (see web/src/shell/tauri.ts).
+  //
+  // Called UNCONDITIONALLY. `startShellIntegration` returns a no-op outside
+  // Tauri and never imports `@tauri-apps/api` there, so the browser build
+  // pays nothing. Guarding the call site instead would put the "is this the
+  // shell?" test in two places, and the second one is the one that rots.
+  //
+  // Registered here and pinned by web/tests/shellWiring.test.ts, because this
+  // project has now shipped TEN components that were correctly built, fully
+  // tested and reachable from nothing (CLAUDE.md). A shell integration that
+  // nothing calls is exactly that shape, and it would be invisible: the shell
+  // would open, show the dashboard, and simply never notify.
+  useEffect(() => {
+    if (token === null) return;
+    return startShellIntegration(token);
+  }, [token]);
   const [state, setState] = useState<LoadState>({ status: 'loading' });
   // §7.1: "Build the merged-stream view first and treat lanes as the
   // wide-viewport arrangement of it" -- exactly one of Stream/LaneBoard is

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Watchfloor",
+  "version": "0.1.0",
+  "identifier": "io.dram51.watchfloor.shell",
+  "build": {
+    "frontendDist": "../web/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "id": "watchfloor-tray",
+      "iconPath": "icons/32x32.png",
+      "iconAsTemplate": true,
+      "title": "\u2014",
+      "tooltip": "Watchfloor"
+    },
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "Situational awareness across six beats.",
+    "longDescription": "A window, a global hotkey, a menu-bar count and a native notifier around the deployed Watchfloor web UI. Talks to the same server over Tailscale; stores nothing locally."
+  },
+  "plugins": {}
+}

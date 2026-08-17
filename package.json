@@ -22,6 +22,8 @@
     "scheduler": "node --env-file=.env src/bin/scheduler.ts",
     "score": "node --env-file=.env src/bin/score.ts",
     "score:force": "node --env-file=.env src/bin/score.ts --force",
+    "shell": "tauri dev",
+    "shell:build": "npm run build:web && tauri build",
     "start": "node --env-file=.env dist/bin/api.js",
     "suggest": "node --env-file=.env src/bin/suggest.ts",
     "test": "vitest run",
@@ -37,6 +39,9 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/plugin-notification": "^2.3.3",
     "@types/node": "^26.0.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

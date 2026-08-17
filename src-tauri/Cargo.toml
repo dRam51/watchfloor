@@ -1,0 +1,32 @@
+[package]
+name = "watchfloor-shell"
+version = "0.1.0"
+description = "Watchfloor desktop shell -- a window, a hotkey, a tray and a notifier around the deployed web UI."
+authors = ["Watchfloor"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "watchfloor_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# An always-on desktop wrapper: size and memory matter more than build time.
+# §7.3 chose Tauri over Electron on exactly those grounds, so the release
+# profile should not give the advantage straight back.
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
