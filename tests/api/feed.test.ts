@@ -773,7 +773,13 @@ describe("§7's row needs a link and an excerpt, so the wire carries both", () =
 });
 
 describe('real corpus (data/wf.db)', () => {
-  it('runs against the real 4,135-item corpus, and a pinned KEV entry can display signal 0.000 while still ranking first among its cyber peers', () => {
+  // The size is deliberately NOT in this name any more. It read
+  // "the real 4,135-item corpus" and the corpus is now 17,252 items -- a
+  // claim that was true when written, silently false ever since, and printed
+  // on every run. Nothing here depends on the count: the fixtures are derived
+  // from the corpus at read time (see `scoredAt` below), which is what lets
+  // this survive a rebuild.
+  it('runs against the real corpus, and a pinned KEV entry can display signal 0.000 while still ranking first among its cyber peers', () => {
     const scratchDir = mkdtempSync(join(tmpdir(), 'wf-feed-corpus-'));
     const scratchPath = join(scratchDir, 'wf-copy.db');
     const sourceDb = join(process.cwd(), 'data', 'wf.db');

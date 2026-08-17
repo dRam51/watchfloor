@@ -167,6 +167,38 @@ describe('rate-limit headers', () => {
 });
 
 describe('per-host spacing', () => {
+  /**
+   * ## Measured CLIENT-SIDE, and the distinction is the whole point
+   *
+   * These two tests used to time the gap between when the *server handler*
+   * ran for each request, and assert it was >= the interval. That measures
+   * the wrong window, and it was wrong on an idle machine, not merely flaky
+   * under load:
+   *
+   *     server-arrival gap   : 292 ms   <- asserted >= 295
+   *     client total elapsed : 302 ms
+   *     arrival[0] - t0      :   9 ms   <- connection setup
+   *
+   * `#acquireSlot` spaces the moments the client *starts* each request. What
+   * a server handler observes is `start + latency`, so the measured gap is
+   * `interval + (latency_n - latency_n-1)` — and that correction term is
+   * reliably NEGATIVE here, because the first request to a fresh local server
+   * pays TCP connect and the second reuses a warm socket. The gap therefore
+   * sits at roughly `interval - 9ms` by construction, and the assertion
+   * passed only while socket setup happened to fit inside the 5 ms tolerance.
+   *
+   * Timing the client instead removes that term entirely. Total elapsed for
+   * N serialized requests is `>= (N-1) * interval` no matter what latency
+   * does, because latency can only push the finish *later*. **The failure
+   * direction is now the safe one**: a loaded machine makes these pass more
+   * easily rather than less, which is exactly the property a wall-clock
+   * assertion needs to be worth keeping.
+   *
+   * The tolerance below is retained for timer coarseness only — `setTimeout`
+   * may fire a fraction early — not for latency, which no longer enters.
+   */
+  const TIMER_TOLERANCE_MS = 5;
+
   it('spaces consecutive request starts by minIntervalMs', async () => {
     const starts: number[] = [];
     const baseUrl = await serve((_req, res) => {
@@ -176,11 +208,18 @@ describe('per-host spacing', () => {
     });
 
     const client = new GitHubClient({ baseUrl });
+    const began = Date.now();
     await client.request('/repos/a/b', { minIntervalMs: 300 });
     await client.request('/repos/c/d', { minIntervalMs: 300 });
+    const elapsed = Date.now() - began;
 
     expect(starts).toHaveLength(2);
-    expect(starts[1]! - starts[0]!).toBeGreaterThanOrEqual(295);
+    // The first request is not delayed (the slot opens at 0), so the whole
+    // 300 ms sits between them.
+    expect(elapsed).toBeGreaterThanOrEqual(300 - TIMER_TOLERANCE_MS);
+    // Latency-free corroboration that the gate ordered them at all: the
+    // second request cannot have reached the server before the first.
+    expect(starts[1]!).toBeGreaterThanOrEqual(starts[0]!);
   });
 
   it('serializes concurrent callers rather than letting them race past the gate', async () => {
@@ -192,14 +231,19 @@ describe('per-host spacing', () => {
     });
 
     const client = new GitHubClient({ baseUrl });
+    const began = Date.now();
     await Promise.all([
       client.request('/repos/a/b', { minIntervalMs: 300 }),
       client.request('/repos/c/d', { minIntervalMs: 300 }),
       client.request('/repos/e/f', { minIntervalMs: 300 }),
     ]);
+    const elapsed = Date.now() - began;
 
     expect(starts).toHaveLength(3);
-    expect(starts[2]! - starts[0]!).toBeGreaterThanOrEqual(590);
+    // Three callers fired at once still cost two full intervals. Racing past
+    // the gate is what this rules out, and it would show as a much smaller
+    // elapsed rather than as a wrong count.
+    expect(elapsed).toBeGreaterThanOrEqual(600 - TIMER_TOLERANCE_MS);
   });
 });
 
