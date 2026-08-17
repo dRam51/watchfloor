@@ -113,6 +113,23 @@ Conversation context does not survive a reset; these do.
 | `docs/superpowers/plans/2026-08-13-m1-ingest.md` | The M1 plan — corrected five times; the ledger records why |
 | `docs/brief.md` | **Local-only, gitignored — see the warning below.** The authority every plan cites by section number. Ask the human for it; do not commit it. |
 
+> [!note] The brief is not on this machine, and the specs were recovered by grepping transcripts
+> M3, M4a, M5 and M6's scope each came from the original paste, which survives in this project's
+> session history — **not** from `docs/brief.md`, which has never existed here.
+>
+> **The transcripts are keyed to the path the repo had at the time**, so after the 2026-08-16
+> move they are NOT under a directory named for `~/Watchfloor`:
+>
+> ```
+> ~/.claude/projects/-Users-devinramotar-Documents-home-lab-watchfloor/   <- most of the work
+> ~/.claude/projects/-Users-devinramotar-home-lab-watchfloor/             <- brief intermediate stop
+> ~/.claude/projects/-Users-devinramotar-Watchfloor/                      <- from the move onward
+> ```
+>
+> Grep all three. M7's and M8's scope is recoverable from the first one; verified 2026-08-16.
+> The real fix is still to put `docs/brief.md` on this machine — a spec that lives only in a
+> chat log is one bad `rm` from gone.
+
 ### The first live corpus is archived, and it is evidence
 
 `attic/wf-m1-firstrun-2026-08-14.db` holds all 3,325 items from the first real ingest. It was
