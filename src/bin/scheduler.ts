@@ -14,6 +14,11 @@ import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
 import { loadEntityRulesFile } from '../entities/rules.ts';
 import { sweepEntities } from '../entities/sweep.ts';
+import { loadInterestsFile } from '../interests/load.ts';
+import { loadMechanicalScoreConfig } from '../score/mechanical.ts';
+import { loadClusterConfig } from '../cluster/config.ts';
+import { runClusteringPass } from '../cluster/run.ts';
+import { runScoringPass } from '../score/pass.ts';
 import { loadLlmConfig } from '../enrich/llm/config.ts';
 import { getEnrichmentStatus } from '../domain/headerStrip.ts';
 import {
@@ -97,6 +102,12 @@ try {
   // M5 task 16. Loaded once at boot, like sources: a malformed entities.yaml
   // must stop the daemon starting rather than fail on every item forever.
   const entityRules = loadEntityRulesFile(join(repoRoot, 'config', 'entities.yaml'));
+  // Loaded once at boot, like sources and entity rules: a malformed
+  // scoring/cluster/interests file must stop the daemon starting while someone
+  // is watching, not fail on every tick forever.
+  const interestProfile = loadInterestsFile(join(repoRoot, 'config', 'interests.yaml'));
+  const scoringConfig = loadMechanicalScoreConfig(join(repoRoot, 'config', 'scoring.yaml'));
+  const clusterConfig = loadClusterConfig(join(repoRoot, 'config', 'cluster.yaml'));
   console.log(
     `watchfloor scheduler starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
       `tick=${env.WF_SCHEDULER_TICK_INTERVAL_MS}ms)`,
@@ -270,6 +281,42 @@ try {
       // stopping. See src/entities/sweep.ts.
       const entities = sweepEntities(db, entityRules, { now: report.finishedAt });
 
+      // -----------------------------------------------------------------
+      // M6. THE DAEMON DID NOT SCORE, and an unscored item cannot rank.
+      //
+      // Found by the owner asking a plain question -- "is this the script
+      // that finds new articles?" -- which it is, and that turned out to be
+      // all it did. Measured at the time: 1,119 of 7,056 distinct items had
+      // no `item_scores` row at all, the newest item was minutes old and the
+      // newest score was TWO DAYS old. Left as it was, installing the launchd
+      // agent would have polled 28 sources forever while the ranked feed
+      // slowly stopped describing the corpus -- the dashboard showing a
+      // shrinking, stale slice and looking like it worked.
+      //
+      // Occurrence eight of this project's characteristic defect, and a new
+      // variant: not "nothing calls it" (npm run score exists and works) but
+      // "the process that runs unattended does not call it". The one-shot
+      // path and the daemon path had drifted, which is exactly what
+      // src/bin/ingest.ts's own header warns about.
+      //
+      // Order is not arbitrary and is not this file's invention -- it mirrors
+      // src/bin/score.ts, whose header states it: clustering FIRST, because
+      // cluster size is a scoring input. Reversing them scores every new item
+      // against last cycle's cluster sizes.
+      //
+      // Not gated on `report.sources` yielding anything: an item can need
+      // scoring when no source was due at all -- a previous tick may have
+      // been interrupted, and `runScoringPass` is incremental by design
+      // (`--force` is what rescores everything, and is deliberately not used
+      // here).
+      // -----------------------------------------------------------------
+      const clusterSummaryReport = runClusteringPass(db, clusterConfig, report.finishedAt);
+      const scored = runScoringPass(
+        db,
+        { sources, interestProfile, config: scoringConfig },
+        report.finishedAt,
+      );
+
       const counts = new Map<string, number>();
       for (const outcome of report.sources) {
         counts.set(outcome.kind, (counts.get(outcome.kind) ?? 0) + 1);
@@ -297,11 +344,36 @@ try {
           ? ` -- entities: ${entities.entitiesWritten} written over ${entities.scanned} item(s)` +
             (entities.remaining > 0 ? `, ${entities.remaining} to go` : '')
           : '';
+      const scoreSummary =
+        scored.itemsScored > 0 || clusterSummaryReport.clustersCreated > 0
+          ? ` -- scored: ${scored.itemsScored}` +
+            (clusterSummaryReport.clustersCreated > 0
+              ? `, ${clusterSummaryReport.clustersCreated} cluster(s)`
+              : '')
+          : '';
+      // runScoringPass isolates per-item failures rather than aborting, the same
+      // "one dead feed never takes down the run" stance as pollOneSource. In a
+      // one-shot run an operator sees them on stdout; in a daemon nobody is
+      // watching, so an item that silently never scores would simply never rank
+      // again. Reported per cycle, capped, so a systemic failure is loud without
+      // filling the log.
+      if (scored.failures.length > 0) {
+        console.error(
+          `  ${scored.failures.length} item(s) failed to score this cycle ` +
+            `(every other item still scored): ` +
+            scored.failures
+              .slice(0, 3)
+              .map((f) => `${f.itemKey.slice(0, 12)}… ${f.error}`)
+              .join(' | ') +
+            (scored.failures.length > 3 ? ` | +${scored.failures.length - 3} more` : ''),
+        );
+      }
+
       const vaultSummary = vaultDeps === null ? '' : await syncVaultIfDue(vaultDeps, report.finishedAt);
 
       console.log(
         `poll cycle finished at ${formatLocal(report.finishedAt, env.WF_TZ)} ` +
-          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}${readmeSummary}${entitySummary}${vaultSummary}`,
+          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}${readmeSummary}${entitySummary}${scoreSummary}${vaultSummary}`,
       );
     } catch (err) {
       // runPollCycle itself only ever rejects on a contract violation (e.g.
