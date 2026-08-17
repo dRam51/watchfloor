@@ -30,6 +30,9 @@ import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
 import { loadEntityRulesFile } from '../entities/rules.ts';
 import { sweepEntities } from '../entities/sweep.ts';
+import { assertEntityLinksResolve, loadGazetteerFiles } from '../locations/load.ts';
+import { seedLocations } from '../locations/seed.ts';
+import { sweepLocations } from '../locations/sweep.ts';
 import { loadInterestsFile } from '../interests/load.ts';
 import { loadMechanicalScoreConfig } from '../score/mechanical.ts';
 import { loadClusterConfig } from '../cluster/config.ts';
@@ -82,6 +85,17 @@ try {
     const interestProfile = loadInterestsFile(join(repoRoot, 'config', 'interests.yaml'));
     const scoringConfig = loadMechanicalScoreConfig(join(repoRoot, 'config', 'scoring.yaml'));
     const clusterConfig = loadClusterConfig(join(repoRoot, 'config', 'cluster.yaml'));
+    // M7. Loaded at boot beside the others, and cross-checked against the
+    // entity ruleset here rather than inside either loader -- this is the one
+    // place both are in hand. A location naming an entity config/entities.yaml
+    // does not define would be a facility highlight that silently never fires.
+    const gazetteer = loadGazetteerFiles({
+      locations: join(repoRoot, 'config', 'locations.yaml'),
+      jurisdictions: join(repoRoot, 'config', 'jurisdictions.yaml'),
+      // Gitignored, optional, absent by default. Absence is normal operation.
+      overlay: join(repoRoot, 'config', 'locations.local.yaml'),
+    });
+    assertEntityLinksResolve(gazetteer, new Set(entityRules.entities.map((e) => e.name)));
     console.log(
       `watchfloor one-shot ingest starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
         `entity rules=${entityRules.entities.length}+${entityRules.patterns.length} patterns)`,
@@ -135,6 +149,17 @@ try {
     // whole corpus automatically. See src/entities/sweep.ts.
     const entities = sweepEntities(db, entityRules, { now: report.finishedAt });
 
+    // M7 task 5 -- THE WIRING TASK, which exists because this project has now
+    // shipped nine components that were correct, tested, and reachable from
+    // nothing. `locations` and `item_locations` have been in the schema since
+    // 0001 and held zero rows across three milestones; src/domain/location.ts
+    // has had a working, tested upsert the whole time with no caller.
+    //
+    // Seed first, then sweep: item_locations carries a foreign key to
+    // locations, so a match found before the row exists cannot be stored.
+    const locationSeed = seedLocations(db, gazetteer);
+    const locations = sweepLocations(db, gazetteer, { now: report.finishedAt });
+
     // M6. The daemon scores (src/bin/scheduler.ts); this path did not, and an
     // unscored item cannot rank. That is the SAME drift, on the other side:
     // `npm run ingest && npm run score` is the documented two-command
@@ -164,6 +189,23 @@ try {
           `remaining=${entities.remaining} ` +
           `[org=${entities.byType.org} product=${entities.byType.product} ` +
           `concept=${entities.byType.concept} id=${entities.byType.identifier}]`,
+      );
+    }
+    if (locations.scanned > 0 || locations.remaining > 0) {
+      console.log(
+        `  locations (gazetteer ${locations.gazetteerVersion}): scanned=${locations.scanned} ` +
+          `sites=${locations.locationsWritten} countries=${locations.countriesWritten} ` +
+          `withLocation=${locations.itemsWithLocation} plottable=${locations.itemsPlottable} ` +
+          `remaining=${locations.remaining}`,
+      );
+    }
+    if (locationSeed.orphaned.length > 0) {
+      // Never deleted, per CLAUDE.md. Reported so a RENAME shows up as a pair
+      // -- one orphan plus one new id -- rather than quietly leaving a second
+      // pin on the map at the old coordinates.
+      console.log(
+        `  ! ${locationSeed.orphaned.length} stored location(s) config no longer defines: ` +
+          locationSeed.orphaned.slice(0, 8).join(', '),
       );
     }
     if (entities.orphaned.length > 0) {

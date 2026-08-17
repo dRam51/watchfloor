@@ -37,6 +37,20 @@ const POST_CYCLE_PASSES: ReadonlyArray<readonly [fn: string, module: string]> = 
   // eight of this pattern if it were left unwired, and the first one caught
   // before a live run rather than by it.
   ['sweepEntities', '../entities/sweep.ts'],
+  // M7 task 5. `locations` and `item_locations` have been in the schema since
+  // 0001_init.sql and held ZERO rows across three milestones, while
+  // src/domain/location.ts carried a working, fully-tested `upsertLocation`
+  // that nothing called. That is occurrence nine, and unlike the eight before
+  // it, it was scaffolded deliberately for a milestone that had not arrived --
+  // which is precisely why it could sit there looking intentional.
+  //
+  // Seeding is listed separately from sweeping because they can fail
+  // independently: a sweep with no seed finds nothing (item_locations has a
+  // foreign key to locations, so a match cannot even be stored), and a seed
+  // with no sweep populates a map with pins and no items behind them. Both
+  // failures render as a plausible, quiet, wrong map.
+  ['seedLocations', '../locations/seed.ts'],
+  ['sweepLocations', '../locations/sweep.ts'],
 ];
 
 describe('every post-cycle pass is wired into BOTH composition roots', () => {

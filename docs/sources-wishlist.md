@@ -162,6 +162,51 @@ value: `oss-security` often carries disclosure discussion ahead of NVD publicati
 
 ---
 
+## Situation Publishing — The Register, The Next Platform, Blocks & Files
+
+**Status:** blocked — `Disallow: /` for any user-agent not explicitly named.
+**Evaluated:** 2026-08-16, while M7 was looking for semiconductor and data-centre coverage.
+
+All three are Situation Publishing titles and share one robots.txt policy, stated in its own
+header: *"Default-deny. Any crawler not explicitly allowed below is BLOCKED … Anything else,
+including unknown bots .. BLOCKED by default."* Named search engines and attributing AI-search
+crawlers are allowed; the wildcard agent gets `Allow: /ads.txt`, `Allow: /app-ads.txt`,
+`Disallow: /`. They publish a licensing contact for anyone who wants more.
+
+This is a real loss — The Next Platform in particular is close to ideal for §7.2's compute
+layer. Licensing is the only permitted route and it is a paid one, so it is out under the
+zero-dollar rule as well.
+
+> [!warning] Check `robots.txt` **with redirects followed**.
+> `blocksandfiles.com/robots.txt` 301s. A `curl` without `-L` returns an **empty body**, and an
+> empty body is indistinguishable from "this host publishes no robots.txt, therefore nothing is
+> restricted." On that reading it was added to `config/sources.yaml` and only stopped by the
+> fetcher's own robots layer on the first live run (`robots-denied`, zero items stored).
+>
+> The layer working is not a substitute for checking properly. This is the same shape as the
+> `ls`-versus-read mistake in CLAUDE.md's TCC note: **a probe that does not actually exercise
+> the thing returns a confident wrong answer**, and it looks exactly like a real one.
+
+---
+
+## SemiAnalysis
+
+**Status:** reachable and permitted, but not worth polling.
+**Evaluated:** 2026-08-16.
+
+`https://semianalysis.com/feed` returns HTTP 200 with a well-formed feed, and robots.txt
+restricts nothing that matters. **Its newest public item is eleven months old** — the substantive
+work moved behind a paywall and the public feed was left in place.
+
+Not a sort bug, and worth distinguishing from one: this is the `owasp-genai` situation (a quiet
+publisher whose newest item is 93 days old), not the `nvd-cve` or `hn-algolia` situation (a live
+feed sorted so that it returns ancient items forever). Both look identical from a row count.
+Recorded so nobody re-evaluates it from the 200 alone.
+
+**Revisit** if a current free feed appears.
+
+---
+
 ## Notes on things that are *not* blocked
 
 **AP is reachable**, despite having no RSS. Its `robots.txt` disallows `/*.rss` and

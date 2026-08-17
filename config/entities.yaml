@@ -163,6 +163,52 @@ entities:
   - { name: Amazon, type: org, aliases: [Amazon, AWS, Amazon Web Services] }
 
   # =========================================================================
+  # The semiconductor supply chain and the physical compute buildout (M7).
+  #
+  # Added because config/locations.yaml links every facility to the entity
+  # that operates it, and a link naming an entity this file does not define is
+  # refused at load (src/locations/load.ts, assertEntityLinksResolve) -- a
+  # dangling link would be a facility highlight that silently never fires.
+  #
+  # Their absence was a real gap independent of the map: TSMC and ASML are two
+  # of the most consequential organisations in AI and neither could be
+  # attributed to an item, so neither could get an entity note or appear in the
+  # §7.4 graph.
+  #
+  # This list is the industry, not a portfolio -- it deliberately includes
+  # sanctioned and non-investable operators (SMIC, Huawei) alongside the rest,
+  # because "where the capacity physically sits" is the question the map asks.
+  # =========================================================================
+  - { name: TSMC, type: org, aliases: [TSMC, Taiwan Semiconductor, { term: Taiwan Semiconductor Manufacturing, match: loose }] }
+  # ASML is the EUV chokepoint. Exact-cased: "asml" is not a word, so loose
+  # would buy nothing and only risks matching an identifier fragment.
+  - { name: ASML, type: org, aliases: [ASML] }
+  # "Micron" stays EXACT-cased on purpose: lowercase "micron" is a unit of
+  # length and appears in process-node copy ("sub-micron"). The capitalised
+  # form is the company in every live-corpus instance checked.
+  - { name: Micron, type: org, aliases: [Micron, Micron Technology] }
+  - { name: SK Hynix, type: org, aliases: [SK Hynix, SK hynix, Hynix] }
+  - { name: GlobalFoundries, type: org, aliases: [GlobalFoundries, GlobalFoundries Inc] }
+  - { name: SMIC, type: org, aliases: [SMIC, Semiconductor Manufacturing International] }
+  # "ASE" alone is NOT an alias. Word boundaries stop it matching inside
+  # another word, but it is a plausible standalone acronym in unrelated copy,
+  # and this file's own rule is that an ambiguous short acronym gets the
+  # spelled-out form instead (see SEC, LLM).
+  - { name: ASE Technology, type: org, aliases: [ASE Technology, Advanced Semiconductor Engineering] }
+  - { name: Amkor, type: org, aliases: [Amkor, Amkor Technology] }
+  - { name: Applied Materials, type: org, aliases: [Applied Materials] }
+  - { name: Lam Research, type: org, aliases: [Lam Research] }
+  - { name: Tokyo Electron, type: org, aliases: [Tokyo Electron] }
+  - { name: Huawei, type: org, aliases: [Huawei] }
+  - { name: Alibaba, type: org, aliases: [Alibaba, Alibaba Cloud] }
+  # Colocation, neocloud and data-centre plant. The compute layer's operators.
+  - { name: Equinix, type: org, aliases: [Equinix] }
+  - { name: Digital Realty, type: org, aliases: [Digital Realty] }
+  - { name: CoreWeave, type: org, aliases: [CoreWeave] }
+  - { name: Nebius, type: org, aliases: [Nebius] }
+  - { name: Vertiv, type: org, aliases: [Vertiv] }
+
+  # =========================================================================
   # AI labs and platforms.
   # =========================================================================
   - { name: OpenAI, type: org, aliases: [OpenAI] }

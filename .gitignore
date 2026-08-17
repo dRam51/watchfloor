@@ -16,6 +16,16 @@ logs/
 docs/brief.md
 config/portfolio.yaml
 
+# The M7 map's private overlay. config/locations.yaml IS committed and is an
+# AI-infrastructure dataset that stands on its own; this optional file is where
+# anything holdings-specific goes, merged over the committed seed by location
+# id. §7.2 suggests seeding the map from the brief's §11 holdings -- doing that
+# in a public repo would be a portfolio disclosure by inference, since a curated
+# list of exactly one person's positions says what those positions are even
+# though each individual fact in it is public. Absent by default; its absence is
+# normal operation and is never warned about.
+config/locations.local.yaml
+
 # A corrupted AGENTS.md mirror, moved out of the repo root on 2026-08-14.
 # Kept rather than deleted (standing rule: nothing is deleted, obsolete files go
 # to attic/), but kept OUT of git, the same way the archived first-run database
@@ -110,3 +120,10 @@ data/scratch-verify-task10.db
 # already; listed here for the paper trail, exactly as tasks 7, 10 and 11's
 # copies are.
 data/scratch-verify-m5-task14.db
+
+# The Natural Earth download cache (scripts/build-basemap.mjs). 839 KB of raw
+# source whose only purpose is to let the build re-run without the network.
+# Its OUTPUT -- web/public/geo/countries.geojson and src/locations/countries.json
+# -- IS committed, so a clone needs neither this file nor an internet
+# connection. Re-fetch with `node scripts/build-basemap.mjs --fetch`.
+web/public/geo/.ne_110m_source.json

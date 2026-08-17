@@ -559,6 +559,100 @@ sources:
     enabled: true
 
   # ---------------------------------------------------------------------------
+  # ai -- the PHYSICAL buildout (added in M7)
+  #
+  # WHY THESE EXIST, measured rather than assumed. M7 built the §7.2
+  # infrastructure gazetteer, ran it over all 16,570 stored items, and got
+  # SIX location matches. Not a bug in the matcher -- a fact about the corpus:
+  #
+  #     TSMC 0    ASML 0    Hsinchu 0    Veldhoven 0    Kaohsiung 0
+  #     SK Hynix 0    wafer 0    semiconductor 4    Taiwan 3
+  #
+  # across the entire corpus, title and summary. The 28 sources cover AI
+  # models, security advisories, GitHub repos and US general news; not one
+  # covered where the compute physically comes from. The map would have been
+  # built, tested, correct, and empty -- this project's characteristic defect
+  # wearing a new costume, since the pipeline would have run fine and found
+  # nothing forever.
+  #
+  # ROBOTS, checked for every candidate before adding any (§ politeness):
+  #   theregister.com   Disallow: /  for unknown agents -- EXCLUDED
+  #   nextplatform.com  Disallow: /  for unknown agents -- EXCLUDED
+  #   blocksandfiles.com  same -- EXCLUDED, and see the warning below
+  #                     (all three Situation Publishing: "default-deny ...
+  #                      unknown bots BLOCKED by default", AI licence required)
+  #   semianalysis.com  permitted, but its newest public item is ELEVEN MONTHS
+  #                     old -- excluded as a quiet publisher, the owasp-genai
+  #                     situation, not a sort bug
+  #
+  # >> CHECK robots.txt WITH REDIRECTS FOLLOWED. <<
+  # blocksandfiles.com was very nearly added here. A `curl` without -L returned
+  # an EMPTY BODY, because the URL 301s -- and an empty body reads exactly like
+  # "no robots.txt, therefore no restrictions". Following the redirect shows the
+  # same default-deny policy as the two above. The fetcher's own robots layer
+  # caught it on the first live run (`robots-denied`, zero items stored), which
+  # is the layer working, not a reason to rely on it.
+  #
+  # This is the `ls` mistake from CLAUDE.md's TCC note in a new place: a probe
+  # that does not actually exercise the thing returns a confident wrong answer.
+  # Blocks & Files is recorded in docs/sources-wishlist.md.
+  # All four below were fetched and their dates printed before being added,
+  # per this file's own "check what the source actually sorts by" warning.
+  # Every one returns newest-first with a current head item.
+  # ---------------------------------------------------------------------------
+
+  - id: datacenterdynamics
+    name: Data Center Dynamics
+    type: rss
+    url: https://www.datacenterdynamics.com/en/rss/
+    beats: [ai]
+    # The single best match for §7.2's compute layer: capacity announcements,
+    # grid interconnection, power and cooling. 20 items over a 3-day window,
+    # newest-first, verified live 2026-08-16.
+    weight: 1.7
+    poll_interval: 2h
+    kind: news
+    # Its robots.txt carries Cloudflare content signals:
+    #   Content-Signal: search=yes, ai-train=no, use=reference
+    # with Allow: / for everyone. Fetching is permitted and reference use is
+    # explicitly granted. `ai-input` is left unspecified, which the signal
+    # vocabulary defines as neither granted nor restricted -- so this takes the
+    # same conservative route ap-news took for a stricter reason: no item from
+    # here is ever sent to a model. We store a link and a short excerpt and
+    # point at the original, which is exactly `use=reference`.
+    enrichment: false
+    enabled: true
+
+  - id: semiconductor-engineering
+    name: Semiconductor Engineering
+    type: rss
+    url: https://semiengineering.com/feed/
+    beats: [ai]
+    # Low volume, high signal: process nodes, advanced packaging, lithography,
+    # test. 10 items, newest 3 days old -- a trade publication's cadence, not a
+    # staleness bug.
+    weight: 1.6
+    poll_interval: 6h
+    kind: news
+    enabled: true
+
+  - id: toms-hardware
+    name: Tom's Hardware
+    type: rss
+    url: https://www.tomshardware.com/feeds/all
+    beats: [ai]
+    # Deliberately the LOWEST weight of the four. It covers fabs, nodes and
+    # accelerators consistently, and it also publishes consumer GPU reviews and
+    # deals at volume -- the sports-and-Spanish-copy problem in a new lane.
+    # Weighted so it can surface a real fab story without crowding the lane,
+    # and left for the interest profile to suppress the rest. Watch it: if the
+    # ai lane fills with peripheral reviews, this is why.
+    weight: 1.0
+    poll_interval: 3h
+    kind: news
+    enabled: true
+
+  # ---------------------------------------------------------------------------
   # usnews
   # ---------------------------------------------------------------------------
 

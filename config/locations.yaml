@@ -1,0 +1,772 @@
+# The curated infrastructure gazetteer (§7.2, M7). Validated by
+# src/locations/load.ts; a malformed row fails at load, never at render.
+#
+# ===========================================================================
+# WHAT THIS FILE IS, AND WHAT IT DELIBERATELY IS NOT
+# ===========================================================================
+#
+# §7.2: "Build it as an infrastructure map, not a news globe -- the useful
+# spatial question isn't 'where did news happen', it's 'where does the
+# physical capacity sit and which jurisdictions constrain it.'"
+#
+# So this is a map of THE AI BUILDOUT: leading-edge logic and memory fabs,
+# advanced packaging, the equipment and materials chokepoints, and the
+# hyperscale compute footprint. It is an industry dataset and it includes
+# operators nobody could hold -- SMIC, Huawei, Alibaba -- because the question
+# is where the capacity is, not who owns what.
+#
+# **This repository is public.** §7.2 suggests seeding from the brief's §11
+# holdings; this file deliberately was NOT built that way. Each individual
+# fact here is public knowledge, but a curated list of exactly one person's
+# positions and nothing else is a portfolio disclosure by inference, which is
+# the thing .gitignore protects config/portfolio.yaml and docs/brief.md from.
+#
+# **Anything holdings-specific belongs in `config/locations.local.yaml`** --
+# gitignored, optional, merged over this file by location `id` when present.
+# Its absence is normal operation and is never warned about.
+#
+# ===========================================================================
+# THE RULE THAT KEEPS THIS HONEST
+# ===========================================================================
+#
+# §7.2: "A curated, hand-maintained locations table -- DO NOT AUTO-GEOCODE."
+#
+# Every coordinate below arrives through a hand-written row with a citation
+# and a date. No geocoding service is called anywhere in this system, ever --
+# a geocoder answers "where is this string" with a plausible coordinate for
+# any string, including a wrong one, and the failure is silent.
+#
+# `precision` is not in the brief and exists because the alternative is worse:
+#
+#   site    the coordinate locates the campus or facility itself
+#   city    the coordinate is the town; the facility is somewhere in it
+#   region  broader than a town -- a metro cluster or an industrial park
+#
+# A city centroid presented at site precision is a guess wearing a survey's
+# authority. The UI draws these differently for that reason.
+#
+# `verified_at` IS THE DATE OF THE CITED SOURCE, not the date the row was
+# typed. §7.2: "Expect this file to be wrong and stale in places -- build the
+# UI to show verified_at so I know how much to trust a pin."
+#
+# Run `npm run watchfloor map check-sources` to HTTP-check every citation here
+# and in config/jurisdictions.yaml.
+#
+# ===========================================================================
+# FIELDS
+# ===========================================================================
+#
+#   id          lowercase-hyphen slug, stable forever (the overlay merges on it)
+#   name        display name
+#   kind        fab | packaging | datacenter | colo | cloud_region | hq | port
+#   operator    display text for who runs it
+#   country     ISO 3166-1 alpha-2; MUST have a row in config/jurisdictions.yaml
+#   lat / lon   decimal degrees
+#   precision   site | city | region -- see above
+#   city        the settlement. Required when precision is `site`, because the
+#               operator+place matching tier is how most facility mentions
+#               actually arrive ("Intel" plus "Chandler" is a location claim;
+#               "Intel" alone is not, ever -- see src/locations/gazetteer.ts)
+#   aliases     spellings that attribute THIS SITE on their own. A bare string
+#               is case-sensitive at confidence 0.9; use
+#               {term:, match: loose, confidence:} to say otherwise.
+#               Declare a LOW confidence for a generic spelling: "Veldhoven"
+#               is near-certainly ASML, "Fab 18" is not near-certainly anyone.
+#   entities    entity names from config/entities.yaml. Refused at load if one
+#               does not exist. This is the join behind "click a ticker ->
+#               highlight that company's facilities" and the supply arcs.
+
+locations:
+  # =========================================================================
+  # LEADING-EDGE LOGIC
+  # =========================================================================
+  - id: tsmc-fab18-tainan
+    name: TSMC Fab 18
+    kind: fab
+    operator: TSMC
+    country: TW
+    lat: 23.1
+    lon: 120.27
+    precision: site
+    city: Tainan
+    notes: >-
+      Leading-edge logic in the Southern Taiwan Science Park. The densest
+      single concentration of advanced capacity anywhere.
+    source_url: https://en.wikipedia.org/wiki/TSMC
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Southern Taiwan Science Park, match: loose, confidence: 0.75 }
+      - { term: Fab 18, match: loose, confidence: 0.6 }
+    entities: [TSMC]
+
+  - id: tsmc-hsinchu
+    name: TSMC Hsinchu (Fab 12 / Baoshan)
+    kind: fab
+    operator: TSMC
+    country: TW
+    lat: 24.78
+    lon: 121.0
+    precision: site
+    city: Hsinchu
+    notes: R&D and next-node pilot lines alongside production, in the Hsinchu Science Park.
+    source_url: https://en.wikipedia.org/wiki/Hsinchu_Science_Park
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Hsinchu Science Park, match: loose, confidence: 0.8 }
+      - { term: Baoshan, match: loose, confidence: 0.7 }
+    entities: [TSMC]
+
+  - id: tsmc-arizona
+    name: TSMC Arizona
+    kind: fab
+    operator: TSMC
+    country: US
+    lat: 33.75
+    lon: -112.1
+    precision: city
+    city: Phoenix
+    notes: US leading-edge logic. The most-watched single construction project in the sector.
+    source_url: https://en.wikipedia.org/wiki/TSMC
+    verified_at: 2026-08-16
+    aliases:
+      - { term: TSMC Arizona, match: loose, confidence: 0.95 }
+    entities: [TSMC]
+
+  - id: tsmc-kumamoto
+    name: JASM Kumamoto
+    kind: fab
+    operator: TSMC / Sony / Denso
+    country: JP
+    lat: 32.88
+    lon: 130.83
+    precision: city
+    city: Kikuyo
+    notes: Japan's re-entry into volume logic manufacturing, on mature and mid nodes.
+    source_url: https://en.wikipedia.org/wiki/TSMC
+    verified_at: 2026-08-16
+    aliases:
+      - { term: JASM, match: exact, confidence: 0.9 }
+      - { term: Kumamoto, match: loose, confidence: 0.7 }
+    entities: [TSMC]
+
+  - id: tsmc-dresden
+    name: ESMC Dresden
+    kind: fab
+    operator: TSMC / Bosch / Infineon / NXP
+    country: DE
+    lat: 51.14
+    lon: 13.66
+    precision: city
+    city: Dresden
+    notes: European automotive and industrial capacity rather than leading-edge AI logic.
+    source_url: https://en.wikipedia.org/wiki/Silicon_Saxony
+    verified_at: 2026-08-16
+    aliases:
+      - { term: ESMC, match: exact, confidence: 0.85 }
+      - { term: Silicon Saxony, match: loose, confidence: 0.8 }
+    entities: [TSMC]
+
+  - id: intel-ocotillo-chandler
+    name: Intel Ocotillo (Fab 42 / 52 / 62)
+    kind: fab
+    operator: Intel
+    country: US
+    lat: 33.28
+    lon: -111.93
+    precision: site
+    city: Chandler
+    notes: Intel's largest US leading-edge site.
+    source_url: https://en.wikipedia.org/wiki/Intel
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Ocotillo, match: loose, confidence: 0.85 }
+    entities: [Intel]
+
+  - id: intel-ohio-one
+    name: Intel Ohio One
+    kind: fab
+    operator: Intel
+    country: US
+    lat: 40.09
+    lon: -82.76
+    precision: city
+    city: New Albany
+    notes: Announced greenfield leading-edge site; schedule has moved more than once.
+    source_url: https://en.wikipedia.org/wiki/Intel
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Ohio One, match: loose, confidence: 0.8 }
+      - { term: New Albany, match: loose, confidence: 0.6 }
+    entities: [Intel]
+
+  - id: intel-leixlip
+    name: Intel Ireland (Fab 34)
+    kind: fab
+    operator: Intel
+    country: IE
+    lat: 53.37
+    lon: -6.5
+    precision: site
+    city: Leixlip
+    notes: EUV-capable capacity inside the EU.
+    source_url: https://en.wikipedia.org/wiki/Intel
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Leixlip, match: loose, confidence: 0.9 }
+    entities: [Intel]
+
+  - id: intel-kiryat-gat
+    name: Intel Israel (Fab 28 / 38)
+    kind: fab
+    operator: Intel
+    country: IL
+    lat: 31.61
+    lon: 34.78
+    precision: site
+    city: Kiryat Gat
+    notes: >-
+      Regional instability is a supply-chain fact here, which is exactly the
+      kind of thing a map surfaces and a lane does not.
+    source_url: https://en.wikipedia.org/wiki/Intel
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Kiryat Gat, match: loose, confidence: 0.9 }
+    entities: [Intel]
+
+  - id: samsung-pyeongtaek
+    name: Samsung Pyeongtaek
+    kind: fab
+    operator: Samsung
+    country: KR
+    lat: 37.03
+    lon: 127.05
+    precision: site
+    city: Pyeongtaek
+    notes: Memory and foundry at the largest single semiconductor campus in the world.
+    source_url: https://en.wikipedia.org/wiki/Samsung_Electronics
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Pyeongtaek, match: loose, confidence: 0.9 }
+    entities: [Samsung]
+
+  - id: samsung-hwaseong
+    name: Samsung Hwaseong
+    kind: fab
+    operator: Samsung
+    country: KR
+    lat: 37.2
+    lon: 127.05
+    precision: city
+    city: Hwaseong
+    source_url: https://en.wikipedia.org/wiki/Samsung_Electronics
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Hwaseong, match: loose, confidence: 0.85 }
+    entities: [Samsung]
+
+  - id: samsung-taylor
+    name: Samsung Taylor
+    kind: fab
+    operator: Samsung
+    country: US
+    lat: 30.59
+    lon: -97.42
+    precision: city
+    city: Taylor
+    notes: US foundry capacity. "Taylor" is a common word, so it is not an alias here.
+    source_url: https://en.wikipedia.org/wiki/Samsung_Electronics
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Samsung]
+
+  - id: smic-shanghai
+    name: SMIC Shanghai
+    kind: fab
+    operator: SMIC
+    country: CN
+    lat: 31.21
+    lon: 121.6
+    precision: city
+    city: Shanghai
+    notes: >-
+      China's leading foundry, operating under broad equipment controls. On the
+      map because capacity is capacity regardless of who can invest in it.
+    source_url: https://en.wikipedia.org/wiki/Semiconductor_Manufacturing_International_Corporation
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [SMIC]
+
+  - id: globalfoundries-malta
+    name: GlobalFoundries Fab 8
+    kind: fab
+    operator: GlobalFoundries
+    country: US
+    lat: 42.99
+    lon: -73.84
+    precision: site
+    city: Malta
+    notes: Mature-node US capacity; not leading edge, and strategically relevant anyway.
+    source_url: https://en.wikipedia.org/wiki/GlobalFoundries
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [GlobalFoundries]
+
+  # =========================================================================
+  # MEMORY -- the constraint that actually gates accelerator output
+  # =========================================================================
+  - id: sk-hynix-icheon
+    name: SK Hynix Icheon
+    kind: fab
+    operator: SK Hynix
+    country: KR
+    lat: 37.27
+    lon: 127.45
+    precision: site
+    city: Icheon
+    notes: HBM. Memory bandwidth, not logic, is frequently the binding constraint.
+    source_url: https://en.wikipedia.org/wiki/SK_Hynix
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Icheon, match: loose, confidence: 0.85 }
+    entities: [SK Hynix]
+
+  - id: sk-hynix-cheongju
+    name: SK Hynix Cheongju
+    kind: fab
+    operator: SK Hynix
+    country: KR
+    lat: 36.68
+    lon: 127.45
+    precision: city
+    city: Cheongju
+    source_url: https://en.wikipedia.org/wiki/SK_Hynix
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Cheongju, match: loose, confidence: 0.8 }
+    entities: [SK Hynix]
+
+  - id: micron-boise
+    name: Micron Boise
+    kind: fab
+    operator: Micron
+    country: US
+    lat: 43.52
+    lon: -116.14
+    precision: site
+    city: Boise
+    notes: Headquarters, R&D, and announced US DRAM capacity.
+    source_url: https://en.wikipedia.org/wiki/Micron_Technology
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Micron]
+
+  - id: micron-hiroshima
+    name: Micron Hiroshima
+    kind: fab
+    operator: Micron
+    country: JP
+    lat: 34.42
+    lon: 132.74
+    precision: city
+    city: Higashihiroshima
+    source_url: https://en.wikipedia.org/wiki/Micron_Technology
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Micron]
+
+  - id: micron-singapore
+    name: Micron Singapore
+    kind: fab
+    operator: Micron
+    country: SG
+    lat: 1.44
+    lon: 103.79
+    precision: city
+    city: Woodlands
+    notes: NAND fabrication and test.
+    source_url: https://en.wikipedia.org/wiki/Micron_Technology
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Micron]
+
+  # =========================================================================
+  # ADVANCED PACKAGING -- CoWoS and friends. The other real bottleneck.
+  # =========================================================================
+  - id: ase-kaohsiung
+    name: ASE Kaohsiung
+    kind: packaging
+    operator: ASE Technology
+    country: TW
+    lat: 22.68
+    lon: 120.31
+    precision: site
+    city: Kaohsiung
+    notes: >-
+      The largest OSAT footprint in the world. Advanced packaging capacity has
+      gated accelerator shipments more than once.
+    source_url: https://en.wikipedia.org/wiki/ASE_Technology_Holding
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [ASE Technology]
+
+  - id: amkor-peoria
+    name: Amkor Peoria
+    kind: packaging
+    operator: Amkor
+    country: US
+    lat: 33.72
+    lon: -112.3
+    precision: city
+    city: Peoria
+    notes: Announced US advanced packaging, sited near TSMC Arizona for a reason.
+    source_url: https://en.wikipedia.org/wiki/Amkor_Technology
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Amkor]
+
+  # =========================================================================
+  # EQUIPMENT AND MATERIALS -- the narrowest links in the chain
+  # =========================================================================
+  - id: asml-veldhoven
+    name: ASML Veldhoven
+    kind: hq
+    operator: ASML
+    country: NL
+    lat: 51.42
+    lon: 5.39
+    precision: site
+    city: Veldhoven
+    notes: >-
+      EUV lithography has exactly one supplier on earth, and this is it. The
+      single narrowest chokepoint in the entire AI supply chain.
+    source_url: https://en.wikipedia.org/wiki/ASML_Holding
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Veldhoven, match: loose, confidence: 0.95 }
+    entities: [ASML]
+
+  - id: applied-materials-santa-clara
+    name: Applied Materials
+    kind: hq
+    operator: Applied Materials
+    country: US
+    lat: 37.39
+    lon: -121.98
+    precision: city
+    city: Santa Clara
+    notes: Deposition and etch. Controls on this equipment are what bind SMIC.
+    source_url: https://en.wikipedia.org/wiki/Applied_Materials
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Applied Materials]
+
+  - id: lam-research-fremont
+    name: Lam Research
+    kind: hq
+    operator: Lam Research
+    country: US
+    lat: 37.51
+    lon: -121.94
+    precision: city
+    city: Fremont
+    source_url: https://en.wikipedia.org/wiki/Lam_Research
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Lam Research]
+
+  - id: tokyo-electron-tokyo
+    name: Tokyo Electron
+    kind: hq
+    operator: Tokyo Electron
+    country: JP
+    lat: 35.67
+    lon: 139.74
+    precision: city
+    city: Tokyo
+    notes: Coater/developer track tools -- a quiet monopoly-adjacent position.
+    source_url: https://en.wikipedia.org/wiki/Tokyo_Electron
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Tokyo Electron]
+
+  # =========================================================================
+  # DESIGN
+  # =========================================================================
+  - id: nvidia-santa-clara
+    name: NVIDIA
+    kind: hq
+    operator: NVIDIA
+    country: US
+    lat: 37.37
+    lon: -121.96
+    precision: site
+    city: Santa Clara
+    notes: Designs here; fabricates in Taiwan, packages in Taiwan, memory from Korea.
+    source_url: https://en.wikipedia.org/wiki/Nvidia
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [NVIDIA]
+
+  # =========================================================================
+  # HYPERSCALE COMPUTE
+  # =========================================================================
+  - id: ashburn-data-center-alley
+    name: Ashburn / Data Center Alley
+    kind: colo
+    operator: Multiple
+    country: US
+    lat: 39.04
+    lon: -77.49
+    precision: region
+    city: Ashburn
+    notes: >-
+      Northern Virginia carries a large share of the world's cloud traffic.
+      Grid interconnection queues here are an AI story, not a utilities story.
+    source_url: https://en.wikipedia.org/wiki/Data_center#Data_center_clusters
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Data Center Alley, match: loose, confidence: 0.9 }
+      - { term: Loudoun County, match: loose, confidence: 0.8 }
+      - { term: Ashburn, match: loose, confidence: 0.75 }
+    entities: [Equinix, Digital Realty, Amazon]
+
+  - id: santa-clara-colo
+    name: Santa Clara colocation cluster
+    kind: colo
+    operator: Multiple
+    country: US
+    lat: 37.37
+    lon: -121.97
+    precision: region
+    city: Santa Clara
+    source_url: https://en.wikipedia.org/wiki/Equinix
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Equinix, Digital Realty]
+
+  - id: abilene-stargate
+    name: Abilene, Texas
+    kind: datacenter
+    operator: Multiple
+    country: US
+    lat: 32.45
+    lon: -99.73
+    precision: city
+    city: Abilene
+    notes: One of the largest announced single-site AI training buildouts in the US.
+    source_url: https://en.wikipedia.org/wiki/Abilene,_Texas
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Abilene, match: loose, confidence: 0.7 }
+    entities: [OpenAI, Oracle]
+
+  - id: memphis-colossus
+    name: Memphis (Colossus)
+    kind: datacenter
+    operator: xAI
+    country: US
+    lat: 35.06
+    lon: -90.05
+    precision: city
+    city: Memphis
+    notes: >-
+      Notable for how fast it was stood up and for the local power and air
+      quality fight that followed -- both are AI-infrastructure news.
+    source_url: https://en.wikipedia.org/wiki/XAI_(company)
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Colossus, match: exact, confidence: 0.7 }
+    entities: [xAI]
+
+  - id: mount-pleasant-wi
+    name: Mount Pleasant, Wisconsin
+    kind: datacenter
+    operator: Microsoft
+    country: US
+    lat: 42.72
+    lon: -87.9
+    precision: city
+    city: Mount Pleasant
+    source_url: https://en.wikipedia.org/wiki/Mount_Pleasant,_Racine_County,_Wisconsin
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Microsoft]
+
+  - id: boydton-va
+    name: Boydton, Virginia
+    kind: datacenter
+    operator: Microsoft
+    country: US
+    lat: 36.67
+    lon: -78.39
+    precision: city
+    city: Boydton
+    source_url: https://en.wikipedia.org/wiki/Boydton,_Virginia
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Boydton, match: loose, confidence: 0.85 }
+    entities: [Microsoft]
+
+  - id: council-bluffs-ia
+    name: Council Bluffs, Iowa
+    kind: datacenter
+    operator: Google
+    country: US
+    lat: 41.22
+    lon: -95.86
+    precision: city
+    city: Council Bluffs
+    source_url: https://en.wikipedia.org/wiki/Council_Bluffs,_Iowa
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Council Bluffs, match: loose, confidence: 0.85 }
+    entities: [Google]
+
+  - id: the-dalles-or
+    name: The Dalles, Oregon
+    kind: datacenter
+    operator: Google
+    country: US
+    lat: 45.6
+    lon: -121.18
+    precision: city
+    city: The Dalles
+    notes: One of the earliest hyperscale sites; water use here has been litigated.
+    source_url: https://en.wikipedia.org/wiki/The_Dalles,_Oregon
+    verified_at: 2026-08-16
+    aliases:
+      - { term: The Dalles, match: loose, confidence: 0.85 }
+    entities: [Google]
+
+  - id: dublin-cloud
+    name: Dublin cloud region
+    kind: cloud_region
+    operator: Multiple
+    country: IE
+    lat: 53.35
+    lon: -6.26
+    precision: region
+    city: Dublin
+    notes: >-
+      Grid constraints here have already stopped new connections, which is the
+      clearest example of compute being physically capped by power.
+    source_url: https://en.wikipedia.org/wiki/Data_centres_in_the_Republic_of_Ireland
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Amazon, Microsoft, Google]
+
+  - id: frankfurt-cloud
+    name: Frankfurt cloud region
+    kind: cloud_region
+    operator: Multiple
+    country: DE
+    lat: 50.11
+    lon: 8.68
+    precision: region
+    city: Frankfurt
+    notes: Europe's densest interconnection point.
+    source_url: https://en.wikipedia.org/wiki/DE-CIX
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Equinix, Amazon, Microsoft]
+
+  - id: lulea-se
+    name: Luleå, Sweden
+    kind: datacenter
+    operator: Multiple
+    country: SE
+    lat: 65.58
+    lon: 22.15
+    precision: city
+    city: Luleå
+    notes: Cold climate and hydro power -- the two things a training cluster wants most.
+    source_url: https://en.wikipedia.org/wiki/Lule%C3%A5
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Luleå, match: loose, confidence: 0.85 }
+    entities: [Meta]
+
+  - id: singapore-cloud
+    name: Singapore cloud region
+    kind: cloud_region
+    operator: Multiple
+    country: SG
+    lat: 1.35
+    lon: 103.82
+    precision: region
+    city: Singapore
+    notes: >-
+      Regional compute hub, and repeatedly named in diversion-control
+      reporting because so much of Asia's capacity is billed through here.
+    source_url: https://en.wikipedia.org/wiki/Singapore
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Amazon, Google, Microsoft]
+
+  - id: mumbai-cloud
+    name: Mumbai cloud region
+    kind: cloud_region
+    operator: Multiple
+    country: IN
+    lat: 19.08
+    lon: 72.88
+    precision: region
+    city: Mumbai
+    source_url: https://en.wikipedia.org/wiki/Mumbai
+    verified_at: 2026-08-16
+    aliases: []
+    entities: [Amazon, Microsoft]
+
+  - id: abu-dhabi-compute
+    name: Abu Dhabi
+    kind: datacenter
+    operator: Multiple
+    country: AE
+    lat: 24.45
+    lon: 54.38
+    precision: city
+    city: Abu Dhabi
+    notes: >-
+      Large announced buildouts under country-specific export arrangements.
+      The clearest case on this map of policy, not physics, setting the limit.
+    source_url: https://en.wikipedia.org/wiki/Abu_Dhabi
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Abu Dhabi, match: loose, confidence: 0.8 }
+    entities: [NVIDIA, Microsoft]
+
+  # =========================================================================
+  # CHOKEPOINTS THAT ARE NOT FACILITIES
+  # =========================================================================
+  - id: port-kaohsiung
+    name: Port of Kaohsiung
+    kind: port
+    operator: Taiwan International Ports Corporation
+    country: TW
+    lat: 22.61
+    lon: 120.28
+    precision: site
+    city: Kaohsiung
+    notes: >-
+      Most finished Taiwanese silicon leaves through here or by air freight
+      from Taoyuan. On the map because a supply chain has a physical exit.
+    source_url: https://en.wikipedia.org/wiki/Port_of_Kaohsiung
+    verified_at: 2026-08-16
+    aliases: []
+    entities: []
+
+  - id: port-rotterdam
+    name: Port of Rotterdam
+    kind: port
+    operator: Port of Rotterdam Authority
+    country: NL
+    lat: 51.95
+    lon: 4.14
+    precision: site
+    city: Rotterdam
+    notes: Europe's largest port, and ASML's route out.
+    source_url: https://en.wikipedia.org/wiki/Port_of_Rotterdam
+    verified_at: 2026-08-16
+    aliases:
+      - { term: Port of Rotterdam, match: loose, confidence: 0.9 }
+    entities: []

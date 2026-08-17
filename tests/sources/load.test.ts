@@ -348,8 +348,21 @@ sources:
     // only source and the first `github_search` entry in the file. That type had been
     // in the SourceType union since M1 with no adapter behind it; task 4 shipped the
     // adapter and task 9's live run found the registry wiring still missing.
-    it('has exactly 28 configured sources', () => {
-      expect(sources.length).toBe(28);
+    // M7 (2026-08-16): 28 -> 31. Three sources covering the PHYSICAL AI
+    // buildout -- datacenterdynamics, semiconductor-engineering, toms-hardware
+    // -- added because §7.2's gazetteer ran over all 16,570 stored items and
+    // matched SIX. Not a bug in the matcher: `TSMC` 0, `ASML` 0, `Hsinchu` 0,
+    // `Veldhoven` 0 across the entire corpus. Nothing configured covered where
+    // the compute physically comes from, so the map would have been built,
+    // tested, correct, and empty.
+    //
+    // A fourth, blocksandfiles.com, was added and then removed: its robots.txt
+    // 301s, and a curl without -L returns an empty body that reads exactly
+    // like "no restrictions". It is the same Situation Publishing default-deny
+    // policy as theregister.com and nextplatform.com, both of which were
+    // checked properly and excluded. See docs/sources-wishlist.md.
+    it('has exactly 31 configured sources', () => {
+      expect(sources.length).toBe(31);
     });
 
     it('has no duplicate ids', () => {

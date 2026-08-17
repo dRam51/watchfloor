@@ -14,6 +14,9 @@ import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
 import { loadEntityRulesFile } from '../entities/rules.ts';
 import { sweepEntities } from '../entities/sweep.ts';
+import { assertEntityLinksResolve, loadGazetteerFiles } from '../locations/load.ts';
+import { seedLocations } from '../locations/seed.ts';
+import { sweepLocations } from '../locations/sweep.ts';
 import { loadInterestsFile } from '../interests/load.ts';
 import { loadMechanicalScoreConfig } from '../score/mechanical.ts';
 import { loadClusterConfig } from '../cluster/config.ts';
@@ -108,6 +111,14 @@ try {
   const interestProfile = loadInterestsFile(join(repoRoot, 'config', 'interests.yaml'));
   const scoringConfig = loadMechanicalScoreConfig(join(repoRoot, 'config', 'scoring.yaml'));
   const clusterConfig = loadClusterConfig(join(repoRoot, 'config', 'cluster.yaml'));
+  // M7, same placement and same reasoning as everything above it: a malformed
+  // locations.yaml must stop the daemon starting while someone is watching.
+  const gazetteer = loadGazetteerFiles({
+    locations: join(repoRoot, 'config', 'locations.yaml'),
+    jurisdictions: join(repoRoot, 'config', 'jurisdictions.yaml'),
+    overlay: join(repoRoot, 'config', 'locations.local.yaml'),
+  });
+  assertEntityLinksResolve(gazetteer, new Set(entityRules.entities.map((e) => e.name)));
   console.log(
     `watchfloor scheduler starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
       `tick=${env.WF_SCHEDULER_TICK_INTERVAL_MS}ms)`,
@@ -281,6 +292,15 @@ try {
       // stopping. See src/entities/sweep.ts.
       const entities = sweepEntities(db, entityRules, { now: report.finishedAt });
 
+      // M7 task 5. Mirrors src/bin/ingest.ts exactly, at the same point in the
+      // cycle, and it is in BOTH files for the reason the block immediately
+      // below documents at length: the last time a pass existed in one
+      // entrypoint and not the other, the ranked feed quietly stopped
+      // describing the corpus and nothing reported it. Seed before sweep --
+      // item_locations has a foreign key to locations.
+      const locationSeed = seedLocations(db, gazetteer);
+      const locations = sweepLocations(db, gazetteer, { now: report.finishedAt });
+
       // -----------------------------------------------------------------
       // M6. THE DAEMON DID NOT SCORE, and an unscored item cannot rank.
       //
@@ -344,6 +364,18 @@ try {
           ? ` -- entities: ${entities.entitiesWritten} written over ${entities.scanned} item(s)` +
             (entities.remaining > 0 ? `, ${entities.remaining} to go` : '')
           : '';
+      const locationSummary =
+        locations.scanned > 0
+          ? ` -- geo: ${locations.locationsWritten} site + ${locations.countriesWritten} country ` +
+            `match(es) over ${locations.scanned} item(s)` +
+            (locations.remaining > 0 ? `, ${locations.remaining} to go` : '')
+          : '';
+      if (locationSeed.orphaned.length > 0) {
+        console.error(
+          `  ! ${locationSeed.orphaned.length} stored location(s) config no longer defines: ` +
+            locationSeed.orphaned.slice(0, 8).join(', '),
+        );
+      }
       const scoreSummary =
         scored.itemsScored > 0 || clusterSummaryReport.clustersCreated > 0
           ? ` -- scored: ${scored.itemsScored}` +
@@ -373,7 +405,7 @@ try {
 
       console.log(
         `poll cycle finished at ${formatLocal(report.finishedAt, env.WF_TZ)} ` +
-          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}${readmeSummary}${entitySummary}${scoreSummary}${vaultSummary}`,
+          `(${report.durationMs}ms): ${summary || 'no sources'}${starSummary}${readmeSummary}${entitySummary}${locationSummary}${scoreSummary}${vaultSummary}`,
       );
     } catch (err) {
       // runPollCycle itself only ever rejects on a contract violation (e.g.

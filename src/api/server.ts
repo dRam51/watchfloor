@@ -13,6 +13,8 @@ import { registerDashboard } from './routes/dashboard.ts';
 import { registerSearch } from './routes/search.ts';
 import { registerItems } from './routes/items.ts';
 import { registerEntities } from './routes/entities.ts';
+import { registerMap } from './routes/map.ts';
+import type { GazetteerConfig } from '../locations/load.ts';
 
 export interface ServerDeps {
   db: Db;
@@ -38,6 +40,13 @@ export interface ServerDeps {
    * tests/api/dashboardEnrichmentStatus.test.ts pins that it does.
    */
   llmConfig?: LlmConfig;
+  /**
+   * `config/locations.yaml` + `config/jurisdictions.yaml`, merged with the
+   * generated country list (M7). Optional so this is an additive change to a
+   * shape many route tests construct by hand -- `src/bin/api.ts` always
+   * supplies it, and tests/api/mapWiring.test.ts pins that it does.
+   */
+  gazetteer?: GazetteerConfig;
 }
 
 export function buildServer(deps: ServerDeps): FastifyInstance {
@@ -138,6 +147,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       // Needs only the db: the graph is a pure function of the corpus, with
       // no decay, no `now`, and no source list.
       registerEntities(api, { db: deps.db });
+
+      // M7: §7.2's map. Registered here and pinned by
+      // tests/api/mapWiring.test.ts for exactly the reason the comment above
+      // gives -- every route test in tests/api/ builds its own Fastify
+      // instance, so all of them stay green with this line missing.
+      //
+      // Optional, unlike every other route: the gazetteer is loaded from
+      // config by src/bin/api.ts, and a hand-built test server that does not
+      // supply one should get a server WITHOUT map routes rather than a crash
+      // on an undefined config. The wiring test is what makes sure production
+      // does supply it.
+      if (deps.gazetteer !== undefined) {
+        registerMap(api, { db: deps.db, gazetteer: deps.gazetteer });
+      }
     },
     { prefix: '/api' },
   );

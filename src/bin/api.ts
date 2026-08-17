@@ -7,6 +7,7 @@ import { loadDecayConfig } from '../score/decay.ts';
 import { loadOverridesConfig } from '../score/overrides.ts';
 import { loadLlmConfig } from '../enrich/llm/config.ts';
 import { buildServer } from '../api/server.ts';
+import { loadGazetteerFiles } from '../locations/load.ts';
 import { closeDb } from '../db/connection.ts';
 
 // Resolved relative to this module, not the process cwd: a process
@@ -54,7 +55,27 @@ try {
   // WF_ALLOW_PAID_ANTHROPIC were set without a credential.
   const llmConfig = loadLlmConfig(join(repoRoot, 'config', 'llm.yaml'));
 
-  const server = buildServer({ db, env, sources, decayConfig, overridesConfig, llmConfig });
+  // M7. Loaded at boot, like everything above it: a malformed locations.yaml
+  // must stop the API starting while someone is watching, not 500 per request.
+  // No entity cross-check here -- the ingest and scheduler roots both run
+  // `assertEntityLinksResolve`, and the API never writes a location link, so
+  // duplicating it would mean loading config/entities.yaml in a process with
+  // no other use for it.
+  const gazetteer = loadGazetteerFiles({
+    locations: join(repoRoot, 'config', 'locations.yaml'),
+    jurisdictions: join(repoRoot, 'config', 'jurisdictions.yaml'),
+    overlay: join(repoRoot, 'config', 'locations.local.yaml'),
+  });
+
+  const server = buildServer({
+    db,
+    env,
+    sources,
+    decayConfig,
+    overridesConfig,
+    llmConfig,
+    gazetteer,
+  });
   // Bind to loopback only; external reach is via Tailscale (§2).
   await server.listen({ port: env.WF_API_PORT, host: '127.0.0.1' });
   console.log(

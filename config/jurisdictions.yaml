@@ -1,0 +1,324 @@
+# Jurisdictions -- the §7.2 export-control / trade-policy layer, and the country
+# half of the gazetteer. Validated by src/locations/load.ts; a malformed row
+# fails at load, never at render.
+#
+# ===========================================================================
+# READ THIS BEFORE TRUSTING A COLOUR ON THE MAP
+# ===========================================================================
+#
+# `verified_at` IS THE DATE OF THE CITED SOURCE, NOT THE DATE THIS ROW WAS
+# TYPED. That distinction is the whole point of the field. A row saying
+# `verified_at: 2022-10-07` is telling you the claim rests on a rule from
+# October 2022 -- which may still be current, or may have been superseded four
+# times since. The UI shows the date so you can decide; it does not and cannot
+# decide for you.
+#
+# Export-control policy moves faster than any hand-maintained file. Several
+# rows below are deliberately `unknown` rather than guessed: an `unknown`
+# renders as "no claim" and prompts a look, while a confidently wrong colour
+# is read as fact and never questioned. **`unknown` is the correct value for
+# anything you have not personally checked** -- it is not a gap to be filled in
+# for completeness.
+#
+# Watchfloor already ingests the Federal Register, so the corpus is itself a
+# cross-check: click a jurisdiction on the map and the policy items scoped to
+# it are right there.
+#
+# ===========================================================================
+# FIELDS
+# ===========================================================================
+#
+#   code            ISO 3166-1 alpha-2, uppercase. Joins to locations.country
+#                   and to the basemap's country polygons.
+#   name            Display name.
+#   aliases         Spellings that attribute this country in item text,
+#                   including demonyms. A bare string is a case-SENSITIVE
+#                   match; use {term:, match: loose, confidence:} for more.
+#   export_control  unrestricted | license_required | restricted | embargoed | unknown
+#                   Written from a US-rules perspective, for ADVANCED AI
+#                   COMPUTE specifically -- not general trade status.
+#   roles           What the country actually contributes to the supply chain:
+#                   fab_capacity, advanced_fab, packaging, equipment,
+#                   materials, hyperscale_compute, design.
+#                   This is the field that makes the layer worth having.
+#                   Control status alone re-states the headlines; control
+#                   status crossed with capability is the thing that is hard
+#                   to hold in your head from reading lanes.
+#   notes           Free text, shown in the panel.
+#   source_url      Mandatory. A citation that cannot be opened is not one.
+#   verified_at     ISO date OF THE SOURCE. See above.
+#
+# Run `npm run watchfloor map check-sources` to HTTP-check every source_url
+# in this file and config/locations.yaml.
+
+# §7.2: "Never plot below the threshold." Applied on the read path as well as
+# the write path -- a stored low-confidence match is a fact we recorded, not a
+# pin we drew.
+min_confidence: 0.6
+
+countries:
+  # -------------------------------------------------------------------------
+  # Advanced fabrication
+  # -------------------------------------------------------------------------
+  - code: TW
+    name: Taiwan
+    aliases:
+      - Taiwan
+      - Taiwanese
+      - { term: Hsinchu, match: loose, confidence: 0.7 }
+    export_control: unrestricted
+    roles: [advanced_fab, fab_capacity, packaging, design]
+    notes: >-
+      The single largest concentration of leading-edge logic capacity in the
+      world. Concentration risk here is the reason this map exists.
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: KR
+    name: South Korea
+    aliases:
+      - South Korea
+      - Korean
+      - { term: Republic of Korea, match: loose }
+    export_control: unrestricted
+    roles: [advanced_fab, fab_capacity, materials]
+    notes: Memory (DRAM/HBM) concentration; HBM supply gates AI accelerator output.
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: JP
+    name: Japan
+    aliases:
+      - Japan
+      - Japanese
+    export_control: unrestricted
+    roles: [fab_capacity, equipment, materials, packaging]
+    notes: >-
+      Photoresists, high-purity chemicals and substrate materials -- a
+      chokepoint that is easy to miss because it rarely makes headlines.
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: NL
+    name: Netherlands
+    aliases:
+      - Netherlands
+      - Dutch
+    export_control: unrestricted
+    roles: [equipment]
+    notes: >-
+      EUV lithography has one supplier on earth. The narrowest chokepoint in
+      the entire chain, and the reason Dutch licensing policy is AI news.
+    source_url: https://www.government.nl/topics/export-controls-of-strategic-goods
+    verified_at: 2024-09-06
+
+  # -------------------------------------------------------------------------
+  # Design, compute, and the rule-writer
+  # -------------------------------------------------------------------------
+  - code: US
+    name: United States
+    aliases:
+      - United States
+      - { term: U.S., match: exact }
+      - American
+    export_control: unrestricted
+    roles: [design, hyperscale_compute, equipment, fab_capacity]
+    notes: >-
+      Writes the controls the rest of this layer describes. Domestic
+      leading-edge capacity is under construction, not yet at volume.
+    source_url: https://www.federalregister.gov/agencies/industry-and-security-bureau
+    verified_at: 2025-05-13
+
+  - code: IE
+    name: Ireland
+    aliases: [Ireland, Irish]
+    export_control: unrestricted
+    roles: [fab_capacity, hyperscale_compute]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: IL
+    name: Israel
+    aliases: [Israel, Israeli]
+    export_control: unrestricted
+    roles: [fab_capacity, design]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: DE
+    name: Germany
+    aliases: [Germany, German]
+    export_control: unrestricted
+    roles: [fab_capacity, equipment, hyperscale_compute]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: GB
+    name: United Kingdom
+    aliases:
+      - United Kingdom
+      - British
+      - { term: U.K., match: exact }
+    export_control: unrestricted
+    roles: [design, hyperscale_compute]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: FR
+    name: France
+    aliases: [France, French]
+    export_control: unrestricted
+    roles: [hyperscale_compute, materials]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: SE
+    name: Sweden
+    aliases: [Sweden, Swedish]
+    export_control: unrestricted
+    roles: [hyperscale_compute]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: SG
+    name: Singapore
+    aliases: [Singapore, Singaporean]
+    export_control: unrestricted
+    roles: [fab_capacity, packaging, hyperscale_compute]
+    notes: >-
+      Repeatedly named in diversion-control reporting because so much regional
+      compute is billed through here. Watch this one.
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: IN
+    name: India
+    aliases: [India, Indian]
+    export_control: unrestricted
+    roles: [hyperscale_compute, design, packaging]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: CA
+    name: Canada
+    aliases: [Canada, Canadian]
+    export_control: unrestricted
+    roles: [hyperscale_compute, design]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  # -------------------------------------------------------------------------
+  # Controlled
+  # -------------------------------------------------------------------------
+  - code: CN
+    name: China
+    aliases:
+      - China
+      - Chinese
+      - { term: PRC, match: exact }
+    export_control: restricted
+    roles: [fab_capacity, packaging, materials, design, hyperscale_compute]
+    notes: >-
+      Advanced-node logic, HBM and the equipment to make either are subject to
+      broad US controls, expanded repeatedly since October 2022. Also holds
+      dominant positions in gallium, germanium and rare-earth processing --
+      the materials role is not a footnote.
+    source_url: https://www.federalregister.gov/agencies/industry-and-security-bureau
+    verified_at: 2024-12-02
+
+  - code: HK
+    name: Hong Kong
+    aliases: [Hong Kong]
+    export_control: restricted
+    notes: Treated as part of the China control perimeter for these items.
+    roles: [hyperscale_compute]
+    source_url: https://www.federalregister.gov/agencies/industry-and-security-bureau
+    verified_at: 2024-12-02
+
+  - code: MO
+    name: Macau
+    aliases: [Macau, Macao]
+    export_control: restricted
+    roles: []
+    source_url: https://www.federalregister.gov/agencies/industry-and-security-bureau
+    verified_at: 2024-12-02
+
+  - code: AE
+    name: United Arab Emirates
+    aliases:
+      - United Arab Emirates
+      - { term: UAE, match: exact }
+      - Emirati
+    export_control: license_required
+    roles: [hyperscale_compute]
+    notes: >-
+      Large announced buildouts under country-specific arrangements rather
+      than a blanket rule. Status here changes often -- re-check before
+      relying on the colour.
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: SA
+    name: Saudi Arabia
+    aliases: [Saudi Arabia, Saudi]
+    export_control: license_required
+    roles: [hyperscale_compute]
+    notes: As UAE -- country-specific arrangements, fast-moving.
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: MY
+    name: Malaysia
+    aliases: [Malaysia, Malaysian]
+    export_control: unknown
+    roles: [packaging, hyperscale_compute]
+    notes: >-
+      Major ATP (assembly/test/packaging) footprint and a recurring subject of
+      diversion-control reporting. Status deliberately UNKNOWN: this has moved
+      more than once and no colour is better than a wrong one.
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: VN
+    name: Vietnam
+    aliases: [Vietnam, Vietnamese]
+    export_control: unknown
+    roles: [packaging]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  - code: TH
+    name: Thailand
+    aliases: [Thailand, Thai]
+    export_control: unknown
+    roles: [packaging]
+    source_url: https://www.bis.gov/
+    verified_at: 2025-05-13
+
+  # -------------------------------------------------------------------------
+  # Embargoed
+  # -------------------------------------------------------------------------
+  - code: RU
+    name: Russia
+    aliases: [Russia, Russian]
+    export_control: embargoed
+    roles: [materials]
+    notes: Comprehensive controls since 2022. Neon and palladium supply exposure.
+    source_url: https://ofac.treasury.gov/sanctions-programs-and-country-information
+    verified_at: 2022-03-02
+
+  - code: IR
+    name: Iran
+    aliases: [Iran, Iranian]
+    export_control: embargoed
+    roles: []
+    source_url: https://ofac.treasury.gov/sanctions-programs-and-country-information
+    verified_at: 2022-03-02
+
+  - code: KP
+    name: North Korea
+    aliases: [North Korea]
+    export_control: embargoed
+    roles: []
+    source_url: https://ofac.treasury.gov/sanctions-programs-and-country-information
+    verified_at: 2022-03-02
