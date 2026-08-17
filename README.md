@@ -43,7 +43,7 @@ These are load-bearing, not aspirational — each is enforced mechanically and h
 
 Node 26 · `node:sqlite` (WAL, FTS5) · Fastify · Vite + React 19 · vitest. No ORM, no SDKs — the Anthropic and MCP SDKs were both evaluated and rejected on measurement, with the reasoning recorded in the relevant modules.
 
-**3,572 tests across 154 files.** The suite leans on mutation testing: a claim is not considered proven until the defect it guards against has been introduced and the test watched to fail.
+**3,584 tests across 155 files.** The suite leans on mutation testing: a claim is not considered proven until the defect it guards against has been introduced and the test watched to fail.
 
 ## Documentation
 
@@ -57,6 +57,26 @@ Node 26 · `node:sqlite` (WAL, FTS5) · Fastify · Vite + React 19 · vitest. No
 
 ## Status
 
-M0–M5 complete; M6 (hardening and portability) in progress. The specification it is built from is private and not in this repository.
+**M0–M5 complete. M6 (hardening) largely done** — verified backup and restore, a scheduled
+launchd agent, case-exact path checks, the runbook, and the PWA. Dockerfile, systemd unit and
+the migration rehearsal are deferred until there is a second machine to rehearse onto. **M4b
+(markets) is deferred**: its entire input is a private portfolio file.
+
+Running against a live corpus of **16,570 items** and **3,484 distinct entities**, writing 178
+notes into an Obsidian vault on a three-times-daily schedule.
+
+The specification it is built from is private and not in this repository.
+
+### One operational note, because it cost an evening
+
+A launchd agent **cannot read or execute anything under `~/Documents`, `~/Desktop` or
+`~/Downloads`** — macOS TCC refuses, and it fails before your code runs: `exit 78` when it cannot
+open the log files, `exit 126` when it cannot exec the script, and **empty logs** either way.
+
+Diagnose it with a probe that reads file *contents*. `ls` only stats, and succeeds even when
+reads and execs are refused — which is exactly how the first diagnosis here went wrong.
+
+Nothing in this tree records its own path, so relocating the repo needed no code change at all.
+That is the zero-absolute-paths rule paying for itself.
 
 Not included here, deliberately: `docs/brief.md` and `config/portfolio.yaml` carry personal financial and employment context. Nothing in the codebase reads either at build or test time, so a clone is unaffected.
