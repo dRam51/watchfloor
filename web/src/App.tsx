@@ -124,7 +124,17 @@ function Dashboard() {
       : null;
 
   return (
-    <main className="shell">
+    <main
+      className={[
+        'shell',
+        // §7's "one wall": the lane board and the map want the whole display,
+        // where search/entities/source-health are columns of text that do not.
+        // See `.shell--wall` in global.css for the measurement behind this.
+        (view === 'items' && isWide) || view === 'map' ? 'shell--wall' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
       <header className="shell__header">
         <h1 className="shell__title">WATCHFLOOR</h1>
         <p className="shell__subtitle">situational awareness -- six beats, one wall</p>

@@ -69,6 +69,33 @@ a {
   gap: var(--space-4);
 }
 
+/* =========================================================================
+   THE WALL VIEWS ARE NOT CAPPED AT A READING WIDTH.
+   =========================================================================
+   72rem (1152px) is right for a column of prose and wrong for §7's "six
+   beats, one wall". Measured on an 1800px viewport with the cap in place:
+
+       shell      1152px  (capped)
+       grid       1104px
+       per lane    210px  <- on ANY monitor, however large
+
+   Six lanes cannot be dense AND legible inside 1104px, so the cap alone
+   guaranteed cramped lanes forever -- a large display bought nothing. The
+   item rows' container query (see `.lane` below) makes a narrow lane degrade
+   gracefully; this is what stops it being narrow in the first place.
+
+   Applied by modifier rather than to `.shell` wholesale, because the cap is
+   still correct for the reading views: search results, the entity list and
+   source health are columns of text, and 1800px lines are worse than 1152px
+   ones.
+
+   2400px rather than none: past that, lanes stop being scannable in one
+   glance and the eye has to travel, which is the opposite of a watchfloor.
+   ========================================================================= */
+.shell--wall {
+  max-width: min(150rem, 100%);
+}
+
 .shell__title {
   margin: 0;
   font-size: var(--text-xl);
@@ -886,6 +913,80 @@ a {
   flex-direction: column;
   min-width: 0;
   background: var(--color-bg);
+  /* A CONTAINER, so rows adapt to the lane they are in rather than to the
+     window. See the @container block below for why that distinction is the
+     whole fix. */
+  container-type: inline-size;
+  container-name: lane;
+}
+
+/* =========================================================================
+   THE LANE IS THE THING THAT IS NARROW, NOT THE WINDOW.
+   =========================================================================
+   Measured at a 1000px viewport, six lanes:
+
+       grid-template-columns: 44px 180px 180px 180px 180px 180px
+       .item-row__actions   177px   (Open 44 + Save 44 + Dismiss 64 + gaps)
+       .item-row__meta      198px
+       .item-row__title       0px   <- the bug
+
+   `meta` and `actions` are both `flex: 0 0 auto` and together need ~375px.
+   The title is the only shrinkable child, so it absorbs the whole deficit and
+   collapses to nothing: every row renders as a wall of buttons with no item
+   in it. Visible in the desktop shell, and present in the browser at any
+   width below roughly 1900px.
+
+   §7.1 asserts "touch targets >= 44px ... Density and tappability aren't in
+   conflict at this information volume." At six lanes they are, and 44px is
+   the half that is not negotiable -- so the row wraps instead.
+
+   A @container query, not a media query, because the trigger is the LANE's
+   width: the same 1000px window shows a comfortable row when four lanes are
+   collapsed and an impossible one when none are. A viewport breakpoint cannot
+   tell those apart. The stylesheet already reaches for exactly this shape at
+   `.repo-row__toggle` below 700px -- same problem, coarser instrument.
+   ========================================================================= */
+@container lane (max-width: 420px) {
+  .item-row__row {
+    flex-wrap: wrap;
+  }
+
+  /* The title gets a line of its own, at the full width of the lane. */
+  .item-row__toggle {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .item-row__title {
+    flex: 1 1 100%;
+    /* Two lines, then clipped. A headline is the row's content; one
+       ellipsised line at 180px shows about four words. */
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .item-row__meta {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  /* Redundant inside a beat lane: every row in the Cyber lane is cyber. It
+     earns its place in Stream and in search results, which are mixed, and
+     nowhere else. */
+  .item-row__beat {
+    display: none;
+  }
+
+  /* Actions keep their 44px targets and sit on the meta line, pushed right. */
+  .item-row__actions {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding-right: 0;
+  }
 }
 
 .lane__header {
