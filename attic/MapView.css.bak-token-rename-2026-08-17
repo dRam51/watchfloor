@@ -1,0 +1,235 @@
+/*
+ * §7.2 / §7.4. Every value here is a token from web/src/styles/tokens.css --
+ * no literal colours, no literal type sizes. See that file's header for why.
+ */
+
+.mapview {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 60vh;
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.mapview--ambient {
+  /* The wall display: nothing on it is reachable by a pointer. */
+  pointer-events: none;
+}
+
+.mapview__canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.mapview__error {
+  position: absolute;
+  inset-inline: var(--space-3);
+  top: var(--space-3);
+  z-index: 2;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+}
+
+/* --- chrome ------------------------------------------------------------- */
+
+.mapview__chrome {
+  position: absolute;
+  z-index: 2;
+  top: var(--space-3);
+  left: var(--space-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.mapview__projection,
+.mapview__layers {
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.mapview__chrome button {
+  /* §7.1: "Touch targets >= 44px on interactive elements even in the dense
+     desktop view." Density and tappability are not in conflict here. */
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 1px);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.mapview__chrome button:hover {
+  color: var(--color-text-primary);
+  background: var(--color-surface-raised);
+}
+
+.mapview__chrome button.is-active {
+  color: var(--color-bg);
+  background: var(--color-accent);
+}
+
+.mapview__chrome button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.mapview__close {
+  margin-left: auto;
+}
+
+/* --- the click-through panel -------------------------------------------- */
+
+.mapview__panel {
+  position: absolute;
+  z-index: 3;
+  top: var(--space-3);
+  right: var(--space-3);
+  bottom: var(--space-3);
+  width: min(28rem, calc(100% - var(--space-3) * 2));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+
+.mapview__panel header {
+  position: relative;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.mapview__panel h2 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-md);
+  color: var(--color-text-primary);
+}
+
+.mapview__panel header p {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-dim);
+}
+
+.mapview__panel header button {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-lg);
+  cursor: pointer;
+}
+
+.mapview__policy {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.mapview__policy dt {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mapview__policy dd {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+}
+
+.mapview__policy em {
+  font-style: normal;
+  color: var(--color-alert);
+}
+
+.mapview__items {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.mapview__items li {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.mapview__items a {
+  display: block;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.mapview__items a:hover,
+.mapview__items a:focus-visible {
+  color: var(--color-accent);
+}
+
+.mapview__items span {
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-dim);
+}
+
+.mapview__empty {
+  padding: var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+/* MapLibre's own chrome, restyled to the ops-wall palette rather than left
+   in its default light theme. */
+.mapview .maplibregl-ctrl-attrib {
+  background: color-mix(in srgb, var(--color-surface) 80%, transparent);
+  color: var(--color-text-dim);
+  font-size: var(--font-size-xs);
+}
+
+.mapview .maplibregl-ctrl-attrib a {
+  color: var(--color-text-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mapview * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

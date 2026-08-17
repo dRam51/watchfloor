@@ -79,9 +79,20 @@ const STAGE_BY_ENTITY: Readonly<Record<string, SupplyStage>> = {
 };
 
 function stageOf(location: LocationRule): SupplyStage | null {
-  for (const entity of location.entities) {
-    const override = STAGE_BY_ENTITY[entity];
-    if (override !== undefined) return override;
+  // The override applies ONLY to `hq` rows, and the restriction is load-bearing.
+  //
+  // Without it, `entities` leaks: Abu Dhabi is a data centre operated by
+  // several parties and lists NVIDIA among them, so an unrestricted override
+  // classified a hyperscale site as the DESIGN stage and drew an arc from Abu
+  // Dhabi to Singapore as though the UAE designed the chips. Caught on the
+  // first live response, not by a test -- an entity list says "these
+  // organisations are involved here", which is a much weaker claim than "this
+  // site IS that organisation", and only an `hq` row makes the stronger one.
+  if (location.kind === 'hq') {
+    for (const entity of location.entities) {
+      const override = STAGE_BY_ENTITY[entity];
+      if (override !== undefined) return override;
+    }
   }
   return STAGE_BY_KIND[location.kind] ?? null;
 }

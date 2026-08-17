@@ -45,6 +45,44 @@ const proxy = Object.fromEntries(
 export default defineConfig({
   root: 'web',
   plugins: [react()],
+  // ==========================================================================
+  // WHY maplibre-gl IS PINNED TO v5 AND NOT v6
+  //
+  // v6 does not work under Vite here, and the failure is almost perfectly
+  // disguised. The map RENDERS -- countries, borders, atmosphere, all correct
+  // -- and the `load` event never fires. Everything that gets its data after
+  // load (facility markers, supply arcs, the day/night terminator) stays
+  // empty; `map.getSource()` returns undefined, `getStyle()` reports no
+  // sources, and `setPaintProperty` throws "Style is not done loading". No
+  // console error, no `error` event, no failed request. A globe that looks
+  // finished and is inert.
+  //
+  // Isolated by building a probe map with NO SOURCES AT ALL, just a background
+  // layer: it never loaded either. That ruled out the style, the data, and the
+  // GeoJSON, and left the worker -- v6 ships its renderer as a separate ES
+  // module worker (`maplibre-gl-worker.mjs`), and Vite mishandles it in two
+  // different ways depending on configuration:
+  //
+  //   - pre-bundled: "the file does not exist at
+  //     .vite/deps/maplibre-gl-worker.mjs which is in the optimize deps
+  //     directory"
+  //   - `optimizeDeps.exclude`: Vite serves it through its own transform
+  //     pipeline, which prepends `import { injectQuery } from "/@vite/client"`.
+  //     `/@vite/client` uses `document`; a Worker has no `document`.
+  //
+  // `worker: { format: 'es' }` fixed the format half and not the rest.
+  //
+  // **v5 inlines its worker** -- the only separate worker files it ships are
+  // the CSP variants -- so none of Vite's worker handling applies. It carries
+  // everything §7.2 needs, verified against its own type declarations, not its
+  // docs: `ProjectionSpecification`, `SkySpecification`, `atmosphere-blend`,
+  // `setProjection`. Nothing was given up.
+  //
+  // The lesson worth keeping: this class of bug is invisible to `npm run
+  // build:web` AND to the test suite. `web/tests/mapLazy.test.ts` was green
+  // throughout -- the chunks split correctly, they just did not work. It was
+  // found by opening the page and asking why one event had not fired.
+  // ==========================================================================
   server: { proxy },
   // `preview` does not inherit `server.proxy` automatically -- Vite treats
   // them as separate config surfaces, so this is repeated deliberately

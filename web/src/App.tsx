@@ -7,6 +7,8 @@ import { LaneBoard } from './components/LaneBoard.tsx';
 import { SearchView } from './components/SearchView.tsx';
 import { SourceHealthPage } from './components/SourceHealthPage.tsx';
 import { EntityGraphView } from './components/EntityGraphView.tsx';
+import { MapPanel } from './components/MapPanel.tsx';
+import { AmbientView, isAmbientRequested } from './components/AmbientView.tsx';
 import {
   EnrichmentStatus,
   type EnrichmentStatusData,
@@ -46,7 +48,7 @@ interface DashboardHeader {
  * fully-tested component with no mount point -- and a view that is not in this
  * union is exactly that shape.
  */
-type View = 'items' | 'search' | 'sources' | 'entities';
+type View = 'items' | 'search' | 'sources' | 'entities' | 'map';
 
 type LoadState =
   | { status: 'loading' }
@@ -137,6 +139,14 @@ function Dashboard() {
         </button>
         <button
           type="button"
+          className={`shell__nav-button${view === 'map' ? ' shell__nav-button--active' : ''}`}
+          aria-current={view === 'map' ? 'page' : undefined}
+          onClick={() => setView('map')}
+        >
+          map
+        </button>
+        <button
+          type="button"
           className={`shell__nav-button${view === 'sources' ? ' shell__nav-button--active' : ''}`}
           aria-current={view === 'sources' ? 'page' : undefined}
           onClick={() => setView('sources')}
@@ -148,6 +158,18 @@ function Dashboard() {
         </button>
       </nav>
 
+      {/* The map is a FULL-BLEED view, so the two header strips below it stand
+          down while it is showing.
+
+          Measured, not guessed: with the title, nav, status line and
+          enrichment panel all stacked, the chrome took 460 of 720 viewport
+          pixels and left the globe a 260px letterbox -- §7.4 asks for the
+          showpiece view of the project and this was a marble in a black bar.
+          Every other view is a list and is happy below the full header.
+
+          §15's "the dashboard shows the feature as off" is unaffected: the
+          items view, which is the dashboard, still shows it. */}
+      {view !== 'map' && (
       <section className="shell__status" aria-live="polite">
         {state.status === 'loading' && <p>connecting to api&hellip;</p>}
         {state.status === 'error' && (
@@ -160,13 +182,14 @@ function Dashboard() {
           </p>
         )}
       </section>
+      )}
 
       {/* §15's third clause: "the dashboard shows the feature as off." Part of
           the header strip, beside the beat/source counts, rather than tucked
           onto the source-health page -- §7 puts today's enrichment spend in
           the header, and the policy that governs that spend belongs next to
           it. See EnrichmentStatus.tsx for why it is three lines and not one. */}
-      {state.status === 'ready' && (
+      {state.status === 'ready' && view !== 'map' && (
         <EnrichmentStatus
           status={state.data.enrichment ?? null}
           spend={state.data.enrichmentSpend ?? null}
@@ -187,6 +210,14 @@ function Dashboard() {
 
       {token && view === 'entities' && (
         <EntityGraphView
+          token={token}
+          onUnauthorized={() => setToken(null)}
+          onClose={() => setView('items')}
+        />
+      )}
+
+      {token && view === 'map' && (
+        <MapPanel
           token={token}
           onUnauthorized={() => setToken(null)}
           onClose={() => setView('items')}
@@ -221,11 +252,20 @@ function Dashboard() {
 }
 
 export function App() {
+  // §7.4's ambient mode, "launched from a menu item or `?ambient=1`". Read
+  // once, at render, not held in state: this is a deployment choice for a
+  // display that is never navigated, not a view to transition between.
+  //
+  // Still INSIDE AuthGate. A wall display is exactly the situation where it is
+  // tempting to skip the token -- and exactly the situation where you should
+  // not, because a screen left on in a room is the least supervised surface
+  // this system has. §7.1's "read/saved/dismissed state is server-side" makes
+  // no exception for it either.
+  const ambient = isAmbientRequested();
+
   return (
     <AuthProvider>
-      <AuthGate>
-        <Dashboard />
-      </AuthGate>
+      <AuthGate>{ambient ? <AmbientView /> : <Dashboard />}</AuthGate>
     </AuthProvider>
   );
 }
