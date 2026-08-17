@@ -46,42 +46,29 @@ export default defineConfig({
   root: 'web',
   plugins: [react()],
   // ==========================================================================
-  // WHY maplibre-gl IS PINNED TO v5 AND NOT v6
+  // maplibre-gl is pinned to v5, and NOT because v6 was the bug.
   //
-  // v6 does not work under Vite here, and the failure is almost perfectly
-  // disguised. The map RENDERS -- countries, borders, atmosphere, all correct
-  // -- and the `load` event never fires. Everything that gets its data after
-  // load (facility markers, supply arcs, the day/night terminator) stays
-  // empty; `map.getSource()` returns undefined, `getStyle()` reports no
-  // sources, and `setPaintProperty` throws "Style is not done loading". No
-  // console error, no `error` event, no failed request. A globe that looks
-  // finished and is inert.
+  // The map's data layers were empty for a day; the cause turned out to be
+  // React StrictMode's double mount (see web/src/map/MapView.tsx). While
+  // chasing it, v6 was downgraded to v5 on a wrong theory. v5 is a perfectly
+  // good version with the same globe and sky support, so it stays rather than
+  // churning the dependency again to prove a point.
   //
-  // Isolated by building a probe map with NO SOURCES AT ALL, just a background
-  // layer: it never loaded either. That ruled out the style, the data, and the
-  // GeoJSON, and left the worker -- v6 ships its renderer as a separate ES
-  // module worker (`maplibre-gl-worker.mjs`), and Vite mishandles it in two
-  // different ways depending on configuration:
+  // Two real Vite facts were learned and are worth keeping:
   //
-  //   - pre-bundled: "the file does not exist at
-  //     .vite/deps/maplibre-gl-worker.mjs which is in the optimize deps
-  //     directory"
-  //   - `optimizeDeps.exclude`: Vite serves it through its own transform
-  //     pipeline, which prepends `import { injectQuery } from "/@vite/client"`.
-  //     `/@vite/client` uses `document`; a Worker has no `document`.
+  //   DO NOT add `optimizeDeps.exclude: ['maplibre-gl']`. It breaks named-
+  //   export interop -- the browser reports "does not provide an export named
+  //   'AttributionControl'" and the page goes blank. It was added early to
+  //   silence a dep-optimizer warning and made everything worse while looking
+  //   like progress. It also invalidated a diagnostic probe, which is what
+  //   sent the investigation down the wrong path for hours.
   //
-  // `worker: { format: 'es' }` fixed the format half and not the rest.
-  //
-  // **v5 inlines its worker** -- the only separate worker files it ships are
-  // the CSP variants -- so none of Vite's worker handling applies. It carries
-  // everything §7.2 needs, verified against its own type declarations, not its
-  // docs: `ProjectionSpecification`, `SkySpecification`, `atmosphere-blend`,
-  // `setProjection`. Nothing was given up.
-  //
-  // The lesson worth keeping: this class of bug is invisible to `npm run
-  // build:web` AND to the test suite. `web/tests/mapLazy.test.ts` was green
-  // throughout -- the chunks split correctly, they just did not work. It was
-  // found by opening the page and asking why one event had not fired.
+  //   v6 ships its renderer as a separate ES-module worker and needs
+  //   `worker: { format: 'es' }`; Vite otherwise serves it through a transform
+  //   that prepends `import { injectQuery } from "/@vite/client"`, and
+  //   /@vite/client uses `document`, which a Worker has none of. v5 inlines
+  //   its worker, so none of that applies. If anyone upgrades to v6, that
+  //   setting is required.
   // ==========================================================================
   server: { proxy },
   // `preview` does not inherit `server.proxy` automatically -- Vite treats

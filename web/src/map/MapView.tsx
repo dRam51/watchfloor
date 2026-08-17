@@ -63,22 +63,22 @@ import './MapView.css';
  * arcs are a `line` layer over vertices the server computes. **No deck.gl and
  * no second globe library**, which §7.2 asked to be told about either way.
  *
- * ## !! KNOWN BROKEN, 2026-08-17 -- read before trusting this file !!
+ * ## The bug this file spent a day on, and why the cleanup looks odd
  *
- * The globe DRAWS -- projection, atmosphere, the country basemap, the 2D/globe
- * toggle -- and **MapLibre's `load` event never fires**, so `ready` below stays
- * false and every data layer (markers, arcs, terminator, choropleth) is empty.
- * `map.getSource()` returns undefined and `setPaintProperty` throws "Style is
- * not done loading".
+ * `load` never fired, so `ready` stayed false and every data layer was empty
+ * while the globe itself rendered perfectly. The cause was **React
+ * StrictMode's double mount**: the effect's cleanup called `map.remove()`
+ * synchronously, destroying the first map microseconds after construction and
+ * while its style was still loading, and the second map -- built into the same
+ * container -- never finished loading.
  *
- * Do not assume the cause is in this file: a probe map with NO SOURCES AT ALL
- * fails the same way, and the failure reproduces under `vite build` and in
- * maplibre-gl v5 and v6 alike. The full elimination table is in
- * `docs/superpowers/plans/2026-08-16-m7-map-globe.md`.
+ * The teardown is therefore deferred by one macrotask so a re-mount can cancel
+ * it. See the cleanup at the end of the construction effect for the full
+ * account, and `web/tests/mapLifecycle.test.ts`, which turns red if anyone
+ * "simplifies" it back.
  *
- * The suggested next move is to stop gating on `load` altogether -- see that
- * document. Everything below is written and typechecked and untested against a
- * working map.
+ * Verified live with StrictMode ON: 42 location markers, 128 arcs, the
+ * terminator, and a 180-country choropleth, with one WebGL context.
  */
 
 export interface MapViewProps {
@@ -327,6 +327,14 @@ export default function MapView({
    * it must not cause a render, and nothing reads it during one.
    */
   const userMovedRef = useRef(false);
+  /**
+   * Handle for a scheduled `map.remove()`, or null.
+   *
+   * The map's teardown is deferred by one macrotask so that StrictMode's
+   * mount -> cleanup -> mount cycle does not destroy a map it is about to
+   * re-mount. See the cleanup at the end of the construction effect.
+   */
+  const teardownRef = useRef<number | null>(null);
 
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -342,6 +350,20 @@ export default function MapView({
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (containerRef.current === null) return;
+
+    // A pending teardown means this is StrictMode's second mount, microseconds
+    // after the first. Cancel it and keep the map we already have. See the
+    // cleanup at the bottom of this effect for the full story.
+    if (teardownRef.current !== null) {
+      window.clearTimeout(teardownRef.current);
+      teardownRef.current = null;
+    }
+    if (mapRef.current !== null) {
+      // Already built. Re-running construction here would leak a WebGL context
+      // and attach every listener twice.
+      if (mapRef.current.loaded()) setReady(true);
+      return;
+    }
 
     const palette = readPalette();
     paletteRef.current = palette;
@@ -390,6 +412,12 @@ export default function MapView({
       );
       setReady(true);
     });
+    // Belt and braces: `load` fires exactly once and a listener attached after
+    // it has fired never runs. Construction and this line are in the same tick
+    // so it cannot have fired yet today -- but `ready` gates every data push
+    // in this file, and a gate that can silently latch shut is precisely the
+    // failure this milestone spent a day on.
+    if (map.loaded()) setReady(true);
 
     mapRef.current = map;
 
@@ -405,8 +433,41 @@ export default function MapView({
     }
 
     return () => {
-      map.remove();
-      mapRef.current = null;
+      // ===================================================================
+      // THE TEARDOWN IS DEFERRED, AND THAT IS THE WHOLE BUG FIX.
+      //
+      // React StrictMode runs every effect twice in development: mount ->
+      // cleanup -> mount, all in one tick. The obvious cleanup --
+      // `map.remove()` right here -- destroys the first map microseconds
+      // after it was constructed and while its style is still loading. The
+      // second map is then built into the same container against torn-down
+      // shared state, and **never fires `load`**.
+      //
+      // What that looks like is the reason it took so long to find: the
+      // globe RENDERS. Projection, atmosphere, country basemap, all correct.
+      // But `ready` below stays false forever, so every layer that receives
+      // its data after load -- markers, arcs, terminator, choropleth -- stays
+      // empty. `getSource()` returns undefined and `setPaintProperty` throws
+      // "Style is not done loading". No error event, no console warning, no
+      // failed request. Proven by running with StrictMode off: `load` fires,
+      // and the same code renders 2 markers, 12 arcs and the terminator.
+      //
+      // So: schedule the removal instead of doing it. StrictMode's second
+      // mount runs before the timeout and cancels it, keeping the live map.
+      // A real unmount has no second mount, the timeout fires, and the map
+      // is released properly.
+      //
+      // NOT solved by disabling StrictMode. StrictMode is doing its job here
+      // -- it surfaced a genuine double-mount defect, which is exactly the
+      // class of bug it exists to expose, and the same crash would happen on
+      // any remount in production.
+      // ===================================================================
+      teardownRef.current = window.setTimeout(() => {
+        mapRef.current?.remove();
+        mapRef.current = null;
+        teardownRef.current = null;
+        setReady(false);
+      }, 0);
     };
     // Deliberately constructed once. `prefs` is read for the initial style and
     // then applied by the effects below; adding it here would tear the map

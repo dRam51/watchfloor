@@ -7,23 +7,28 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **M0–M3, M4a, M5 and M6 complete. M7 is half done.** **3,607 tests / 157 files.**
+Status: **M0–M3, M4a, M5, M6 and M7 complete.** **3,613 tests / 159 files.**
 31 sources, 17,252 items, 12,232 entity rows. **M4b (markets) is deferred, not skipped**: its
 entire input is `config/portfolio.yaml`, which only the owner can write, and its absence leaves
 three of §8.2's five bot tools reporting `not_configured`.
 
-> [!warning] M7's server half is done and proven. **The map's data layers do not render.**
-> The globe draws — projection, atmosphere, the vendored country basemap, the 2D↔globe toggle —
-> and **MapLibre's `load` event never fires**, so markers, arcs, terminator and choropleth are all
-> empty. Ruled out by direct experiment: the style (a probe map with *no sources at all* fails
-> identically), the data (all `/api/map/*` return 200), CSP blob workers, WebGL, dev-only
-> artifacts (reproduces under `vite build`), and the library version (v6 and v5.24 both).
-> **The full elimination table and the suggested next move are in
-> `docs/superpowers/plans/2026-08-16-m7-map-globe.md`**, and `web/src/map/MapView.tsx` opens with a
-> warning so nobody mistakes it for finished. Next move: stop gating on `load`.
+> [!note] M7 renders. The bug that hid it for a day was **React StrictMode**.
+> `load` never fired, so `ready` stayed false and every data layer was empty — while the globe
+> itself drew perfectly. Cause: the effect cleanup called `map.remove()` synchronously, so
+> StrictMode's mount → cleanup → mount destroyed the first map mid-style-load and the second never
+> finished loading. Fix: **defer the teardown by one macrotask** so a re-mount cancels it. Verified
+> live with StrictMode ON — 42 markers, 128 arcs, terminator, 180-country choropleth, one WebGL
+> context, click-through opening a real item. Pinned by `web/tests/mapLifecycle.test.ts`, watched
+> to fail against a reintroduced synchronous `remove()`.
 >
-> **3,607 tests pass, `tsc` is clean, the build is clean, and the feature is inert.** Occurrence
-> **ten**, and the first where every check agrees and the thing simply does not work.
+> **The expensive part was a bad control.** An early probe "with no sources at all" appeared to
+> fail too, which ruled out the style and sent the hunt into the library, the worker, CSP and
+> WebGL — including an unnecessary v6→v5 downgrade. That probe was run while
+> `optimizeDeps.exclude: ['maplibre-gl']` was set, which breaks MapLibre's named-export interop,
+> so it was broken for an unrelated reason and its result meant nothing. **A control experiment
+> run in a broken environment is not a control** — re-establish that the known-good case actually
+> passes before trusting the known-bad one. What finally worked was bisection from a *verified*
+> working probe: every piece of the real style loaded fine, which left the component.
 
 > [!important] M5's acceptance passed, and what it could NOT establish matters as much
 > Four of five criteria are proven against the owner's **real** iCloud vault and the live
@@ -53,7 +58,7 @@ three of §8.2's five bot tools reporting `not_configured`.
 > | 6–7 | `createLlmBackend` and `loadEnrichmentPolicy` — Wave 1's whole LLM stack, called only by its own modules | M5 Task 15 |
 > | 8 | Scoring ran in **neither** unattended entrypoint — 1,119 of 7,056 items unscored, newest score two days old | The owner asking a plain question |
 > | 9 | `locations` / `item_locations` / `src/domain/location.ts` — in the schema since `0001_init.sql`, **zero rows across three milestones**, a working tested `upsertLocation` with no caller | M7, and it was *scaffolded on purpose*, which is why it looked intentional |
-> | 10 | The whole M7 map client — every test green, `tsc` clean, build clean, **feature inert** | Opening the page and asking why one event had not fired |
+> | 10 | The whole M7 map client — every test green, `tsc` clean, build clean, **feature inert** | Opening the page and asking why one event had not fired. Cause was StrictMode's double mount; **fixed**, see above |
 >
 > **The tests that should have caught these were often named for the exact rule they failed to
 > exercise.** `tests/sources/load.test.ts` had an assertion called *"only uses source types that
