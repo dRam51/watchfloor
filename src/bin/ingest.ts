@@ -30,6 +30,11 @@ import { recordStarSnapshots } from '../ingest/starSnapshots.ts';
 import { enrichRepoReadmes, repoSourceWasDue } from '../ingest/repoEnrichment.ts';
 import { loadEntityRulesFile } from '../entities/rules.ts';
 import { sweepEntities } from '../entities/sweep.ts';
+import { loadInterestsFile } from '../interests/load.ts';
+import { loadMechanicalScoreConfig } from '../score/mechanical.ts';
+import { loadClusterConfig } from '../cluster/config.ts';
+import { runClusteringPass } from '../cluster/run.ts';
+import { runScoringPass } from '../score/pass.ts';
 
 // Resolved relative to this module, not the process cwd -- matches
 // src/bin/api.ts / src/bin/scheduler.ts exactly.
@@ -74,6 +79,9 @@ try {
     // M5 task 16. Loaded at boot, beside sources: a malformed entities.yaml
     // should stop the run while someone is watching, not fail per-item later.
     const entityRules = loadEntityRulesFile(join(repoRoot, 'config', 'entities.yaml'));
+    const interestProfile = loadInterestsFile(join(repoRoot, 'config', 'interests.yaml'));
+    const scoringConfig = loadMechanicalScoreConfig(join(repoRoot, 'config', 'scoring.yaml'));
+    const clusterConfig = loadClusterConfig(join(repoRoot, 'config', 'cluster.yaml'));
     console.log(
       `watchfloor one-shot ingest starting (TZ=${env.WF_TZ}, sources=${sources.length}, ` +
         `entity rules=${entityRules.entities.length}+${entityRules.patterns.length} patterns)`,
@@ -126,6 +134,29 @@ try {
     // ruleset's content digest, so editing config/entities.yaml re-opens the
     // whole corpus automatically. See src/entities/sweep.ts.
     const entities = sweepEntities(db, entityRules, { now: report.finishedAt });
+
+    // M6. The daemon scores (src/bin/scheduler.ts); this path did not, and an
+    // unscored item cannot rank. That is the SAME drift, on the other side:
+    // `npm run ingest && npm run score` is the documented two-command
+    // sequence, so this was correct for a human typing both -- and silently
+    // wrong for anything that runs only the first, which is exactly what a
+    // scheduled one-shot does.
+    //
+    // Fixing both paths is the point. This file's own header says it
+    // "deliberately does NOT fork src/bin/scheduler.ts's logic"; two
+    // entrypoints that disagree about whether scoring is part of a cycle are
+    // that fork arriving by omission.
+    //
+    // Clustering first -- cluster size is a scoring input. See src/bin/score.ts.
+    const clusters = runClusteringPass(db, clusterConfig, report.finishedAt);
+    const scored = runScoringPass(db, { sources, interestProfile, config: scoringConfig }, report.finishedAt);
+    console.log(
+      `  scored: ${scored.itemsScored} item(s), ${scored.rowsWritten} row(s); ` +
+        `clusters: ${clusters.clustersCreated} created`,
+    );
+    if (scored.failures.length > 0) {
+      console.log(`  ${scored.failures.length} item(s) failed to score (every other item still scored)`);
+    }
     if (entities.scanned > 0 || entities.remaining > 0) {
       console.log(
         `  entities (ruleset ${entities.rulesetVersion}): scanned=${entities.scanned} ` +
