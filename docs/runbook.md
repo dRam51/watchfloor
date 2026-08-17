@@ -109,6 +109,31 @@ npm run dev:web
 
 Then `http://localhost:5173`. It prompts once for `WF_API_TOKEN` and holds it in memory only.
 
+### Installing it on a phone (PWA)
+
+Offline read requires a **production build** — the service worker is deliberately not registered in dev, or Vite's dev server and the cache fight each other.
+
+```bash
+npm run build:web && npm run preview:web
+```
+
+Reach it over Tailscale, then **Share → Add to Home Screen** on iOS, or the install prompt on Android/Chrome.
+
+What offline gives you: the app shell, plus the last successfully-fetched feed, entity graph, and header. It is **replay**, not background sync — the API token lives in memory for one tab only, so the service worker has no credential and never originates a request. It can only serve back what the app already fetched while online.
+
+Two consequences worth knowing:
+
+- **A reload clears the token** (deliberate — see `web/src/auth/AuthContext.tsx`). Offline, cached responses are served without one, so what you can read offline is whatever you loaded last.
+- **Cached feed content sits on disk** in the Cache API, readable on an unlocked device without the token. That is a real departure from §7.1's browser-storage ban, taken because M6 asks for offline read and there is no offline read without stored content. It is bounded to `GET` responses from `/api/feed`, `/api/entities*` and `/api/dashboard/header` — never `/api/items/`, never search, never source health. Bump `CACHE_VERSION` in `web/public/sw.js` to drop everything.
+
+The `Authorization` header is **never** written to storage: every cache entry is keyed by a bare URL request, with a test asserting the key carries no headers at all.
+
+Icons are generated, not hand-drawn:
+
+```bash
+node scripts/generate-icons.mjs
+```
+
 ---
 
 ## Backup and restore
