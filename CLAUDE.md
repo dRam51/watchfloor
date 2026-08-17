@@ -7,10 +7,26 @@ cybersecurity, AI security, notable AI GitHub repos, markets, and US national ne
 authority for every decision below. This file records only what has been *settled*
 outside it, plus the rules easiest to violate by accident.
 
-Status: **M0–M3, M4a, M5, M6 and M7 complete.** **3,613 tests / 159 files.**
+Status: **M0–M8 complete** (M4b deferred). **3,629 tests / 159 files.**
 31 sources, 17,252 items, 12,232 entity rows. **M4b (markets) is deferred, not skipped**: its
 entire input is `config/portfolio.yaml`, which only the owner can write, and its absence leaves
 three of §8.2's five bot tools reporting `not_configured`.
+
+> [!note] M8 — the desktop shell needs Rust, and it is installed
+> `rustup` + stable 1.97.1, **566 MB**, installed with `--no-modify-path` so no shell profile was
+> edited. `cargo` is not on `PATH` by default: run `. "$HOME/.cargo/env"` or add it yourself.
+> `npm run shell` (dev) and `npm run shell:build` (bundle) both need it.
+>
+> **The shell loads a URL; it does not bundle the frontend.** `WATCHFLOOR_URL` defaults to
+> `http://127.0.0.1:4173` (vite preview, NOT the API's 8787 — the API cannot serve HTML, see the
+> `vite preview` note below). Bundled assets would be served from `tauri://localhost`, breaking
+> the relative `/api/...` contract and forcing CORS onto Fastify for one client. **The webview
+> polls, not Rust**, so the bearer token never leaves the tab and Rust never sees a credential —
+> pinned by a test asserting `token` appears nowhere in `src-tauri/src/lib.rs`.
+>
+> **Three of §7.3's four notification triggers do not exist**: Juniper has no feed, NWS is
+> robots-blocked, 8-Ks need M4b. KEV and critical-CVE are what notify. The menu-bar market ribbon
+> has no data at all, so the tray shows the hard-override count instead.
 
 > [!note] M7 renders. The bug that hid it for a day was **React StrictMode**.
 > `load` never fired, so `ready` stayed false and every data layer was empty — while the globe
