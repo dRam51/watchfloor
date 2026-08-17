@@ -297,6 +297,31 @@ and reintroduces the error.
     npm test
     npm run check:portability
 
+## How it actually runs, day to day
+
+`io.dram51.watchfloor.cycle` — a launchd agent that runs **one cycle at 08:00, 13:00 and 19:00
+local, then exits.** Not a resident daemon: this is a laptop, and the daemon shape held ~170 MB
+resident all day and woke every 60 seconds. Measured before choosing.
+
+```bash
+node scripts/generate-service.mjs launchd-cycle > ~/Library/LaunchAgents/io.dram51.watchfloor.cycle.plist
+launchctl load ~/Library/LaunchAgents/io.dram51.watchfloor.cycle.plist
+launchctl start io.dram51.watchfloor.cycle   # run one now
+tail -f logs/cycle.log
+```
+
+**A cycle's cost is not one number**, and the first measurement was misleadingly small. A
+steady-state run with most sources not due is ~15 s. The first run after a gap is *minutes* —
+one measured **563 s**, ingesting 2,515 items and then clustering and scoring across a corpus
+that grew 14,055 → 16,570. `Nice 10` and `LowPriorityIO` are in the plist for that reason.
+
+`KeepAlive` is deliberately **absent**. Combined with `StartCalendarInterval` it means "restart
+it the moment it exits", which for a job whose whole purpose is to exit is an infinite loop —
+the most common way a scheduled launchd agent becomes a runaway.
+
+If the Mac is asleep at a scheduled hour, launchd runs the job **once** shortly after wake
+rather than queuing every missed occurrence.
+
 ## How to add a source
 
 Edit `config/sources.yaml` — never code. Fields and allowed values are documented
@@ -329,8 +354,40 @@ malformed `weight`, `beat`, or `poll_interval` fails at load, not at fetch time.
 
 ## Portability debt
 
+> [!warning] The repo lives at `~/Watchfloor`, and it CANNOT live under `~/Documents`
+> Moved there 2026-08-16 from `~/Documents/home-lab/watchfloor`, because **macOS TCC prevents a
+> launchd agent from reading or executing anything in `~/Documents`**. Nothing scheduled could
+> run. Measured directly, as a launchd agent:
+>
+> ```
+> stat:  works                    <- ls only needs directory metadata
+> read:  Operation not permitted  <- cannot read file CONTENTS
+> exec:  Operation not permitted  <- cannot run the script
+> ~/Library read: works
+> ```
+>
+> Two workarounds failed identically: relocating the log files out of Documents (`exit 78`
+> EX_CONFIG became `exit 126` permission denied), and putting a launcher in
+> `~/Library/Application Support` that execs into the repo — **the child is blocked too**.
+>
+> A first diagnosis was **wrong and is worth keeping**: an early probe ran `ls package.json`,
+> saw the path print, and concluded Documents was reachable. `ls` only *stats*. Reading and
+> executing both fail, and only a probe that reads file *contents* distinguishes them.
+>
+> `Desktop` and `Downloads` are protected the same way. Anywhere else in `$HOME` is fine.
+>
+> **Note the directory is `Watchfloor` with a capital W.** A `~/Watchfloor` entry already
+> existed, and on a case-insensitive filesystem the original casing wins regardless of what
+> `mv` is told. It is one directory with the repo directly inside — but a Linux host would
+> treat `~/watchfloor` and `~/Watchfloor` as two different paths, so use the capital.
+>
+> Nothing in the tree records this path: the zero-absolute-paths rule means the repo never knew
+> where it lived, so the move needed no code change at all. `scripts/generate-service.mjs`
+> resolves everything at generation time.
+
 **The frontend is served by `vite preview`, which Vite documents as not a production
-server.** Decided in M3 task 7 and **awaiting the owner's explicit sign-off** — recorded here
+server.** Decided in M3 task 7 and **signed off by the owner on 2026-08-16** for a single-user,
+loopback-bound, Tailscale-only deployment — recorded here
 because §12's migration runbook has to state what actually runs on the target host, and
 "whatever the dev machine happened to do" is not an answer.
 

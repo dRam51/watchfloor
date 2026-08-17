@@ -51,6 +51,16 @@ npm run check:portability
 
 ## Running it
 
+> [!warning] The repo must NOT live under `~/Documents`, `~/Desktop` or `~/Downloads`
+> macOS TCC prevents a launchd agent from reading or executing anything in those folders, so
+> **nothing scheduled can run from them**. It fails before your code does: `exit 78` (EX_CONFIG)
+> when it cannot open the log files, `exit 126` when it cannot exec the script, and **no log
+> output at all** either way.
+>
+> Diagnose it with a probe that reads file *contents*, not `ls` — `ls` only stats, and succeeds
+> even when reads and execs are refused. This repo lives at `~/Watchfloor` for exactly this
+> reason. See CLAUDE.md's portability-debt section for the full measurement.
+
 **On a laptop — a scheduled one-shot (recommended):**
 
 ```bash
@@ -58,7 +68,9 @@ node scripts/generate-service.mjs launchd-cycle > ~/Library/LaunchAgents/io.dram
 launchctl load ~/Library/LaunchAgents/io.dram51.watchfloor.cycle.plist
 ```
 
-Runs a full cycle at 08:00, 13:00 and 19:00 local, then **exits**. Nothing resident between runs, nothing on battery, no wakeups. Measured: **15s per run, 305 MB transient, 0 bytes resident afterwards** — against the daemon's 170 MB held all day.
+Runs a full cycle at 08:00, 13:00 and 19:00 local, then **exits**. Nothing resident between runs, nothing on battery, no wakeups — against the resident daemon's 170 MB held all day and a wakeup every 60 seconds.
+
+**A cycle's cost is not one number.** A steady-state run, most sources not due: **~15 s**, 305 MB transient, nothing resident afterwards. The first run after a gap: **minutes** — one measured **563 s**, ingesting 2,515 items and then clustering and scoring across a corpus that grew from 14,055 to 16,570. That is why the plist sets `Nice 10` and `LowPriorityIO`.
 
 If the Mac is asleep at a scheduled hour, launchd runs the job **once** shortly after wake rather than queuing every missed occurrence. A laptop shut all weekend does one catch-up cycle, not six.
 
@@ -163,7 +175,11 @@ The API boots against a restored file and serves the feed; this was exercised en
 
 ## The vault
 
-`WF_VAULT_ROOT` unset is the shipped default and a clean no-op. When set, it must point at a subtree Watchfloor **owns exclusively** — never a directory holding hand-written notes.
+`WF_VAULT_ROOT` unset is a clean no-op. When set, it must point at a subtree Watchfloor **owns exclusively** — never a directory holding hand-written notes.
+
+**On this machine it is live**, pointing at `Watchfloor Feed/` at the root of the iCloud Obsidian vault — deliberately a sibling of `01 Tech Projects/`, not inside it, because that directory holds twelve hand-authored project notes while `daily/` and `weekly/` are rewritten every run and `prune` is the one job permitted to delete. It writes **178 files**: 1 daily, 1 weekly, 176 entity notes.
+
+The safety layer would refuse those notes regardless — a path's first segment must be `daily`/`weekly`/`entities`/`saved`, so a bare filename is not an expressible request — but two independent reasons to be safe is the right number when the failure mode is destroying a knowledge base.
 
 ```bash
 npm run watchfloor -- vault verify    # read-only, reports and never repairs
@@ -183,7 +199,16 @@ Exit codes are a contract: `0` ran and is good, `1` could not run, `2` ran and f
 
 **The scheduler restart-loops under launchd.** Read `logs/scheduler.error.log`. Most likely a migration failed, which the wrapper deliberately treats as fatal rather than starting against a schema the code does not expect.
 
-**launchd agent does nothing.** launchd does **not** inherit a login shell's `PATH`; the generated plist sets it explicitly. If you hand-edited the plist, that is the first thing to check.
+**launchd agent does nothing.** Two causes, in order of likelihood.
+
+*The repo is in a protected folder.* `~/Documents`, `~/Desktop` and `~/Downloads` are TCC-protected, and a launchd agent cannot read or execute anything in them. Symptom: `exit 78` or `exit 126` with **empty log files**, because launchd fails before your script starts. Move the repo somewhere else in `$HOME` and regenerate the plist.
+
+*`PATH`.* launchd does **not** inherit a login shell's `PATH`; the generated plist sets it explicitly. If you hand-edited the plist, check that first.
+
+```bash
+launchctl list | grep watchfloor          # PID, and the last exit code
+launchctl print gui/$(id -u)/io.dram51.watchfloor.cycle   # the whole job as launchd sees it
+```
 
 **Nothing new appears in the dashboard.** Check `/api/sources` for `failing` — which is *enabled AND (an error streak OR stale)*. The second branch is the important one: a feed that last succeeded weeks ago with **zero** errors, because nothing is polling it, is the silent failure a naive check reports as healthy.
 
