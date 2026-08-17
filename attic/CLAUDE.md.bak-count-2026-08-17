@@ -39,7 +39,7 @@ three of §8.2's five bot tools reporting `not_configured`.
 > converts that column — and is also the only way to answer §7's acceptance question, which is
 > still open from M3: does it *read like a terminal rather than a content feed*.
 
-> [!important] The unowned seam is this project's characteristic defect. It has now happened **ten times**.
+> [!important] The unowned seam is this project's characteristic defect. It has now happened **seven times**.
 > Every instance is the same shape: a component that is correctly built, fully tested, and
 > **reachable from nothing**. `tsc` is clean, the suite is green, and the feature is inert.
 >
